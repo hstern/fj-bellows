@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -112,6 +113,210 @@ func TestReconcileRespectsMaxScale(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if prov.ProvisionCount() != 1 {
 		t.Errorf("ProvisionCount = %d, want 1 (max_scale=1)", prov.ProvisionCount())
+	}
+}
+
+// trackingProvider builds a mock provider whose List reports every instance it
+// has provisioned (plus any seeded adopted instances), mirroring a real provider
+// that returns the VMs it created. Each Provision hands out a distinct ID. This
+// lets a second Reconcile see the warm pool instead of treating it as vanished.
+func trackingProvider(seed ...provider.Instance) *pmock.Provider {
+	var mu sync.Mutex
+	var n int
+	live := append([]provider.Instance(nil), seed...)
+	p := &pmock.Provider{}
+	p.ProvisionFn = func(_ context.Context, _ provider.Spec) (provider.Instance, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		n++
+		inst := provider.Instance{
+			ID:        "vm-" + strconv.Itoa(n),
+			IPv4:      "10.0.0." + strconv.Itoa(n),
+			CreatedAt: time.Now(),
+		}
+		live = append(live, inst)
+		return inst, nil
+	}
+	p.ListFn = func(context.Context, string) ([]provider.Instance, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]provider.Instance(nil), live...), nil
+	}
+	return p
+}
+
+func nUbuntuJobs(n int) []forgejo.WaitingJob {
+	jobs := make([]forgejo.WaitingJob, 0, n)
+	for i := range n {
+		jobs = append(jobs, forgejo.WaitingJob{
+			Handle: "h" + strconv.Itoa(i),
+			Labels: []string{labelUbuntu},
+		})
+	}
+	return jobs
+}
+
+// TestReconcileScalesToMaxOnEmptyPool covers MaxScale=3 with an empty pool and
+// 3 serviceable jobs: exactly 3 provisions, never more across extra reconciles,
+// and the pool converges to 3 idle nodes.
+func TestReconcileScalesToMaxOnEmptyPool(t *testing.T) {
+	prov := trackingProvider()
+	jobs := &omock.JobSource{
+		WaitingJobsFn: func(context.Context) ([]forgejo.WaitingJob, error) {
+			return nUbuntuJobs(3), nil
+		},
+	}
+	cfg := baseConfig()
+	cfg.MaxScale = 3
+	o := New(cfg, prov, jobs, &omock.Dispatcher{}, nil)
+
+	o.Reconcile(context.Background())
+	waitFor(t, "pool reaches 3 idle nodes", func() bool {
+		return len(o.pool.ByState(StateIdle)) == 3
+	})
+
+	// Extra reconciles must not over-provision: the pool is full and the jobs
+	// are still "waiting" in the mock, but there is no idle headroom left.
+	o.Reconcile(context.Background())
+	o.Reconcile(context.Background())
+	time.Sleep(50 * time.Millisecond)
+
+	if prov.ProvisionCount() != 3 {
+		t.Errorf("ProvisionCount = %d, want 3 (max_scale=3)", prov.ProvisionCount())
+	}
+	if o.pool.Len() != 3 {
+		t.Errorf("pool.Len = %d, want 3", o.pool.Len())
+	}
+}
+
+// TestReconcileDispatchesToAllAdoptedIdle covers MaxScale=3 with 3 already-idle
+// adopted instances and 3 jobs: 3 dispatches, 0 provisions.
+func TestReconcileDispatchesToAllAdoptedIdle(t *testing.T) {
+	prov := trackingProvider(
+		provider.Instance{ID: "a", IPv4: "10.0.0.1", CreatedAt: time.Now()},
+		provider.Instance{ID: "b", IPv4: "10.0.0.2", CreatedAt: time.Now()},
+		provider.Instance{ID: "c", IPv4: "10.0.0.3", CreatedAt: time.Now()},
+	)
+	jobs := &omock.JobSource{
+		WaitingJobsFn: func(context.Context) ([]forgejo.WaitingJob, error) {
+			return nUbuntuJobs(3), nil
+		},
+	}
+	disp := &omock.Dispatcher{}
+	cfg := baseConfig()
+	cfg.MaxScale = 3
+	o := New(cfg, prov, jobs, disp, nil)
+
+	o.Reconcile(context.Background())
+	waitFor(t, "all three jobs dispatched", func() bool { return disp.RunCount() == 3 })
+	time.Sleep(50 * time.Millisecond)
+
+	if prov.ProvisionCount() != 0 {
+		t.Errorf("ProvisionCount = %d, want 0 (reuse warm nodes)", prov.ProvisionCount())
+	}
+	if disp.RunCount() != 3 {
+		t.Errorf("RunCount = %d, want 3", disp.RunCount())
+	}
+}
+
+// TestReconcileMixDispatchAndProvision covers MaxScale=3 with 1 idle node and 3
+// jobs: 1 dispatch reuses the warm node, 2 provisions cover the rest, and the
+// total never exceeds MaxScale.
+func TestReconcileMixDispatchAndProvision(t *testing.T) {
+	prov := trackingProvider(provider.Instance{ID: "warm", IPv4: "10.0.0.9", CreatedAt: time.Now()})
+	jobs := &omock.JobSource{
+		WaitingJobsFn: func(context.Context) ([]forgejo.WaitingJob, error) {
+			return nUbuntuJobs(3), nil
+		},
+	}
+	disp := &omock.Dispatcher{}
+	cfg := baseConfig()
+	cfg.MaxScale = 3
+	o := New(cfg, prov, jobs, disp, nil)
+
+	o.Reconcile(context.Background())
+	waitFor(t, "one dispatch and two provisions", func() bool {
+		return disp.RunCount() == 1 && prov.ProvisionCount() == 2
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	if disp.RunCount() != 1 {
+		t.Errorf("RunCount = %d, want 1", disp.RunCount())
+	}
+	if prov.ProvisionCount() != 2 {
+		t.Errorf("ProvisionCount = %d, want 2 (1 warm + 2 new = max 3)", prov.ProvisionCount())
+	}
+}
+
+// TestReconcileTearsDownAllDueIdleNodes covers that every idle node past its
+// kill mark is destroyed in a single reconcile, not just the first.
+func TestReconcileTearsDownAllDueIdleNodes(t *testing.T) {
+	created := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	prov := &pmock.Provider{
+		ListFn: func(context.Context, string) ([]provider.Instance, error) {
+			return []provider.Instance{
+				{ID: "x", CreatedAt: created},
+				{ID: "y", CreatedAt: created},
+				{ID: "z", CreatedAt: created},
+			}, nil
+		},
+	}
+	cfg := baseConfig()
+	cfg.MaxScale = 3
+	cfg.Teardown = TeardownPolicy{Model: provider.BillingHourlyRoundUp, HourMargin: 5 * time.Minute}
+	o := New(cfg, prov, &omock.JobSource{}, &omock.Dispatcher{}, nil)
+	o.now = func() time.Time { return created.Add(56 * time.Minute) }
+
+	o.Reconcile(context.Background())
+	waitFor(t, "all three idle nodes destroyed", func() bool { return prov.DestroyCount() == 3 })
+	waitFor(t, "pool drained", func() bool { return o.pool.Len() == 0 })
+}
+
+// TestPendingPreventsOverProvision covers the pending counter: with provisions
+// blocked in flight, a second reconcile must not exceed MaxScale because pending
+// is incremented synchronously before each provision goroutine starts.
+func TestPendingPreventsOverProvision(t *testing.T) {
+	release := make(chan struct{})
+	var inFlight, assigned atomic.Int32
+	prov := &pmock.Provider{
+		ProvisionFn: func(_ context.Context, _ provider.Spec) (provider.Instance, error) {
+			id := int(assigned.Add(1)) // distinct ID per call, taken before blocking
+			inFlight.Add(1)
+			<-release // block until the test releases all provisions
+			return provider.Instance{
+				ID:        "vm-" + strconv.Itoa(id),
+				IPv4:      "10.0.0." + strconv.Itoa(id),
+				CreatedAt: time.Now(),
+			}, nil
+		},
+	}
+	jobs := &omock.JobSource{
+		WaitingJobsFn: func(context.Context) ([]forgejo.WaitingJob, error) {
+			return nUbuntuJobs(3), nil
+		},
+	}
+	cfg := baseConfig()
+	cfg.MaxScale = 3
+	o := New(cfg, prov, jobs, &omock.Dispatcher{}, nil)
+
+	// First reconcile starts up to MaxScale provisions, all blocked in Provision.
+	o.Reconcile(context.Background())
+	waitFor(t, "three provisions in flight", func() bool { return inFlight.Load() == 3 })
+
+	// Second reconcile while provisions are blocked: pending == 3 leaves zero
+	// headroom, so no further provision must start.
+	o.Reconcile(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	if got := prov.ProvisionCount(); got != 3 {
+		t.Errorf("ProvisionCount = %d, want 3 (pending must cap concurrent reconciles)", got)
+	}
+
+	close(release) // unblock; let the goroutines finish so goleak stays clean
+	waitFor(t, "pool reaches 3 idle nodes", func() bool {
+		return len(o.pool.ByState(StateIdle)) == 3
+	})
+	if prov.ProvisionCount() != 3 {
+		t.Errorf("ProvisionCount = %d, want 3 after release", prov.ProvisionCount())
 	}
 }
 
