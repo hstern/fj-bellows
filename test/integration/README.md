@@ -25,34 +25,24 @@ on `main`.
 4. Builds `fj-bellows`, writes a `config.yaml` pointing at the service Forgejo
    with `provider: docker`, and launches `fj-bellows` in the background
    capturing stderr to `fj-bellows.log`.
-5. Runs `assert.sh`, which validates:
+5. Runs `assert.sh`, which validates the full happy path:
    - the orchestrator did NOT log "poll waiting jobs" decode errors (i.e. the
      types in `internal/forgejo/types.go` match the live API);
-   - the orchestrator acted on the queued job (a `provisioned` / `provision`
-     / `register ephemeral runner` line is present);
-   - a worker container with label `fj-bellows.tag=<tag>` was created.
+   - a worker container with label `fj-bellows.tag=<tag>` was provisioned;
+   - the orchestrator registered an ephemeral runner, dispatched the job via
+     `forgejo-runner one-job --handle`, and logged "job complete";
+   - the per-second billing idle timeout tore the worker down.
 6. Always (`if: always()`) cleans up containers, networks, and the orchestrator
    process; uploads `fj-bellows.log` and the Forgejo container log as run
    artifacts so future flakes are debuggable.
 
-## What it deliberately does NOT assert (yet)
+## Forgejo version
 
-`forgejo-runner one-job --handle` and the REST ephemeral-registration
-endpoint (`POST /actions/runners` returning `{uuid, token}`) are documented
-as **Forgejo 15+** features (see `forgejo-runner one-job --help` and the
-"This Forgejo instance does not support ephemeral runners; requires Forgejo
-15 or newer" error returned by `forgejo-runner register --ephemeral` against
-12.x). No released Forgejo provides them today, so:
-
-- The integration test does NOT poll the workflow run for completion — the
-  orchestrator's `RegisterEphemeral` call returns a "requires Forgejo >= 15"
-  error against current Forgejo, which is expected.
-- This validates the largest reliability-critical piece — that the live
-  `/actions/runners/jobs` response decodes against `types.go` — without
-  asserting on behavior that no released Forgejo supports yet.
-- When Forgejo 15 ships, the assert script should be extended to wait for
-  the workflow run to reach `success` and to remove the
-  "FORGEJO 15+ required" caveat below.
+The integration test runs against `codeberg.org/forgejo/forgejo:15`, which
+provides the ephemeral REST registration (`POST /actions/runners` returning
+`{uuid, token}`) and `forgejo-runner one-job --handle` that fj-bellows
+depends on. Against pre-v15 Forgejo, `RegisterEphemeral` returns a clear
+"requires Forgejo >= 15" diagnostic and the orchestrator no-ops.
 
 ## Local reproduction
 
