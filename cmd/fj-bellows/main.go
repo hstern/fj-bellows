@@ -24,6 +24,7 @@ import (
 	"github.com/hstern/fj-bellows/internal/provider"
 
 	// Register in-tree providers.
+	_ "github.com/hstern/fj-bellows/internal/provider/docker"
 	_ "github.com/hstern/fj-bellows/internal/provider/linode"
 )
 
