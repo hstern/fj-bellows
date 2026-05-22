@@ -78,28 +78,28 @@ func (m *JobSource) DeleteCount() int {
 
 // Dispatcher mocks orchestrator.Dispatcher.
 type Dispatcher struct {
-	WaitReadyFn func(ctx context.Context, ip string) error
-	RunJobFn    func(ctx context.Context, ip string, reg forgejo.Registration, job forgejo.WaitingJob) error
+	WaitReadyFn func(ctx context.Context, id, addr string) error
+	RunJobFn    func(ctx context.Context, id, addr string, reg forgejo.Registration, job forgejo.WaitingJob) error
 
 	mu       sync.Mutex
 	RunCalls []forgejo.WaitingJob
 }
 
 // WaitReady delegates to WaitReadyFn if set.
-func (m *Dispatcher) WaitReady(ctx context.Context, ip string) error {
+func (m *Dispatcher) WaitReady(ctx context.Context, id, addr string) error {
 	if m.WaitReadyFn != nil {
-		return m.WaitReadyFn(ctx, ip)
+		return m.WaitReadyFn(ctx, id, addr)
 	}
 	return nil
 }
 
 // RunJob records the job and delegates to RunJobFn if set.
-func (m *Dispatcher) RunJob(ctx context.Context, ip string, reg forgejo.Registration, job forgejo.WaitingJob) error {
+func (m *Dispatcher) RunJob(ctx context.Context, id, addr string, reg forgejo.Registration, job forgejo.WaitingJob) error {
 	m.mu.Lock()
 	m.RunCalls = append(m.RunCalls, job)
 	m.mu.Unlock()
 	if m.RunJobFn != nil {
-		return m.RunJobFn(ctx, ip, reg, job)
+		return m.RunJobFn(ctx, id, addr, reg, job)
 	}
 	return nil
 }

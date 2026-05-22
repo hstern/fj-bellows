@@ -302,7 +302,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 		}
 		o.addActive(reg.UUID)
 		defer o.removeActive(reg.UUID)
-		if err := o.disp.RunJob(ctx, node.IP, reg, job); err != nil {
+		if err := o.disp.RunJob(ctx, node.InstanceID, node.IP, reg, job); err != nil {
 			o.log.Error("run job", "handle", job.Handle, "ip", node.IP, "err", err)
 			return
 		}
@@ -371,7 +371,7 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 			pinner.PinHostKey(inst.IPv4, sshHostPub)
 		}
 
-		if err := o.disp.WaitReady(ctx, inst.IPv4); err != nil {
+		if err := o.disp.WaitReady(ctx, inst.ID, inst.IPv4); err != nil {
 			o.log.Error("worker readiness", "id", inst.ID, "err", err)
 			return // leave it; teardown/orphan sweep will reclaim it
 		}

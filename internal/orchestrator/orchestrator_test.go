@@ -439,7 +439,7 @@ func TestRunDrainsInFlightJob(t *testing.T) {
 	}
 	var startedOnce sync.Once
 	disp := &omock.Dispatcher{
-		RunJobFn: func(_ context.Context, _ string, _ forgejo.Registration, _ forgejo.WaitingJob) error {
+		RunJobFn: func(_ context.Context, _, _ string, _ forgejo.Registration, _ forgejo.WaitingJob) error {
 			startedOnce.Do(func() { close(started) })
 			<-release // block until the test releases (simulates a long job)
 			return nil
@@ -485,7 +485,7 @@ func TestRunInterruptsWhenNoDrain(t *testing.T) {
 	}
 	var startedOnce sync.Once
 	disp := &omock.Dispatcher{
-		RunJobFn: func(ctx context.Context, _ string, _ forgejo.Registration, _ forgejo.WaitingJob) error {
+		RunJobFn: func(ctx context.Context, _, _ string, _ forgejo.Registration, _ forgejo.WaitingJob) error {
 			startedOnce.Do(func() { close(started) })
 			<-ctx.Done() // respects cancellation, like the real SSH dispatcher
 			return ctx.Err()

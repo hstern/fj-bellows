@@ -59,9 +59,13 @@ VMs for a restarted daemon to readopt. In-flight goroutines are tracked with a
 ## Dispatch (`dispatch.go`)
 
 `Dispatcher` is an interface so the orchestrator is unit-testable without real
-SSH. `SSHDispatcher` connects in-process with `golang.org/x/crypto/ssh`, writes
-the one-shot token via stdin (never the command line), and runs
-`forgejo-runner one-job ... --wait` to completion.
+SSH **and so the dispatch mechanism can be selected per provider**. Its methods
+take both the worker's provider `id` and its network `addr`: SSH dispatch uses
+`addr`, while a mechanism like docker exec uses `id`. `SSHDispatcher` connects
+in-process with `golang.org/x/crypto/ssh`, writes the one-shot token via stdin
+(never the command line), and runs `forgejo-runner one-job ... --wait` to
+completion. The composition root (`cmd/fj-bellows`) injects the dispatcher, so a
+provider whose workers aren't reached over SSH supplies a different one.
 
 Host keys are verified with **trust-on-first-use (TOFU) per-VM pinning**: fresh
 per-hour VMs have no pre-known host key, so the first successful handshake to an

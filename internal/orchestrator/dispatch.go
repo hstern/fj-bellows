@@ -16,15 +16,18 @@ import (
 	"github.com/hstern/fj-bellows/internal/forgejo"
 )
 
-// Dispatcher delivers a single ephemeral job to a worker VM. It is an interface
-// so the orchestrator can be unit-tested without real SSH.
+// Dispatcher delivers a single ephemeral job to a worker. It is an interface so
+// the orchestrator can be unit-tested without real SSH, and so the dispatch
+// mechanism (SSH, docker exec, ...) can be selected per provider. A worker is
+// identified by both its provider id and its network addr; SSH dispatch uses
+// addr, while a mechanism like docker exec uses id.
 type Dispatcher interface {
-	// WaitReady blocks until the worker at ip has finished cloud-init, or the
+	// WaitReady blocks until the worker has finished bootstrapping, or the
 	// context/timeout expires.
-	WaitReady(ctx context.Context, ip string) error
-	// RunJob writes the one-shot token to the worker and runs forgejo-runner
+	WaitReady(ctx context.Context, id, addr string) error
+	// RunJob delivers the one-shot token to the worker and runs forgejo-runner
 	// one-job for the given waiting job, blocking until it completes.
-	RunJob(ctx context.Context, ip string, reg forgejo.Registration, job forgejo.WaitingJob) error
+	RunJob(ctx context.Context, id, addr string, reg forgejo.Registration, job forgejo.WaitingJob) error
 }
 
 // HostKeyPinner is an optional Dispatcher capability: the orchestrator can
@@ -69,14 +72,14 @@ func (d *SSHDispatcher) PinHostKey(ip string, key ssh.PublicKey) {
 }
 
 // WaitReady polls SSH until the readiness sentinel exists.
-func (d *SSHDispatcher) WaitReady(ctx context.Context, ip string) error {
+func (d *SSHDispatcher) WaitReady(ctx context.Context, _, addr string) error {
 	deadline := time.Now().Add(d.ReadyWait)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		client, err := d.dial(ctx, ip)
+		client, err := d.dial(ctx, addr)
 		if err != nil {
 			lastErr = err
 		} else {
@@ -93,12 +96,12 @@ func (d *SSHDispatcher) WaitReady(ctx context.Context, ip string) error {
 		case <-time.After(5 * time.Second):
 		}
 	}
-	return fmt.Errorf("worker %s not ready within %s: %w", ip, d.ReadyWait, lastErr)
+	return fmt.Errorf("worker %s not ready within %s: %w", addr, d.ReadyWait, lastErr)
 }
 
 // RunJob delivers the token and runs one-job to completion.
-func (d *SSHDispatcher) RunJob(ctx context.Context, ip string, reg forgejo.Registration, job forgejo.WaitingJob) error {
-	client, err := d.dial(ctx, ip)
+func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.Registration, job forgejo.WaitingJob) error {
+	client, err := d.dial(ctx, addr)
 	if err != nil {
 		return err
 	}
