@@ -76,14 +76,22 @@ The reconcile loop is the **single writer of provisioning decisions**. A process
 
 ## Job dispatch
 
-The orchestrator holds the admin token; the worker VM never does. Per job it
-registers an ephemeral runner, then over SSH (in-process `x/crypto/ssh`) writes
-the one-shot token via stdin and runs:
+The orchestrator holds the admin token; the worker never does. Per job it
+registers an ephemeral runner, delivers the one-shot token via stdin (never
+argv), and runs:
 
 ```
 forgejo-runner one-job --url <inst> --uuid <uuid> --token-url file:/tmp/tok \
   --label <labels> --handle <handle> --wait
 ```
+
+Dispatch is behind a **mechanism-agnostic `Dispatcher` interface** taking
+`(id, addr)`, selected per provider in the composition root. The default SSH
+dispatcher (in-process `x/crypto/ssh`) uses `addr`; a docker-exec dispatcher
+uses `id`. For SSH, host-key verification is **deterministic**: the orchestrator
+generates a per-VM ed25519 host key, injects the private half via cloud-init,
+and pre-pins the public half, so the first dial is already verified (with TOFU
+pinning as a fallback when no key is seeded).
 
 `one-job` is the only ephemeral-capable command. Within-hour VM reuse weakens
 job→job isolation, which is acceptable for trusted single-tenant CI.
@@ -99,7 +107,8 @@ carries no credentials.
 - **M1** — poll, provision one VM, ephemeral `one-job`, destroy on idle.
 - **M2** — warm-hold + `:55` billing-hour teardown.
 - **M3** — orphan sweep, three-source reconcile (jobs + runners + instances)
-  with crash recovery, graceful shutdown drain, scale-to-N.
+  with crash recovery, graceful shutdown drain, scale-to-N, deterministic
+  host-key verification, and provider-selectable dispatch.
 
 ## Prior art
 

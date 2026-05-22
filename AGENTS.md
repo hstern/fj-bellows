@@ -35,8 +35,9 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   dependency. See `internal/provider/mock` and `internal/orchestrator/mock`.
 - **No secrets or deployment specifics in the repo.** No real hostnames, account
   identifiers, usernames, tokens, regions tied to an account, or homelab
-  details — in code, tests, docs, or examples. Use generic placeholders. The
-  Docker image name in CI comes from a secret, not a committed string.
+  details — in code, tests, docs, or examples. Use generic placeholders. CI
+  image names derive from `github.repository` (ghcr) and a secret (Docker Hub),
+  not a committed account string.
 - Standard library `log/slog` for logging; no logging framework.
 
 ## Architecture invariants (don't break these)
@@ -55,7 +56,12 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
 - **The core never knows provider-specific config.** `provider_config` is an
   opaque `yaml.Node` decoded by the chosen provider (deferred decode).
 - **Worker VMs never hold an admin token.** The orchestrator mints the ephemeral
-  registration and delivers the one-shot token over SSH at dispatch time.
+  registration and delivers the one-shot token at dispatch time.
+- **Dispatch is mechanism-agnostic and selected per provider.** The `Dispatcher`
+  interface takes `(id, addr)`; SSH uses `addr`, a docker-exec dispatcher uses
+  `id`. The composition root (`cmd/fj-bellows`) injects it. SSH host keys are
+  verified via a per-VM key injected through cloud-init and pre-pinned (with TOFU
+  fallback) — don't regress to ignoring host keys.
 - **Scale-to-N architecture; do not hardcode the single-VM assumption.**
   `scale.max` bounds it (default 1).
 - **A deployment owns instances solely by `cfg.Tag`.** `provider.List(tag)` is
@@ -63,14 +69,13 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   one cloud account MUST use distinct tags or they destroy each other's VMs; the
   daemon warns when the default tag (`config.DefaultTag`) is used.
 
-## Known limitations
+## Known limitations / open work
 
-- **SSH host keys are not verified** (`internal/orchestrator/dispatch.go`,
-  `hostKeyCallback`). Fresh per-hour VMs have no pre-known host key; the dispatch
-  connection is exposed to a MITM that could capture the one-shot ephemeral
-  token. Hardening path: inject a known host key via cloud-init, or per-VM TOFU
-  pinning. Don't "fix" this by silently changing the policy — it's a deliberate,
-  documented trade-off.
+- **Local Docker provider is blocked on issue #15** — the Docker Go SDK trips
+  govulncheck (GO-2026-4887, unfixable) and pulls a heavy dep tree. Draft in
+  PR #14; decision (CLI shell-out / build-tag / suppress) pending.
+- **Concurrent jobs per VM** (capacity-N daemon mode) is a deliberate non-goal
+  for now — tracked in issue #13. Default stays ephemeral one-job-per-VM.
 
 ## Config & secrets
 
