@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -32,25 +31,45 @@ func main() {
 	configPath := flag.String("config", "/etc/fj-bellows/config.yaml", "path to config file")
 	lockPath := flag.String("lock", "/run/fj-bellows.lock", "singleton lock file")
 	runnerVersion := flag.String("runner-version", "12.10.1", "forgejo-runner version to install on workers")
+	drain := flag.Bool("drain", true, "on shutdown, let in-flight jobs finish instead of interrupting them")
+	drainTimeout := flag.Duration("drain-timeout", 0, "max time to wait for in-flight jobs when draining (0 = wait indefinitely)")
+	destroyOnExit := flag.Bool("destroy-on-exit", false, "destroy all owned VMs on shutdown (for a permanent stop)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if err := run(*configPath, *lockPath, *runnerVersion, log); err != nil {
+	opts := runOpts{
+		configPath:    *configPath,
+		lockPath:      *lockPath,
+		runnerVersion: *runnerVersion,
+		drain:         *drain,
+		drainTimeout:  *drainTimeout,
+		destroyOnExit: *destroyOnExit,
+	}
+	if err := run(opts, log); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(configPath, lockPath, runnerVersion string, log *slog.Logger) error {
-	cfg, err := config.Load(configPath)
+type runOpts struct {
+	configPath    string
+	lockPath      string
+	runnerVersion string
+	drain         bool
+	drainTimeout  time.Duration
+	destroyOnExit bool
+}
+
+func run(opts runOpts, log *slog.Logger) error {
+	cfg, err := config.Load(opts.configPath)
 	if err != nil {
 		return err
 	}
 
 	// config.yaml and the SSH key hold secrets; warn if other users can read
 	// them. The Forgejo admin token rides in a header, so warn on plaintext URLs.
-	warnLoosePerms(log, configPath)
+	warnLoosePerms(log, opts.configPath)
 	warnLoosePerms(log, cfg.SSH.PrivateKeyFile)
 	if !strings.HasPrefix(strings.ToLower(cfg.Forgejo.URL), "https://") {
 		log.Warn("forgejo.url is not https; the admin token will be sent in plaintext", "url", cfg.Forgejo.URL)
@@ -62,9 +81,9 @@ func run(configPath, lockPath, runnerVersion string, log *slog.Logger) error {
 	}
 
 	// Singleton lock: only one daemon may make provisioning decisions.
-	release, err := acquireLock(lockPath)
+	release, err := acquireLock(opts.lockPath)
 	if err != nil {
-		return fmt.Errorf("acquire singleton lock %s: %w", lockPath, err)
+		return fmt.Errorf("acquire singleton lock %s: %w", opts.lockPath, err)
 	}
 	defer release()
 
@@ -90,7 +109,7 @@ func run(configPath, lockPath, runnerVersion string, log *slog.Logger) error {
 		MaxScale:      cfg.Scale.Max,
 		Labels:        cfg.Forgejo.Labels,
 		PollInterval:  cfg.Poll.Interval.D(),
-		RunnerVersion: runnerVersion,
+		RunnerVersion: opts.runnerVersion,
 		ReadyFile:     bootstrap.DefaultReadyFile,
 		AuthorizedKey: authKey,
 		Teardown: orchestrator.TeardownPolicy{
@@ -98,6 +117,9 @@ func run(configPath, lockPath, runnerVersion string, log *slog.Logger) error {
 			IdleTimeout: cfg.Poll.IdleTimeout.D(),
 			HourMargin:  cfg.Poll.HourMargin.D(),
 		},
+		DrainOnShutdown: opts.drain,
+		DrainTimeout:    opts.drainTimeout,
+		DestroyOnExit:   opts.destroyOnExit,
 	}, prov, fj, dispatcher, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -109,12 +131,7 @@ func run(configPath, lockPath, runnerVersion string, log *slog.Logger) error {
 		"max_scale", cfg.Scale.Max,
 		"poll", cfg.Poll.Interval.D().String(),
 	)
-	err = orch.Run(ctx)
-	if errors.Is(err, context.Canceled) {
-		log.Info("shutting down")
-		return nil
-	}
-	return err
+	return orch.Run(ctx)
 }
 
 // sshDispatcherFrom builds the SSH dispatcher from config.

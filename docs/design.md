@@ -98,8 +98,8 @@ carries no credentials.
 
 - **M1** — poll, provision one VM, ephemeral `one-job`, destroy on idle.
 - **M2** — warm-hold + `:55` billing-hour teardown.
-- **M3** — orphan sweep, three-source reconcile with crash recovery,
-  scale-to-N.
+- **M3** — orphan sweep, three-source reconcile (jobs + runners + instances)
+  with crash recovery, graceful shutdown drain, scale-to-N.
 
 ## Prior art
 
