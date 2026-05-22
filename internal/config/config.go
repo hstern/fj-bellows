@@ -96,9 +96,15 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
+// DefaultTag is the instance tag used when none is configured. Because the tag
+// is the *only* thing scoping which cloud instances a deployment owns, two
+// deployments sharing this default against the same cloud account would adopt
+// and destroy each other's VMs. Set a unique tag per deployment.
+const DefaultTag = "fj-bellows"
+
 func (c *Config) applyDefaults() {
 	if c.Tag == "" {
-		c.Tag = "fj-bellows"
+		c.Tag = DefaultTag
 	}
 	if c.Scale.Max == 0 {
 		c.Scale.Max = 1

@@ -16,6 +16,12 @@ forgejo:
   labels:
     - ubuntu-latest
 
+# Tag stamped on every instance this deployment owns. It is the ONLY thing
+# scoping ownership: set a UNIQUE tag per deployment if several fj-bellows run
+# against the same cloud account, or they will destroy each other's VMs.
+# Defaults to "fj-bellows" (the daemon warns when the default is used).
+tag: fj-bellows
+
 scale:
   # Maximum number of warm worker VMs. (Architecture supports N; pin to 1 to
   # start.)

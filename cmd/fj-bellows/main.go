@@ -55,6 +55,11 @@ func run(configPath, lockPath, runnerVersion string, log *slog.Logger) error {
 	if !strings.HasPrefix(strings.ToLower(cfg.Forgejo.URL), "https://") {
 		log.Warn("forgejo.url is not https; the admin token will be sent in plaintext", "url", cfg.Forgejo.URL)
 	}
+	if cfg.Tag == config.DefaultTag {
+		log.Warn("using the default instance tag; set a unique 'tag' per deployment, "+
+			"or multiple fj-bellows deployments on the same cloud account will adopt and destroy each other's VMs",
+			"tag", cfg.Tag)
+	}
 
 	// Singleton lock: only one daemon may make provisioning decisions.
 	release, err := acquireLock(lockPath)

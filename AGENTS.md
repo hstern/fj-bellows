@@ -58,6 +58,10 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   registration and delivers the one-shot token over SSH at dispatch time.
 - **Scale-to-N architecture; do not hardcode the single-VM assumption.**
   `scale.max` bounds it (default 1).
+- **A deployment owns instances solely by `cfg.Tag`.** `provider.List(tag)` is
+  the entire world the reconcile/orphan-sweep acts on. Multiple deployments on
+  one cloud account MUST use distinct tags or they destroy each other's VMs; the
+  daemon warns when the default tag (`config.DefaultTag`) is used.
 
 ## Known limitations
 

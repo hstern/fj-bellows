@@ -85,6 +85,17 @@ environment variable named in `provider_config.token_env`.
 | `internal/bootstrap` | cloud-init worker bootstrap template |
 | `internal/orchestrator` | pool, state machine, reconcile, teardown, dispatch |
 
+## Running multiple deployments
+
+fj-bellows decides which cloud instances it owns **solely by a tag** (`tag:` in
+config, default `fj-bellows`): it only ever lists, adopts, or destroys instances
+carrying that tag, so unrelated instances in the same cloud account are never
+touched. But if you run more than one fj-bellows against the **same cloud
+account**, you must give each a **distinct `tag`** — two deployments sharing a
+tag will see each other's VMs and tear them down. The singleton lock only
+prevents duplicate copies of one deployment on one host; it does not coordinate
+across deployments. The daemon warns at startup if the default tag is in use.
+
 ## Security notes
 
 - **config.yaml holds secrets** (Forgejo + provider tokens). Keep it `chmod 600`;
