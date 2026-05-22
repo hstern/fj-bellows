@@ -140,7 +140,9 @@ func (c *Config) validate() error {
 	if c.Provider == "" {
 		missing = append(missing, "provider")
 	}
-	if c.SSH.PrivateKeyFile == "" {
+	// The SSH key is only needed for SSH-dispatched providers. The docker
+	// provider drives workers via `docker exec`, so it needs no SSH key.
+	if c.Provider != "docker" && c.SSH.PrivateKeyFile == "" {
 		missing = append(missing, "ssh.private_key_file")
 	}
 	if len(missing) > 0 {

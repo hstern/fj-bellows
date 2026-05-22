@@ -22,6 +22,7 @@ import (
 	"github.com/hstern/fj-bellows/internal/forgejo"
 	"github.com/hstern/fj-bellows/internal/orchestrator"
 	"github.com/hstern/fj-bellows/internal/provider"
+	"github.com/hstern/fj-bellows/internal/provider/docker"
 
 	// Register in-tree providers.
 	_ "github.com/hstern/fj-bellows/internal/provider/linode"
@@ -87,11 +88,6 @@ func run(opts runOpts, log *slog.Logger) error {
 	}
 	defer release()
 
-	signer, authKey, err := loadSSHKey(cfg.SSH.PrivateKeyFile)
-	if err != nil {
-		return err
-	}
-
 	prov, err := provider.New(cfg.Provider)
 	if err != nil {
 		return err
@@ -102,7 +98,26 @@ func run(opts runOpts, log *slog.Logger) error {
 
 	fj := forgejo.New(cfg.Forgejo.URL, cfg.Forgejo.Scope, cfg.Forgejo.Token)
 
-	dispatcher := sshDispatcherFrom(cfg, signer)
+	// Select the dispatch mechanism by provider. The docker provider is driven
+	// via `docker exec` and needs no SSH key or injected authorized_keys; every
+	// other provider uses SSH, which loads the operator's key.
+	var (
+		dispatcher orchestrator.Dispatcher
+		authKey    string
+	)
+	if cfg.Provider == "docker" {
+		dispatcher, err = docker.NewExecDispatcherFromEnv(cfg.Forgejo.URL, cfg.Forgejo.Labels, 5*time.Minute)
+		if err != nil {
+			return err
+		}
+	} else {
+		signer, key, kerr := loadSSHKey(cfg.SSH.PrivateKeyFile)
+		if kerr != nil {
+			return kerr
+		}
+		authKey = key
+		dispatcher = sshDispatcherFrom(cfg, signer)
+	}
 
 	orch := orchestrator.New(orchestrator.Config{
 		Tag:           cfg.Tag,
