@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -214,6 +215,115 @@ func TestReapSkipsActiveRunner(t *testing.T) {
 	o.Reconcile(context.Background())
 	if jobs.DeleteCount() != 0 {
 		t.Errorf("reaped an active runner: %v", jobs.DeleteCalls)
+	}
+}
+
+func TestRunDrainsInFlightJob(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	prov := &pmock.Provider{
+		ListFn: func(context.Context, string) ([]provider.Instance, error) {
+			return []provider.Instance{{ID: "1", IPv4: "10.0.0.5", CreatedAt: time.Now()}}, nil
+		},
+	}
+	jobs := &omock.JobSource{
+		WaitingJobsFn: func(context.Context) ([]forgejo.WaitingJob, error) {
+			return []forgejo.WaitingJob{{Handle: "h1", Labels: []string{labelUbuntu}}}, nil
+		},
+	}
+	var startedOnce sync.Once
+	disp := &omock.Dispatcher{
+		RunJobFn: func(_ context.Context, _ string, _ forgejo.Registration, _ forgejo.WaitingJob) error {
+			startedOnce.Do(func() { close(started) })
+			<-release // block until the test releases (simulates a long job)
+			return nil
+		},
+	}
+	cfg := baseConfig()
+	cfg.PollInterval = 10 * time.Millisecond
+	cfg.DrainOnShutdown = true
+	o := New(cfg, prov, jobs, disp, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() { _ = o.Run(ctx); close(runDone) }()
+
+	<-started // a job is in flight
+	cancel()  // signal shutdown
+
+	select {
+	case <-runDone:
+		t.Fatal("Run returned before the in-flight job finished (did not drain)")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release) // let the job finish
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after the job drained")
+	}
+}
+
+func TestRunInterruptsWhenNoDrain(t *testing.T) {
+	started := make(chan struct{})
+	prov := &pmock.Provider{
+		ListFn: func(context.Context, string) ([]provider.Instance, error) {
+			return []provider.Instance{{ID: "1", IPv4: "10.0.0.5", CreatedAt: time.Now()}}, nil
+		},
+	}
+	jobs := &omock.JobSource{
+		WaitingJobsFn: func(context.Context) ([]forgejo.WaitingJob, error) {
+			return []forgejo.WaitingJob{{Handle: "h1", Labels: []string{labelUbuntu}}}, nil
+		},
+	}
+	var startedOnce sync.Once
+	disp := &omock.Dispatcher{
+		RunJobFn: func(ctx context.Context, _ string, _ forgejo.Registration, _ forgejo.WaitingJob) error {
+			startedOnce.Do(func() { close(started) })
+			<-ctx.Done() // respects cancellation, like the real SSH dispatcher
+			return ctx.Err()
+		},
+	}
+	cfg := baseConfig()
+	cfg.PollInterval = 10 * time.Millisecond
+	cfg.DrainOnShutdown = false
+	o := New(cfg, prov, jobs, disp, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() { _ = o.Run(ctx); close(runDone) }()
+
+	<-started
+	cancel() // interrupt immediately
+
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return promptly when interrupting in-flight jobs")
+	}
+}
+
+func TestRunDestroyOnExit(t *testing.T) {
+	prov := &pmock.Provider{
+		ListFn: func(context.Context, string) ([]provider.Instance, error) {
+			return []provider.Instance{{ID: "1", CreatedAt: time.Now()}}, nil
+		},
+	}
+	cfg := baseConfig()
+	cfg.PollInterval = 10 * time.Millisecond
+	cfg.DestroyOnExit = true
+	o := New(cfg, prov, &omock.JobSource{}, &omock.Dispatcher{}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() { _ = o.Run(ctx); close(runDone) }()
+
+	waitFor(t, "instance adopted", func() bool { return o.pool.Len() == 1 })
+	cancel()
+	<-runDone
+	if prov.DestroyCount() != 1 {
+		t.Errorf("DestroyCount = %d, want 1 (destroy-on-exit)", prov.DestroyCount())
 	}
 }
 

@@ -46,6 +46,16 @@ dispatch/teardown goroutines mutate only their own node's state.
   `created + (completedHours+1)*hour - HourMargin` (the `:55` rule). Timers are
   **derived from `CreatedAt` each tick**, not stored, so they survive restarts.
 
+## Shutdown
+
+Jobs run under a context independent of the shutdown signal, so `Run` can choose
+how to stop. With `DrainOnShutdown` (default) it stops scheduling and waits for
+in-flight goroutines to finish (bounded by `DrainTimeout`, `0` = wait
+indefinitely); otherwise it cancels the job context to interrupt them. With
+`DestroyOnExit` it tears down all owned VMs on the way out — default leaves warm
+VMs for a restarted daemon to readopt. In-flight goroutines are tracked with a
+`WaitGroup` (`wg.Go`).
+
 ## Dispatch (`dispatch.go`)
 
 `Dispatcher` is an interface so the orchestrator is unit-testable without real

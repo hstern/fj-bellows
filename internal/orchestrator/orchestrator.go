@@ -39,6 +39,16 @@ type Config struct {
 	ReadyFile     string
 	Teardown      TeardownPolicy
 	AuthorizedKey string
+
+	// DrainOnShutdown lets in-flight jobs finish on shutdown instead of being
+	// interrupted immediately.
+	DrainOnShutdown bool
+	// DrainTimeout bounds how long to wait for in-flight jobs when draining;
+	// 0 waits indefinitely (rely on the supervisor's stop timeout).
+	DrainTimeout time.Duration
+	// DestroyOnExit tears down all owned VMs on shutdown. Default false leaves
+	// warm VMs for a restarted daemon to readopt; set true for a permanent stop.
+	DestroyOnExit bool
 }
 
 // Orchestrator wires the pool, provider, job source, and dispatcher together.
@@ -49,6 +59,8 @@ type Orchestrator struct {
 	disp Dispatcher
 	pool *Pool
 	log  *slog.Logger
+
+	wg sync.WaitGroup // tracks in-flight dispatch/provision/teardown goroutines
 
 	mu          sync.Mutex
 	pending     int                 // in-flight provisions not yet in the pool
@@ -85,18 +97,71 @@ func New(cfg Config, prov provider.Provider, jobs JobSource, disp Dispatcher, lo
 	}
 }
 
-// Run reconciles on each tick until ctx is cancelled.
+// Run reconciles on each tick until ctx (the shutdown signal) is cancelled,
+// then drains in-flight work. Jobs run under an independent context so a
+// shutdown can choose to let them finish (drain) rather than interrupt them.
 func (o *Orchestrator) Run(ctx context.Context) error {
+	jobCtx, cancelJobs := context.WithCancel(context.Background())
+	defer cancelJobs()
+
 	t := time.NewTicker(o.cfg.PollInterval)
 	defer t.Stop()
-	o.Reconcile(ctx)
+	o.Reconcile(jobCtx)
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			o.shutdown(cancelJobs)
+			return nil
 		case <-t.C:
-			o.Reconcile(ctx)
+			o.Reconcile(jobCtx)
 		}
+	}
+}
+
+// shutdown stops scheduling new work and waits for in-flight goroutines. With
+// DrainOnShutdown it lets running jobs finish (bounded by DrainTimeout, 0 =
+// indefinitely); otherwise it interrupts them immediately. Optionally destroys
+// owned VMs on exit.
+func (o *Orchestrator) shutdown(cancelJobs context.CancelFunc) {
+	if !o.cfg.DrainOnShutdown {
+		o.log.Info("shutting down; interrupting in-flight jobs")
+		cancelJobs()
+	} else {
+		o.log.Info("shutting down; draining in-flight jobs", "timeout", o.cfg.DrainTimeout.String())
+	}
+
+	done := make(chan struct{})
+	go func() { o.wg.Wait(); close(done) }()
+
+	if o.cfg.DrainOnShutdown && o.cfg.DrainTimeout > 0 {
+		select {
+		case <-done:
+		case <-time.After(o.cfg.DrainTimeout):
+			o.log.Warn("drain timeout reached; interrupting remaining jobs")
+			cancelJobs()
+			<-done
+		}
+	} else {
+		<-done
+	}
+
+	if o.cfg.DestroyOnExit {
+		o.destroyAll()
+	}
+}
+
+// destroyAll tears down every instance currently in the pool, using a fresh
+// bounded context since the job context is already cancelled by shutdown.
+func (o *Orchestrator) destroyAll() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	for _, n := range o.pool.Snapshot() {
+		if err := o.prov.Destroy(ctx, n.InstanceID); err != nil {
+			o.log.Error("destroy on exit", "id", n.InstanceID, "err", err)
+			continue
+		}
+		o.pool.Delete(n.InstanceID)
+		o.log.Info("destroyed on exit", "id", n.InstanceID)
 	}
 }
 
@@ -218,7 +283,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 		return
 	}
 	o.pool.SetState(node.InstanceID, StateBusy)
-	go func() {
+	o.wg.Go(func() {
 		defer func() {
 			o.pool.SetState(node.InstanceID, StateIdle)
 			o.pool.Touch(node.InstanceID, o.now())
@@ -237,7 +302,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 			return
 		}
 		o.log.Info("job complete", "handle", job.Handle, "ip", node.IP)
-	}()
+	})
 }
 
 // provisionOne creates a VM, adds it as Provisioning, waits for readiness, then
@@ -245,7 +310,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 // reconciles do not over-provision.
 func (o *Orchestrator) provisionOne(ctx context.Context) {
 	o.incPending()
-	go func() {
+	o.wg.Go(func() {
 		userData, err := bootstrap.Render(bootstrap.Params{
 			RunnerVersion: o.cfg.RunnerVersion,
 			ReadyFile:     o.cfg.ReadyFile,
@@ -284,7 +349,7 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 		}
 		o.pool.SetState(inst.ID, StateIdle)
 		o.log.Info("worker ready", "id", inst.ID)
-	}()
+	})
 }
 
 // applyTeardown destroys idle nodes the billing policy says are due.
@@ -298,7 +363,7 @@ func (o *Orchestrator) applyTeardown(ctx context.Context) {
 			continue
 		}
 		id := n.InstanceID
-		go func() {
+		o.wg.Go(func() {
 			if err := o.prov.Destroy(ctx, id); err != nil {
 				o.log.Error("destroy", "id", id, "err", err)
 				o.pool.SetState(id, StateIdle) // retry next tick
@@ -306,7 +371,7 @@ func (o *Orchestrator) applyTeardown(ctx context.Context) {
 			}
 			o.pool.Delete(id)
 			o.log.Info("destroyed idle node", "id", id)
-		}()
+		})
 	}
 }
 
