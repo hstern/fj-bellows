@@ -49,6 +49,172 @@ jobs:
         with:
           version: v2.12.1
 
+  # End-to-end integration: build the worker image, bring up Forgejo, seed it,
+  # launch fj-bellows, and assert it polls the live job queue without decode
+  # errors and provisions a worker container. Adding this to branch-protection
+  # required checks is intentionally out of scope for this PR.
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      # Pinned Forgejo tag for reproducibility. The install lock is set so the
+      # container starts already installed (skipping the web wizard). Action
+      # runs are enabled so workflow files trigger queued jobs.
+      forgejo:
+        image: codeberg.org/forgejo/forgejo:12.0.4
+        ports:
+          - 3000:3000
+        env:
+          FORGEJO__security__INSTALL_LOCK: "true"
+          FORGEJO__server__ROOT_URL: "http://localhost:3000/"
+          FORGEJO__server__HTTP_PORT: "3000"
+          FORGEJO__server__DOMAIN: "localhost"
+          FORGEJO__actions__ENABLED: "true"
+    env:
+      FORGEJO_URL: http://localhost:3000
+      FORGEJO_ADMIN_USER: bellows
+      FORGEJO_ADMIN_PASS: adminpass1
+      FORGEJO_ADMIN_EMAIL: admin@example.com
+      FORGEJO_ORG: bellowsorg
+      FORGEJO_REPO: demo
+      FORGEJO_LABEL: docker
+      FJBELLOWS_TAG: fjb-integ-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build fj-bellows
+        run: go build -o fj-bellows ./cmd/fj-bellows
+
+      - name: Build worker image
+        run: docker build -t fj-bellows-worker:test test/integration/worker
+
+      - name: Identify Forgejo service container
+        id: forgejo
+        # Find the service-container ID/name/network. We need:
+        #   - the container name, to run `forgejo admin user create` via exec
+        #   - the container's IP on the runner's docker network, because the
+        #     worker containers we launch via `docker run` cannot reach the
+        #     Forgejo service via the host port — they must address it on the
+        #     bridge network the GitHub Actions runner sets up for services.
+        # The service container's name is auto-generated; we filter for the
+        # image we pinned above to avoid hardcoding it.
+        run: |
+          set -euo pipefail
+          cid=$(docker ps --filter ancestor=codeberg.org/forgejo/forgejo:12.0.4 -q | head -n1)
+          if [ -z "$cid" ]; then
+            echo "ERROR: forgejo service container not found"; docker ps -a; exit 1
+          fi
+          cname=$(docker inspect -f '{{.Name}}' "$cid" | sed 's|^/||')
+          # The service container is attached to a docker network shared with
+          # the job container; find it (skip "bridge"/"host"/"none").
+          net=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid" | tr ' ' '\n' | grep -vE '^(bridge|host|none|)$' | head -n1)
+          if [ -z "$net" ]; then net=bridge; fi
+          # Pick the container IP on that network.
+          ip=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" "$cid")
+          echo "Forgejo container: $cname (net=$net ip=$ip)"
+          echo "name=$cname" >> "$GITHUB_OUTPUT"
+          echo "network=$net" >> "$GITHUB_OUTPUT"
+          echo "internal_url=http://$ip:3000" >> "$GITHUB_OUTPUT"
+
+      - name: Seed Forgejo
+        id: seed
+        env:
+          FORGEJO_CONTAINER: ${{ steps.forgejo.outputs.name }}
+        run: |
+          set -euo pipefail
+          chmod +x test/integration/seed.sh
+          token=$(bash test/integration/seed.sh)
+          # Token is opaque; mask it so it does not leak via the log.
+          echo "::add-mask::$token"
+          # Pass via env file rather than step output so it stays masked.
+          echo "FORGEJO_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Write fj-bellows config
+        run: |
+          set -euo pipefail
+          umask 077
+          cat > config.yaml <<YAML
+          forgejo:
+            url: ${{ steps.forgejo.outputs.internal_url }}
+            token: ${FORGEJO_TOKEN}
+            scope: orgs/${FORGEJO_ORG}
+            labels:
+              - ${FORGEJO_LABEL}
+          tag: ${FJBELLOWS_TAG}
+          scale:
+            max: 1
+          provider: docker
+          provider_config:
+            image: fj-bellows-worker:test
+            network: ${{ steps.forgejo.outputs.network }}
+          poll:
+            interval: 2s
+            idle_timeout: 5s
+            hour_margin: 5m
+          YAML
+          chmod 600 config.yaml
+
+      - name: Launch fj-bellows
+        run: |
+          set -euo pipefail
+          ./fj-bellows \
+            -config "$PWD/config.yaml" \
+            -lock "$PWD/fj-bellows.lock" \
+            -drain=false \
+            -destroy-on-exit \
+            > fj-bellows.stdout 2> fj-bellows.log &
+          echo $! > fj-bellows.pid
+          # Give the orchestrator a moment to tick through one full reconcile.
+          sleep 2
+
+      - name: Assert
+        env:
+          FJBELLOWS_LOG: fj-bellows.log
+          PROVISION_WAIT: "60"
+        run: |
+          chmod +x test/integration/assert.sh
+          bash test/integration/assert.sh
+
+      - name: Capture diagnostics on failure
+        if: failure()
+        run: |
+          echo "===== fj-bellows.log ====="; cat fj-bellows.log || true
+          echo "===== fj-bellows.stdout ====="; cat fj-bellows.stdout || true
+          echo "===== Forgejo container log ====="
+          docker logs "${{ steps.forgejo.outputs.name }}" 2>&1 | tail -200 || true
+          echo "===== worker containers ====="
+          docker ps -a --filter "label=fj-bellows.tag=${FJBELLOWS_TAG}" || true
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-logs
+          path: |
+            fj-bellows.log
+            fj-bellows.stdout
+            config.yaml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          set +e
+          if [ -f fj-bellows.pid ]; then
+            kill "$(cat fj-bellows.pid)" 2>/dev/null
+            sleep 2
+            kill -9 "$(cat fj-bellows.pid)" 2>/dev/null
+          fi
+          # Remove any worker containers stamped with our run tag.
+          docker ps -a --filter "label=fj-bellows.tag=${FJBELLOWS_TAG}" -q | xargs -r docker rm -f
+
   # Gate publishing on the DockerHub secrets existing, so publish skips cleanly
   # (no failed run) until they are configured. Only a boolean is emitted; the
   # secret values are never exposed.

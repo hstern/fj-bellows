@@ -111,7 +111,7 @@ func run(opts runOpts, log *slog.Logger) error {
 		return err
 	}
 
-	fj := forgejo.New(cfg.Forgejo.URL, cfg.Forgejo.Scope, cfg.Forgejo.Token)
+	fj := forgejo.New(cfg.Forgejo.URL, cfg.Forgejo.Scope, cfg.Forgejo.Token, cfg.Forgejo.Labels...)
 
 	dispatcher, err := dispatcherFor(cfg, prov, signer)
 	if err != nil {
