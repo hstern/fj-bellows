@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,8 @@ import (
 type JobSource interface {
 	WaitingJobs(ctx context.Context) ([]forgejo.WaitingJob, error)
 	RegisterEphemeral(ctx context.Context, name string, labels []string) (forgejo.Registration, error)
+	ListRunners(ctx context.Context) ([]forgejo.Runner, error)
+	DeleteRunner(ctx context.Context, id int64) error
 }
 
 // Config holds the orchestrator's runtime parameters, decoupled from the
@@ -50,7 +53,14 @@ type Orchestrator struct {
 	mu          sync.Mutex
 	pending     int                 // in-flight provisions not yet in the pool
 	dispatching map[string]struct{} // job handles currently being served
+	active      map[string]struct{} // runner UUIDs we registered and still expect
 	now         func() time.Time    // injectable clock for tests
+
+	// reapSeen tracks runner UUIDs that looked like zombies last tick; only
+	// reaped after two consecutive sightings so a just-registered runner is not
+	// deleted in the window before its UUID is recorded. Touched only by the
+	// single reconcile goroutine, so it needs no lock.
+	reapSeen map[string]struct{}
 }
 
 // New builds an orchestrator.
@@ -69,6 +79,8 @@ func New(cfg Config, prov provider.Provider, jobs JobSource, disp Dispatcher, lo
 		pool:        NewPool(),
 		log:         log,
 		dispatching: map[string]struct{}{},
+		active:      map[string]struct{}{},
+		reapSeen:    map[string]struct{}{},
 		now:         time.Now,
 	}
 }
@@ -107,6 +119,39 @@ func (o *Orchestrator) Reconcile(ctx context.Context) {
 
 	o.dispatchJobs(ctx, jobs)
 	o.applyTeardown(ctx)
+	o.reapZombieRunners(ctx)
+}
+
+// reapZombieRunners deletes runner registrations that are ours (name carries
+// the tag prefix) but that we are no longer running a job for — e.g. a VM that
+// died after registering but before one-job completed, leaving a dangling
+// registration Forgejo never auto-removed. A runner must look orphaned for two
+// consecutive ticks before deletion, closing the race against a runner whose
+// UUID we have not recorded as active yet.
+func (o *Orchestrator) reapZombieRunners(ctx context.Context) {
+	runners, err := o.jobs.ListRunners(ctx)
+	if err != nil {
+		o.log.Error("list runners", "err", err)
+		return
+	}
+	prefix := o.cfg.Tag + "-"
+	seen := map[string]struct{}{}
+	for _, r := range runners {
+		if !strings.HasPrefix(r.Name, prefix) || o.isActive(r.UUID) {
+			continue
+		}
+		if _, twice := o.reapSeen[r.UUID]; !twice {
+			seen[r.UUID] = struct{}{} // first sighting; revisit next tick
+			continue
+		}
+		if err := o.jobs.DeleteRunner(ctx, r.ID); err != nil {
+			o.log.Error("reap zombie runner", "uuid", r.UUID, "name", r.Name, "err", err)
+			seen[r.UUID] = struct{}{} // keep trying next tick
+			continue
+		}
+		o.log.Info("reaped zombie runner", "uuid", r.UUID, "name", r.Name)
+	}
+	o.reapSeen = seen
 }
 
 // syncPool adopts provider instances unknown to the pool (crash recovery) and
@@ -185,6 +230,8 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 			o.log.Error("register ephemeral runner", "err", err)
 			return
 		}
+		o.addActive(reg.UUID)
+		defer o.removeActive(reg.UUID)
 		if err := o.disp.RunJob(ctx, node.IP, reg, job); err != nil {
 			o.log.Error("run job", "handle", job.Handle, "ip", node.IP, "err", err)
 			return
@@ -281,6 +328,25 @@ func (o *Orchestrator) pendingCount() int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.pending
+}
+
+func (o *Orchestrator) addActive(uuid string) {
+	o.mu.Lock()
+	o.active[uuid] = struct{}{}
+	o.mu.Unlock()
+}
+
+func (o *Orchestrator) removeActive(uuid string) {
+	o.mu.Lock()
+	delete(o.active, uuid)
+	o.mu.Unlock()
+}
+
+func (o *Orchestrator) isActive(uuid string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	_, ok := o.active[uuid]
+	return ok
 }
 
 func (o *Orchestrator) isDispatching(handle string) bool {

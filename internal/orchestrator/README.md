@@ -29,6 +29,12 @@ Each tick, under the single reconcile goroutine:
    by `MaxScale` (in-flight provisions count as `pending` so concurrent ticks
    don't over-provision).
 4. Apply teardown to Idle nodes.
+5. Reap zombie runners: `ListRunners` and delete any registration whose name
+   carries our tag prefix but that we aren't currently running a job for (a VM
+   that died after registering but before `one-job` finished). Deletion requires
+   the runner to look orphaned for two consecutive ticks, closing the race
+   against a freshly registered runner. This is the third reconcile source
+   (Forgejo jobs + Forgejo runners + provider instances).
 
 The reconcile loop is the **single writer of provisioning decisions**;
 dispatch/teardown goroutines mutate only their own node's state.

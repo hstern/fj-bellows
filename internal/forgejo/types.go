@@ -18,3 +18,13 @@ type Registration struct {
 	UUID  string `json:"uuid"`
 	Token string `json:"token"`
 }
+
+// Runner is a registered Actions runner, returned by
+// GET /api/v1/<scope>/actions/runners. Field names should be confirmed against
+// the live API; unknown fields are ignored.
+type Runner struct {
+	ID     int64  `json:"id"`
+	UUID   string `json:"uuid"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}

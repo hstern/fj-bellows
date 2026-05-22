@@ -14,9 +14,12 @@ import (
 type JobSource struct {
 	WaitingJobsFn       func(ctx context.Context) ([]forgejo.WaitingJob, error)
 	RegisterEphemeralFn func(ctx context.Context, name string, labels []string) (forgejo.Registration, error)
+	ListRunnersFn       func(ctx context.Context) ([]forgejo.Runner, error)
+	DeleteRunnerFn      func(ctx context.Context, id int64) error
 
 	mu            sync.Mutex
 	RegisterCalls []string // names passed to RegisterEphemeral
+	DeleteCalls   []int64  // ids passed to DeleteRunner
 }
 
 // WaitingJobs delegates to WaitingJobsFn if set.
@@ -43,6 +46,32 @@ func (m *JobSource) RegisterCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.RegisterCalls)
+}
+
+// ListRunners delegates to ListRunnersFn if set.
+func (m *JobSource) ListRunners(ctx context.Context) ([]forgejo.Runner, error) {
+	if m.ListRunnersFn != nil {
+		return m.ListRunnersFn(ctx)
+	}
+	return nil, nil
+}
+
+// DeleteRunner records the id and delegates to DeleteRunnerFn if set.
+func (m *JobSource) DeleteRunner(ctx context.Context, id int64) error {
+	m.mu.Lock()
+	m.DeleteCalls = append(m.DeleteCalls, id)
+	m.mu.Unlock()
+	if m.DeleteRunnerFn != nil {
+		return m.DeleteRunnerFn(ctx, id)
+	}
+	return nil
+}
+
+// DeleteCount returns how many times DeleteRunner was called.
+func (m *JobSource) DeleteCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.DeleteCalls)
 }
 
 // Dispatcher mocks orchestrator.Dispatcher.

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -74,6 +75,31 @@ func (c *Client) RegisterEphemeral(ctx context.Context, name string, labels []st
 		return Registration{}, fmt.Errorf("registration response missing uuid/token: %s", raw)
 	}
 	return reg, nil
+}
+
+// ListRunners returns the runners registered under the scope.
+func (c *Client) ListRunners(ctx context.Context) ([]Runner, error) {
+	raw, err := c.do(ctx, http.MethodGet, "/actions/runners", nil)
+	if err != nil {
+		return nil, err
+	}
+	var env struct {
+		Runners []Runner `json:"runners"`
+	}
+	if err := json.Unmarshal(raw, &env); err == nil && env.Runners != nil {
+		return env.Runners, nil
+	}
+	var arr []Runner
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return nil, fmt.Errorf("decode runners: %w", err)
+	}
+	return arr, nil
+}
+
+// DeleteRunner removes a runner registration by id.
+func (c *Client) DeleteRunner(ctx context.Context, id int64) error {
+	_, err := c.do(ctx, http.MethodDelete, "/actions/runners/"+strconv.FormatInt(id, 10), nil)
+	return err
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {

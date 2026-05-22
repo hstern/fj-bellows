@@ -178,6 +178,45 @@ func TestSyncPoolDropsVanishedButKeepsProvisioning(t *testing.T) {
 	}
 }
 
+func TestReapZombieRunnersAfterTwoTicks(t *testing.T) {
+	prov := &pmock.Provider{} // no instances
+	jobs := &omock.JobSource{
+		ListRunnersFn: func(context.Context) ([]forgejo.Runner, error) {
+			return []forgejo.Runner{
+				{ID: 7, UUID: "u-7", Name: "fj-bellows-dead", Status: "offline"}, // ours, zombie
+				{ID: 9, UUID: "u-9", Name: "some-other-runner"},                  // not ours
+			}, nil
+		},
+	}
+	o := New(baseConfig(), prov, jobs, &omock.Dispatcher{}, nil)
+
+	o.Reconcile(context.Background()) // first sighting: no delete yet
+	if jobs.DeleteCount() != 0 {
+		t.Fatalf("deleted on first sighting: %d", jobs.DeleteCount())
+	}
+	o.Reconcile(context.Background()) // second sighting: reap
+	if jobs.DeleteCount() != 1 || jobs.DeleteCalls[0] != 7 {
+		t.Fatalf("expected to reap runner 7, got DeleteCalls=%v", jobs.DeleteCalls)
+	}
+}
+
+func TestReapSkipsActiveRunner(t *testing.T) {
+	prov := &pmock.Provider{}
+	jobs := &omock.JobSource{
+		ListRunnersFn: func(context.Context) ([]forgejo.Runner, error) {
+			return []forgejo.Runner{{ID: 1, UUID: "live", Name: "fj-bellows-live"}}, nil
+		},
+	}
+	o := New(baseConfig(), prov, jobs, &omock.Dispatcher{}, nil)
+	o.addActive("live") // currently running a job
+
+	o.Reconcile(context.Background())
+	o.Reconcile(context.Background())
+	if jobs.DeleteCount() != 0 {
+		t.Errorf("reaped an active runner: %v", jobs.DeleteCalls)
+	}
+}
+
 func TestFilterServiceable(t *testing.T) {
 	labels := []string{labelUbuntu, "amd64"}
 	jobs := []forgejo.WaitingJob{
