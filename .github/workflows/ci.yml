@@ -55,24 +55,27 @@ jobs:
   check-secrets:
     runs-on: ubuntu-latest
     outputs:
-      enabled: ${{ steps.check.outputs.enabled }}
+      dockerhub: ${{ steps.check.outputs.dockerhub }}
     steps:
       - id: check
         run: |
           if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "dockerhub=true" >> "$GITHUB_OUTPUT"
           else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "dockerhub=false" >> "$GITHUB_OUTPUT"
           fi
 
   publish:
     # Only publish after test AND lint pass, and never for pull requests. This
-    # gates both main pushes and v* tags behind green CI.
+    # gates both main pushes and v* tags behind green CI. ghcr.io publishes
+    # unconditionally (only needs GITHUB_TOKEN); Docker Hub is added when its
+    # secrets are configured.
     needs: [test, lint, check-secrets]
-    if: github.event_name != 'pull_request' && needs.check-secrets.outputs.enabled == 'true'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # Requires repository secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN.
-    # The image name is derived from the secret, so no account name is committed.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v6
 
@@ -80,7 +83,15 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Log in to Docker Hub
+        if: needs.check-secrets.outputs.dockerhub == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -90,7 +101,12 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/fj-bellows
+          # ghcr.io image is always published; the Docker Hub image is appended
+          # only when its secrets exist (empty lines are ignored). Image names
+          # come from contexts/secrets, so no account name is committed.
+          images: |
+            ghcr.io/${{ github.repository }}
+            ${{ needs.check-secrets.outputs.dockerhub == 'true' && format('docker.io/{0}/fj-bellows', secrets.DOCKERHUB_USERNAME) || '' }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
