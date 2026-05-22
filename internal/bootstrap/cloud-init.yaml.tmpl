@@ -10,6 +10,22 @@ packages:
   - ca-certificates
 runcmd:
   - systemctl enable --now docker
+{{- if .HostPrivateKey}}
+  # The orchestrator generated this ed25519 host key and pre-pinned its public
+  # half, so the dispatcher verifies the worker on the very first SSH dial. The
+  # PEM is base64-encoded here so it survives the YAML/shell layers without
+  # whitespace mangling.
+  - |
+    set -eu
+    install -m 0600 /dev/null /etc/ssh/ssh_host_ed25519_key
+    printf '%s' '{{.HostPrivateKey | b64enc}}' | base64 -d > /etc/ssh/ssh_host_ed25519_key
+    chmod 0600 /etc/ssh/ssh_host_ed25519_key
+    ssh-keygen -y -f /etc/ssh/ssh_host_ed25519_key > /etc/ssh/ssh_host_ed25519_key.pub
+    chmod 0644 /etc/ssh/ssh_host_ed25519_key.pub
+    mkdir -p /etc/ssh/sshd_config.d
+    printf 'HostKey /etc/ssh/ssh_host_ed25519_key\n' > /etc/ssh/sshd_config.d/10-fj-bellows-hostkey.conf
+    systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || systemctl restart ssh
+{{- end}}
   - |
     set -eu
     arch="$(uname -m)"

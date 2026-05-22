@@ -27,6 +27,15 @@ type Dispatcher interface {
 	RunJob(ctx context.Context, ip string, reg forgejo.Registration, job forgejo.WaitingJob) error
 }
 
+// HostKeyPinner is an optional Dispatcher capability: the orchestrator can
+// pre-seed the host key it expects a worker to present, so verification is
+// authoritative on the very first dial. A Dispatcher that has no concept of SSH
+// host keys (e.g. a future docker-exec dispatcher) simply does not implement it.
+type HostKeyPinner interface {
+	// PinHostKey records key as the expected SSH host key for the worker at ip.
+	PinHostKey(ip string, key ssh.PublicKey)
+}
+
 // SSHDispatcher dispatches jobs over SSH using an in-process client.
 type SSHDispatcher struct {
 	User        string
@@ -41,6 +50,22 @@ type SSHDispatcher struct {
 	// pinsMu guards pins, the per-VM trust-on-first-use host-key store.
 	pinsMu sync.Mutex
 	pins   map[string]ssh.PublicKey
+}
+
+// PinHostKey seeds the pin store with the host key the worker at ip is expected
+// to present, under the same addr formula dial uses. A seeded pin makes first
+// contact authoritative: tofuHostKeyCallback finds an existing pin on the very
+// first dial and requires a byte-equal key instead of trusting and recording
+// whatever is presented, which eliminates the trust-on-first-use window in which
+// a man-in-the-middle could capture the one-shot token.
+func (d *SSHDispatcher) PinHostKey(ip string, key ssh.PublicKey) {
+	addr := net.JoinHostPort(ip, strconv.Itoa(d.Port))
+	d.pinsMu.Lock()
+	defer d.pinsMu.Unlock()
+	if d.pins == nil {
+		d.pins = make(map[string]ssh.PublicKey)
+	}
+	d.pins[addr] = key
 }
 
 // WaitReady polls SSH until the readiness sentinel exists.
@@ -171,8 +196,13 @@ func shellQuote(s string) string {
 // Residual risk: a man-in-the-middle present at the very first contact with a
 // VM could still impersonate it and capture the one-shot ephemeral runner
 // token. After that first connect, the VM's identity is verified for the
-// remainder of its life. Eliminating the residual risk would require injecting
-// a known host key via cloud-init (out of scope here).
+// remainder of its life.
+//
+// That residual risk is eliminated when the pin is seeded ahead of time via
+// PinHostKey: the callback then finds an existing pin on the first dial and
+// verifies against it rather than recording the presented key, so even first
+// contact is authoritative. The orchestrator seeds such a pin after generating
+// the worker's host key and injecting its private half via cloud-init.
 func (d *SSHDispatcher) tofuHostKeyCallback(addr string) ssh.HostKeyCallback {
 	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
 		d.pinsMu.Lock()

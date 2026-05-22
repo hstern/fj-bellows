@@ -7,6 +7,8 @@ import (
 	"context"
 	"sync"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/hstern/fj-bellows/internal/forgejo"
 )
 
@@ -107,4 +109,40 @@ func (m *Dispatcher) RunCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.RunCalls)
+}
+
+// PinningDispatcher is a Dispatcher that also implements
+// orchestrator.HostKeyPinner, recording the host keys it is asked to pin. It is
+// a distinct type so the plain Dispatcher does not accidentally satisfy
+// HostKeyPinner and change provisioning behavior in existing tests.
+type PinningDispatcher struct {
+	Dispatcher
+
+	pmu      sync.Mutex
+	pinnedIP map[string]ssh.PublicKey
+}
+
+// PinHostKey records key as the pinned host key for ip.
+func (m *PinningDispatcher) PinHostKey(ip string, key ssh.PublicKey) {
+	m.pmu.Lock()
+	defer m.pmu.Unlock()
+	if m.pinnedIP == nil {
+		m.pinnedIP = make(map[string]ssh.PublicKey)
+	}
+	m.pinnedIP[ip] = key
+}
+
+// PinnedKey returns the host key pinned for ip and whether one was recorded.
+func (m *PinningDispatcher) PinnedKey(ip string) (ssh.PublicKey, bool) {
+	m.pmu.Lock()
+	defer m.pmu.Unlock()
+	k, ok := m.pinnedIP[ip]
+	return k, ok
+}
+
+// PinCount returns how many distinct IPs have had a host key pinned.
+func (m *PinningDispatcher) PinCount() int {
+	m.pmu.Lock()
+	defer m.pmu.Unlock()
+	return len(m.pinnedIP)
 }

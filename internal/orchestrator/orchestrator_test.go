@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -529,6 +530,67 @@ func TestRunDestroyOnExit(t *testing.T) {
 	<-runDone
 	if prov.DestroyCount() != 1 {
 		t.Errorf("DestroyCount = %d, want 1 (destroy-on-exit)", prov.DestroyCount())
+	}
+}
+
+// TestProvisionSeedsHostKeyPin covers that when the dispatcher implements
+// HostKeyPinner, provisioning a VM seeds a host-key pin for the provisioned IP.
+func TestProvisionSeedsHostKeyPin(t *testing.T) {
+	var gotUserData string
+	prov := &pmock.Provider{
+		ProvisionFn: func(_ context.Context, spec provider.Spec) (provider.Instance, error) {
+			gotUserData = spec.UserData
+			return provider.Instance{ID: "100", IPv4: "10.0.0.42", CreatedAt: time.Now()}, nil
+		},
+	}
+	jobs := &omock.JobSource{
+		WaitingJobsFn: func(context.Context) ([]forgejo.WaitingJob, error) {
+			return []forgejo.WaitingJob{{Handle: "h1", Labels: []string{labelUbuntu}}}, nil
+		},
+	}
+	disp := &omock.PinningDispatcher{}
+	o := New(baseConfig(), prov, jobs, disp, nil)
+
+	o.Reconcile(context.Background())
+
+	waitFor(t, "host key pinned for provisioned IP", func() bool {
+		_, ok := disp.PinnedKey("10.0.0.42")
+		return ok
+	})
+	if disp.PinCount() != 1 {
+		t.Errorf("PinCount = %d, want 1", disp.PinCount())
+	}
+	// The injected cloud-init must carry the host key install for the worker.
+	if !strings.Contains(gotUserData, "/etc/ssh/ssh_host_ed25519_key") {
+		t.Error("cloud-init missing injected host key for a pinning dispatcher")
+	}
+}
+
+// TestProvisionWithoutPinnerSkipsHostKey covers that a non-pinning dispatcher
+// neither seeds a pin nor gets a host key injected into cloud-init.
+func TestProvisionWithoutPinnerSkipsHostKey(t *testing.T) {
+	var gotUserData string
+	prov := &pmock.Provider{
+		ProvisionFn: func(_ context.Context, spec provider.Spec) (provider.Instance, error) {
+			gotUserData = spec.UserData
+			return provider.Instance{ID: "100", IPv4: "10.0.0.43", CreatedAt: time.Now()}, nil
+		},
+	}
+	jobs := &omock.JobSource{
+		WaitingJobsFn: func(context.Context) ([]forgejo.WaitingJob, error) {
+			return []forgejo.WaitingJob{{Handle: "h1", Labels: []string{labelUbuntu}}}, nil
+		},
+	}
+	disp := &omock.Dispatcher{} // plain dispatcher: not a HostKeyPinner
+	o := New(baseConfig(), prov, jobs, disp, nil)
+
+	o.Reconcile(context.Background())
+
+	waitFor(t, "node becomes idle after provision", func() bool {
+		return len(o.pool.ByState(StateIdle)) == 1
+	})
+	if strings.Contains(gotUserData, "ssh_host_ed25519_key") {
+		t.Error("cloud-init injected a host key for a non-pinning dispatcher")
 	}
 }
 

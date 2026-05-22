@@ -5,6 +5,7 @@ package bootstrap
 import (
 	"bytes"
 	_ "embed"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"text/template"
@@ -24,6 +25,12 @@ type Params struct {
 	RunnerVersion string
 	// ReadyFile is the readiness sentinel path.
 	ReadyFile string
+	// HostPrivateKey, when non-empty, is an OpenSSH-format PEM private key the
+	// worker is configured to use as its ed25519 SSH host key. The orchestrator
+	// generates it per-VM and pre-pins the matching public key so the very first
+	// dial is verified, eliminating the trust-on-first-use window. When empty the
+	// worker keeps the host key cloud-init generates on its own.
+	HostPrivateKey string
 }
 
 // Render produces the cloud-init user-data for a worker.
@@ -34,7 +41,12 @@ func Render(p Params) (string, error) {
 	if p.ReadyFile == "" {
 		p.ReadyFile = DefaultReadyFile
 	}
-	tmpl, err := template.New("cloud-init").Parse(cloudInitTemplate)
+	funcs := template.FuncMap{
+		"b64enc": func(s string) string {
+			return base64.StdEncoding.EncodeToString([]byte(s))
+		},
+	}
+	tmpl, err := template.New("cloud-init").Funcs(funcs).Parse(cloudInitTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parse cloud-init template: %w", err)
 	}

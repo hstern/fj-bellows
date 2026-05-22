@@ -7,12 +7,17 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/pem"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/hstern/fj-bellows/internal/bootstrap"
 	"github.com/hstern/fj-bellows/internal/forgejo"
@@ -311,9 +316,27 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 func (o *Orchestrator) provisionOne(ctx context.Context) {
 	o.incPending()
 	o.wg.Go(func() {
+		// When the dispatcher can pre-pin host keys, generate a fresh ed25519 SSH
+		// host key per VM and inject its private half via cloud-init so the worker
+		// presents exactly this key; the public half is pinned after Provision so
+		// even the first dial is verified. A dispatcher without host keys (e.g. a
+		// docker-exec one) skips this and renders without a host key.
+		pinner, canPin := o.disp.(HostKeyPinner)
+		var hostPriv string
+		var sshHostPub ssh.PublicKey
+		if canPin {
+			var err error
+			hostPriv, sshHostPub, err = generateHostKey()
+			if err != nil {
+				o.log.Error("generate worker host key", "err", err)
+				o.decPending()
+				return
+			}
+		}
 		userData, err := bootstrap.Render(bootstrap.Params{
-			RunnerVersion: o.cfg.RunnerVersion,
-			ReadyFile:     o.cfg.ReadyFile,
+			RunnerVersion:  o.cfg.RunnerVersion,
+			ReadyFile:      o.cfg.ReadyFile,
+			HostPrivateKey: hostPriv,
 		})
 		if err != nil {
 			o.log.Error("render cloud-init", "err", err)
@@ -342,6 +365,11 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 		})
 		o.decPending() // now counted via the pool
 		o.log.Info("provisioned", "id", inst.ID, "ip", inst.IPv4)
+
+		// Seed the pin before the first dial so WaitReady's handshake is verified.
+		if canPin {
+			pinner.PinHostKey(inst.IPv4, sshHostPub)
+		}
 
 		if err := o.disp.WaitReady(ctx, inst.IPv4); err != nil {
 			o.log.Error("worker readiness", "id", inst.ID, "err", err)
@@ -457,6 +485,26 @@ func filterServiceable(jobs []forgejo.WaitingJob, labels []string) []forgejo.Wai
 		}
 	}
 	return out
+}
+
+// generateHostKey mints a fresh ed25519 SSH host keypair for a worker VM. It
+// returns the private key as an OpenSSH-format PEM (for cloud-init injection)
+// and the matching ssh.PublicKey (for pinning). The keypair is ephemeral per
+// VM; the PEM is never logged.
+func generateHostKey() (privPEM string, pub ssh.PublicKey, err error) {
+	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", nil, fmt.Errorf("generate ed25519 host key: %w", err)
+	}
+	block, err := ssh.MarshalPrivateKey(privKey, "")
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal host private key: %w", err)
+	}
+	sshPub, err := ssh.NewPublicKey(pubKey)
+	if err != nil {
+		return "", nil, fmt.Errorf("derive host public key: %w", err)
+	}
+	return string(pem.EncodeToMemory(block)), sshPub, nil
 }
 
 func shortID() string {
