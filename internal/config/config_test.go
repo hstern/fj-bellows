@@ -93,6 +93,37 @@ func TestLoadMissingRequired(t *testing.T) {
 	}
 }
 
+func TestLoadDockerProviderSkipsSSHKey(t *testing.T) {
+	// The docker provider dispatches via `docker exec` and needs no SSH key.
+	path := writeTemp(t, "config.yaml", `
+forgejo:
+  url: https://forgejo.example.com
+  token: secret-token
+  scope: orgs/example
+  labels: [docker]
+provider: docker
+provider_config:
+  image: example/worker:latest
+`)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}
+
+func TestLoadNonDockerProviderRequiresSSHKey(t *testing.T) {
+	// A non-docker provider without an SSH key is still rejected.
+	path := writeTemp(t, "config.yaml", `
+forgejo:
+  url: https://forgejo.example.com
+  token: secret-token
+  scope: orgs/example
+provider: linode
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected validation error: ssh.private_key_file missing for non-docker provider")
+	}
+}
+
 func TestLoadBadDuration(t *testing.T) {
 	path := writeTemp(t, "config.yaml", `
 forgejo: {url: u, token: t, scope: s}

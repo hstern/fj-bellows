@@ -126,6 +126,10 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+// ProviderDocker is the name of the local docker provider, which does not
+// dispatch over SSH and therefore needs no SSH private key.
+const ProviderDocker = "docker"
+
 func (c *Config) validate() error {
 	var missing []string
 	if c.Forgejo.URL == "" {
@@ -140,7 +144,9 @@ func (c *Config) validate() error {
 	if c.Provider == "" {
 		missing = append(missing, "provider")
 	}
-	if c.SSH.PrivateKeyFile == "" {
+	// SSH key is required only for providers that dispatch over SSH. The
+	// docker provider execs into local containers and needs no SSH at all.
+	if c.SSH.PrivateKeyFile == "" && c.Provider != ProviderDocker {
 		missing = append(missing, "ssh.private_key_file")
 	}
 	if len(missing) > 0 {

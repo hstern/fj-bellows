@@ -24,6 +24,7 @@ import (
 	"github.com/hstern/fj-bellows/internal/provider"
 
 	// Register in-tree providers.
+	dockerprov "github.com/hstern/fj-bellows/internal/provider/docker"
 	_ "github.com/hstern/fj-bellows/internal/provider/linode"
 )
 
@@ -70,7 +71,9 @@ func run(opts runOpts, log *slog.Logger) error {
 	// config.yaml and the SSH key hold secrets; warn if other users can read
 	// them. The Forgejo admin token rides in a header, so warn on plaintext URLs.
 	warnLoosePerms(log, opts.configPath)
-	warnLoosePerms(log, cfg.SSH.PrivateKeyFile)
+	if cfg.SSH.PrivateKeyFile != "" {
+		warnLoosePerms(log, cfg.SSH.PrivateKeyFile)
+	}
 	if !strings.HasPrefix(strings.ToLower(cfg.Forgejo.URL), "https://") {
 		log.Warn("forgejo.url is not https; the admin token will be sent in plaintext", "url", cfg.Forgejo.URL)
 	}
@@ -87,9 +90,17 @@ func run(opts runOpts, log *slog.Logger) error {
 	}
 	defer release()
 
-	signer, authKey, err := loadSSHKey(cfg.SSH.PrivateKeyFile)
-	if err != nil {
-		return err
+	// SSH key is required only for providers that dispatch over SSH. A docker
+	// deployment passes nothing into cloud-init and execs into containers.
+	var (
+		signer  ssh.Signer
+		authKey string
+	)
+	if cfg.Provider != config.ProviderDocker {
+		signer, authKey, err = loadSSHKey(cfg.SSH.PrivateKeyFile)
+		if err != nil {
+			return err
+		}
 	}
 
 	prov, err := provider.New(cfg.Provider)
@@ -102,7 +113,10 @@ func run(opts runOpts, log *slog.Logger) error {
 
 	fj := forgejo.New(cfg.Forgejo.URL, cfg.Forgejo.Scope, cfg.Forgejo.Token)
 
-	dispatcher := sshDispatcherFrom(cfg, signer)
+	dispatcher, err := dispatcherFor(cfg, prov, signer)
+	if err != nil {
+		return err
+	}
 
 	orch := orchestrator.New(orchestrator.Config{
 		Tag:           cfg.Tag,
@@ -125,7 +139,8 @@ func run(opts runOpts, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	log.Info("fj-bellows starting",
+	log.Info(
+		"fj-bellows starting",
 		"provider", cfg.Provider,
 		"billing", prov.BillingModel().String(),
 		"max_scale", cfg.Scale.Max,
@@ -146,6 +161,26 @@ func sshDispatcherFrom(cfg *config.Config, signer ssh.Signer) *orchestrator.SSHD
 		ReadyWait:   5 * time.Minute,
 		DialTimeout: 15 * time.Second,
 	}
+}
+
+// dispatcherFor selects and constructs the dispatcher matching cfg.Provider.
+// The docker provider needs no SSH; everything else uses SSHDispatcher.
+func dispatcherFor(cfg *config.Config, prov provider.Provider, signer ssh.Signer) (orchestrator.Dispatcher, error) {
+	if cfg.Provider == config.ProviderDocker {
+		dp, ok := prov.(*dockerprov.Docker)
+		if !ok {
+			return nil, fmt.Errorf("provider %q registered under unexpected type %T", cfg.Provider, prov)
+		}
+		runner := dockerprov.NewDefaultRunner(dp.DockerBin())
+		return dockerprov.NewExecDispatcher(
+			runner,
+			dp.DockerBin(),
+			cfg.Forgejo.URL,
+			cfg.Forgejo.Labels,
+			dp.WaitTimeout(),
+		), nil
+	}
+	return sshDispatcherFrom(cfg, signer), nil
 }
 
 // loadSSHKey reads a PEM private key file and returns the signer plus its
