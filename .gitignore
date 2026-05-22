@@ -1,0 +1,16 @@
+# Built binary
+/fj-bellows
+/cmd/fj-bellows/fj-bellows
+
+# Local config holds secrets — never commit it
+/config.yaml
+
+# Test / coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Editor / IDE
+/.idea/
+/.claude/
+.DS_Store

@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.claude
+*.md
+**/README.md
+docs
+config.yaml
+*.test
+*.out
+coverage.*

@@ -1,0 +1,48 @@
+# fj-bellows configuration (example).
+# Copy to config.yaml and edit. config.yaml holds secrets directly, so keep it
+# readable only by the daemon (chmod 600). The SSH key is referenced by path
+# (not inlined) to keep this file tidy.
+
+forgejo:
+  # Base URL of your Forgejo instance.
+  url: https://forgejo.example.com
+  # Forgejo admin token (scope: all). Polls the job queue and mints per-job
+  # ephemeral runner registrations.
+  token: <forgejo-admin-token>
+  # API path segment that owns the runners: "orgs/<org>" or "repos/<owner>/<name>".
+  scope: orgs/example
+  # Runner labels this pool services. A job is eligible only if all of its
+  # required labels appear here.
+  labels:
+    - ubuntu-latest
+
+scale:
+  # Maximum number of warm worker VMs. (Architecture supports N; pin to 1 to
+  # start.)
+  max: 1
+
+# Selected provider. Must be a registered in-tree provider.
+provider: linode
+
+# Opaque to the core: decoded by the selected provider.
+provider_config:
+  region: <linode-region>
+  type: <linode-instance-type>
+  image: <linode-image>
+  token: <provider-api-token>
+
+poll:
+  # How often to reconcile the queue against runners and instances.
+  interval: 10s
+  # Per-second billing providers: tear an idle node down after this long.
+  idle_timeout: 5m
+  # Hourly-rounding providers: kill an idle node this long before each paid-hour
+  # boundary (5m -> the :55 rule).
+  hour_margin: 5m
+
+ssh:
+  # The orchestrator dispatches one-job to workers over SSH using this key.
+  # Its public half is injected into each VM at provision time.
+  private_key_file: /etc/fj-bellows/id_ed25519
+  user: root
+  port: 22

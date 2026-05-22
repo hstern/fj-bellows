@@ -1,0 +1,24 @@
+#cloud-config
+# Worker bootstrap for fj-bellows. Installs Docker and the forgejo-runner
+# binary, then signals readiness. It deliberately holds NO Forgejo credentials:
+# the orchestrator registers an ephemeral runner per job and delivers the
+# one-shot token over SSH at dispatch time.
+package_update: true
+packages:
+  - docker.io
+  - curl
+  - ca-certificates
+runcmd:
+  - systemctl enable --now docker
+  - |
+    set -eu
+    arch="$(uname -m)"
+    case "$arch" in
+      x86_64) rarch=amd64 ;;
+      aarch64|arm64) rarch=arm64 ;;
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+    esac
+    url="https://code.forgejo.org/forgejo/runner/releases/download/v{{.RunnerVersion}}/forgejo-runner-{{.RunnerVersion}}-linux-${rarch}"
+    curl -fsSL -o /usr/local/bin/forgejo-runner "$url"
+    chmod +x /usr/local/bin/forgejo-runner
+  - touch {{.ReadyFile}}

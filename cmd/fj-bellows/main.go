@@ -1,0 +1,173 @@
+// Command fj-bellows is a pluggable, ephemeral CI-runner autoscaler for
+// Forgejo Actions. It polls the Actions job queue and provisions, warm-holds,
+// and tears down cloud worker VMs per the provider's billing model.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
+
+	"github.com/hstern/fj-bellows/internal/bootstrap"
+	"github.com/hstern/fj-bellows/internal/config"
+	"github.com/hstern/fj-bellows/internal/forgejo"
+	"github.com/hstern/fj-bellows/internal/orchestrator"
+	"github.com/hstern/fj-bellows/internal/provider"
+
+	// Register in-tree providers.
+	_ "github.com/hstern/fj-bellows/internal/provider/linode"
+)
+
+func main() {
+	configPath := flag.String("config", "/etc/fj-bellows/config.yaml", "path to config file")
+	lockPath := flag.String("lock", "/run/fj-bellows.lock", "singleton lock file")
+	runnerVersion := flag.String("runner-version", "12.10.1", "forgejo-runner version to install on workers")
+	flag.Parse()
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	if err := run(*configPath, *lockPath, *runnerVersion, log); err != nil {
+		log.Error("fatal", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run(configPath, lockPath, runnerVersion string, log *slog.Logger) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+
+	// config.yaml and the SSH key hold secrets; warn if other users can read
+	// them. The Forgejo admin token rides in a header, so warn on plaintext URLs.
+	warnLoosePerms(log, configPath)
+	warnLoosePerms(log, cfg.SSH.PrivateKeyFile)
+	if !strings.HasPrefix(strings.ToLower(cfg.Forgejo.URL), "https://") {
+		log.Warn("forgejo.url is not https; the admin token will be sent in plaintext", "url", cfg.Forgejo.URL)
+	}
+
+	// Singleton lock: only one daemon may make provisioning decisions.
+	release, err := acquireLock(lockPath)
+	if err != nil {
+		return fmt.Errorf("acquire singleton lock %s: %w", lockPath, err)
+	}
+	defer release()
+
+	signer, authKey, err := loadSSHKey(cfg.SSH.PrivateKeyFile)
+	if err != nil {
+		return err
+	}
+
+	prov, err := provider.New(cfg.Provider)
+	if err != nil {
+		return err
+	}
+	if err := prov.Configure(cfg.ProviderConfig); err != nil {
+		return err
+	}
+
+	fj := forgejo.New(cfg.Forgejo.URL, cfg.Forgejo.Scope, cfg.Forgejo.Token)
+
+	dispatcher := sshDispatcherFrom(cfg, signer)
+
+	orch := orchestrator.New(orchestrator.Config{
+		Tag:           cfg.Tag,
+		MaxScale:      cfg.Scale.Max,
+		Labels:        cfg.Forgejo.Labels,
+		PollInterval:  cfg.Poll.Interval.D(),
+		RunnerVersion: runnerVersion,
+		ReadyFile:     bootstrap.DefaultReadyFile,
+		AuthorizedKey: authKey,
+		Teardown: orchestrator.TeardownPolicy{
+			Model:       prov.BillingModel(),
+			IdleTimeout: cfg.Poll.IdleTimeout.D(),
+			HourMargin:  cfg.Poll.HourMargin.D(),
+		},
+	}, prov, fj, dispatcher, log)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	log.Info("fj-bellows starting",
+		"provider", cfg.Provider,
+		"billing", prov.BillingModel().String(),
+		"max_scale", cfg.Scale.Max,
+		"poll", cfg.Poll.Interval.D().String(),
+	)
+	err = orch.Run(ctx)
+	if errors.Is(err, context.Canceled) {
+		log.Info("shutting down")
+		return nil
+	}
+	return err
+}
+
+// sshDispatcherFrom builds the SSH dispatcher from config.
+func sshDispatcherFrom(cfg *config.Config, signer ssh.Signer) *orchestrator.SSHDispatcher {
+	return &orchestrator.SSHDispatcher{
+		User:        cfg.SSH.User,
+		Port:        cfg.SSH.Port,
+		Signer:      signer,
+		ForgejoURL:  cfg.Forgejo.URL,
+		Labels:      cfg.Forgejo.Labels,
+		ReadyFile:   bootstrap.DefaultReadyFile,
+		ReadyWait:   5 * time.Minute,
+		DialTimeout: 15 * time.Second,
+	}
+}
+
+// loadSSHKey reads a PEM private key file and returns the signer plus its
+// authorized_keys public-key line to inject at provision time.
+func loadSSHKey(path string) (ssh.Signer, string, error) {
+	//nolint:gosec // G304: path is the operator-supplied SSH key file, not user input.
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("read ssh key: %w", err)
+	}
+	signer, err := ssh.ParsePrivateKey(b)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse ssh key: %w", err)
+	}
+	authLine := string(ssh.MarshalAuthorizedKey(signer.PublicKey()))
+	return signer, authLine, nil
+}
+
+// warnLoosePerms logs a warning if a secret file is readable by group or other.
+func warnLoosePerms(log *slog.Logger, path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		log.Warn("secret file is readable by other users; restrict to 0600",
+			"path", path, "mode", fmt.Sprintf("%04o", mode))
+	}
+}
+
+// acquireLock takes an exclusive advisory lock on path, returning a release
+// func. It fails fast if another daemon already holds it.
+func acquireLock(path string) (func(), error) {
+	//nolint:gosec // G304: path is the operator-supplied lock file, not user input.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("another instance is running: %w", err)
+	}
+	return func() {
+		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
