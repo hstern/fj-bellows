@@ -64,14 +64,23 @@ is opaque to the core and decoded by the selected provider.
 
 ```sh
 go build ./cmd/fj-bellows
-LINODE_TOKEN=... ./fj-bellows -config config.yaml
+./fj-bellows -config config.yaml
 ```
+
+All secrets (Forgejo + provider tokens) live inline in `config.yaml`; the SSH
+key is referenced by path. See [`config.example.yaml`](config.example.yaml).
 
 ### Container image
 
-Multi-arch images (`linux/amd64`, `linux/arm64`) are published by CI. Run with
-your config and secrets mounted, and the provider token supplied via the
-environment variable named in `provider_config.token_env`.
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published by CI to
+`ghcr.io/hstern/fj-bellows` (and to Docker Hub when configured). Run with your
+`config.yaml` mounted (and the SSH key it references):
+
+```sh
+docker run -d --name fj-bellows \
+  -v /etc/fj-bellows:/etc/fj-bellows:ro \
+  ghcr.io/hstern/fj-bellows:latest
+```
 
 ## Repository layout
 
@@ -100,12 +109,12 @@ across deployments. The daemon warns at startup if the default tag is in use.
 
 - **config.yaml holds secrets** (Forgejo + provider tokens). Keep it `chmod 600`;
   the daemon warns on startup if it (or the SSH key) is readable by other users.
-- **SSH host keys are not verified.** Worker VMs are created fresh per billing
-  hour with no pre-known host key, so the dispatch connection trusts the host on
-  connect. The channel is encrypted and the VM authenticates the orchestrator by
-  the injected key, but a man-in-the-middle on the path to the worker's public IP
-  could capture the one-shot ephemeral runner token. Hardening path: inject a
-  known host key via cloud-init or pin per-VM on first connect (TOFU).
+- **SSH host keys are verified.** For each worker the orchestrator generates a
+  fresh ed25519 host key, injects the private half via cloud-init, and pre-pins
+  the public half — so the SSH dispatch connection is verified on the very first
+  dial, with no trust-on-first-use window for a man-in-the-middle to capture the
+  one-shot token. (If no host key is seeded, the dispatcher falls back to
+  per-VM trust-on-first-use pinning.)
 - The worker VM never holds the Forgejo admin token; only a single-use ephemeral
   registration token, delivered over SSH via stdin (never the command line).
 - CI runs `govulncheck` against the dependency tree.
@@ -116,7 +125,12 @@ Built milestone by milestone:
 
 - **M1** — poll, provision one VM, run an ephemeral `one-job`, destroy on idle.
 - **M2** — warm-hold + `:55` billing-hour teardown.
-- **M3** — orphan sweep, three-source reconcile with crash-recovery, scale-to-N.
+- **M3** — orphan sweep, three-source reconcile (jobs + runners + instances) with
+  crash-recovery, graceful shutdown drain, scale-to-N, deterministic SSH
+  host-key verification, and a provider-selectable dispatch mechanism.
+
+A local Docker provider (containers as workers, dispatched via `docker exec`) is
+in progress — see issue [#15](https://github.com/hstern/fj-bellows/issues/15).
 
 ## License
 
