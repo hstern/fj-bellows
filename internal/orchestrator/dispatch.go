@@ -1,12 +1,14 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -35,6 +37,10 @@ type SSHDispatcher struct {
 	ReadyFile   string
 	ReadyWait   time.Duration // total time to wait for readiness
 	DialTimeout time.Duration
+
+	// pinsMu guards pins, the per-VM trust-on-first-use host-key store.
+	pinsMu sync.Mutex
+	pins   map[string]ssh.PublicKey
 }
 
 // WaitReady polls SSH until the readiness sentinel exists.
@@ -97,7 +103,7 @@ func (d *SSHDispatcher) dial(ctx context.Context, ip string) (*ssh.Client, error
 	cfg := &ssh.ClientConfig{
 		User:            d.User,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(d.Signer)},
-		HostKeyCallback: hostKeyCallback(),
+		HostKeyCallback: d.tofuHostKeyCallback(addr),
 		Timeout:         d.DialTimeout,
 	}
 	dialer := net.Dialer{Timeout: d.DialTimeout}
@@ -152,17 +158,40 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// hostKeyCallback returns the SSH host-key verification policy for worker VMs.
+// tofuHostKeyCallback returns a trust-on-first-use (TOFU) host-key verification
+// policy for the worker VM at addr.
 //
-// SECURITY (known limitation): workers are created fresh per billing hour and
-// their host key is not known in advance, so it cannot be pre-pinned. We
-// therefore do not verify the host key. The channel is still encrypted and the
-// VM authenticates us via the public key injected at provision time, but a
-// man-in-the-middle on the path to the worker's public IP could impersonate the
-// VM and capture the one-shot ephemeral runner token. Hardening path: inject a
-// known host key via cloud-init, or pin per-VM on first connect (TOFU). Tracked
-// as a known limitation in README.md / AGENTS.md.
-func hostKeyCallback() ssh.HostKeyCallback {
-	//nolint:gosec // G106: documented known limitation — fresh per-hour VMs have no pre-known host key. See doc above.
-	return ssh.InsecureIgnoreHostKey()
+// SECURITY: workers are created fresh per billing hour, so their host key is not
+// known in advance and cannot be pre-pinned. Instead we pin per-VM on first
+// contact: the first successful handshake to addr records the presented host
+// key in the dispatcher's pin store; every later dial to the same addr requires
+// a byte-equal key and rejects any mismatch (a possible man-in-the-middle that
+// appeared after first contact). Different addrs are pinned independently.
+//
+// Residual risk: a man-in-the-middle present at the very first contact with a
+// VM could still impersonate it and capture the one-shot ephemeral runner
+// token. After that first connect, the VM's identity is verified for the
+// remainder of its life. Eliminating the residual risk would require injecting
+// a known host key via cloud-init (out of scope here).
+func (d *SSHDispatcher) tofuHostKeyCallback(addr string) ssh.HostKeyCallback {
+	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		d.pinsMu.Lock()
+		defer d.pinsMu.Unlock()
+		if d.pins == nil {
+			d.pins = make(map[string]ssh.PublicKey)
+		}
+		pinned, ok := d.pins[addr]
+		if !ok {
+			// First contact: trust and record the presented key.
+			d.pins[addr] = key
+			return nil
+		}
+		if !bytes.Equal(pinned.Marshal(), key.Marshal()) {
+			return fmt.Errorf(
+				"host key mismatch for %s: presented %s key does not match pinned key (possible MITM)",
+				addr, key.Type(),
+			)
+		}
+		return nil
+	}
 }

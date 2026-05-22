@@ -63,5 +63,13 @@ SSH. `SSHDispatcher` connects in-process with `golang.org/x/crypto/ssh`, writes
 the one-shot token via stdin (never the command line), and runs
 `forgejo-runner one-job ... --wait` to completion.
 
+Host keys are verified with **trust-on-first-use (TOFU) per-VM pinning**: fresh
+per-hour VMs have no pre-known host key, so the first successful handshake to an
+address records the presented key in an in-dispatcher pin store, and every later
+dial to that address must present a byte-equal key (a mismatch is rejected as a
+possible MITM). Different addresses are pinned independently. Residual risk: a
+MITM present at the very first contact could still impersonate the VM; after
+that, its identity is verified for the rest of its life.
+
 Dependencies are interfaces (`JobSource`, `Dispatcher`, `provider.Provider`);
 see [`mock`](mock) for the test doubles.
