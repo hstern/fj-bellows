@@ -62,8 +62,12 @@ type Instance struct {
 // Provider is the in-tree cloud abstraction.
 type Provider interface {
 	// Configure decodes the opaque provider_config node into the provider's
-	// own struct and prepares any client/credentials.
-	Configure(node yaml.Node) error
+	// own struct and prepares any client/credentials. ctx bounds any
+	// network calls the provider makes during startup (e.g. resolving
+	// firewall sentinels). tag is the orchestrator's cfg.Tag, passed in
+	// here so the provider can stand up any tag-scoped resources at
+	// startup rather than deferring them to the first Provision call.
+	Configure(ctx context.Context, tag string, node yaml.Node) error
 
 	// Provision creates a VM and returns it once the provider reports it as
 	// created (not necessarily booted; the core waits for SSH readiness).

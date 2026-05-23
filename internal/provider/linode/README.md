@@ -17,7 +17,6 @@ provider_config:
     allow_inbound:
       - 203.0.113.5/32
       - auto              # host's external IPv4 (/32) + IPv6 (/128)
-      - github-actions    # api.github.com/meta `.actions` egress CIDRs
     refresh_interval: 1h  # optional; default 1h, minimum 1m
 
   # Alternative: attach to an operator-managed firewall by ID. Use this when
@@ -34,13 +33,12 @@ default-deny inbound posture: only tcp/22 from the resolved `allow_inbound`
 CIDRs. Outbound is unrestricted (workers need HTTPS to Forgejo, registries,
 etc.).
 
-`allow_inbound` accepts literal CIDRs plus two sentinels:
+`allow_inbound` accepts literal CIDRs plus one sentinel:
 
 | Token | Expands to |
 |---|---|
 | `<cidr>` | itself |
 | `auto` | host's external IPv4 (`/32`) and IPv6 (`/128`), via icanhazip |
-| `github-actions` | `api.github.com/meta` → `.actions[]` egress CIDRs |
 
 Sentinel resolution is **fatal at Configure** (startup) — a sentinel that
 can't resolve or an `allow_inbound` that ends up empty makes the daemon

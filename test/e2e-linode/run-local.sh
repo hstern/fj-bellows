@@ -123,9 +123,11 @@ provider_config:
   type: g6-nanode-1
   image: linode/debian12
   token: $TOKEN
-  # Managed firewall: SSH only from this host's external IP. Validates the
-  # managed-mode happy path against a real Linode account. See #26. The PAT
-  # in ~/.linode.pat needs Firewalls: R/W in addition to Linodes: R/W.
+  # Managed firewall: SSH only from this host's external IP. github-actions
+  # is intentionally NOT exercised here — its CIDR list (5000+ v4 today)
+  # exceeds Linode's 25-rule-per-firewall cap; tracking that limitation in
+  # the followup issue. The PAT in ~/.linode.pat needs Firewalls: R/W in
+  # addition to Linodes: R/W.
   firewall:
     allow_inbound:
       - auto

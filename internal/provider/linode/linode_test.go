@@ -1,6 +1,7 @@
 package linode
 
 import (
+	"context"
 	"net"
 	"strings"
 	"testing"
@@ -33,7 +34,7 @@ type: example-type
 image: example/image
 token: abc123
 `)
-	if err := l.Configure(node); err != nil {
+	if err := l.Configure(context.Background(), "testtag", node); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
 	if l.cfg.Region != "example-region" || l.cfg.Type != "example-type" {
@@ -53,7 +54,7 @@ image: example/image
 token: abc123
 firewall_id: 12345
 `)
-	if err := l.Configure(node); err != nil {
+	if err := l.Configure(context.Background(), "testtag", node); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
 	if l.cfg.FirewallID != 12345 {
@@ -72,7 +73,7 @@ firewall_id: 12345
 firewall:
   allow_inbound: ['203.0.113.5/32']
 `)
-	err := l.Configure(node)
+	err := l.Configure(context.Background(), "testtag", node)
 	if err == nil {
 		t.Fatal("expected error when both firewall and firewall_id are set")
 	}
@@ -91,12 +92,19 @@ token: abc123
 firewall:
   allow_inbound: []
 `)
-	if err := l.Configure(node); err == nil {
+	if err := l.Configure(context.Background(), "testtag", node); err == nil {
 		t.Fatal("expected error: empty allow_inbound would leave a firewall nobody can reach")
 	}
 }
 
-func TestConfigureFirewallLiteralOnlyOK(t *testing.T) {
+func TestConfigureFirewallLiteralReachesAPI(t *testing.T) {
+	// With eager-create, a valid literal-CIDR firewall block makes Configure
+	// reach the Linode firewall API. We can't fake the linodego.Client at
+	// this layer, so we use a deliberately-fake token and assert Configure
+	// gets past YAML decode + the mutex check + sentinel validation, and
+	// the only failure is from the (real, unauthenticated) API call. The
+	// firewall-API behaviour itself is covered by firewall_test.go against
+	// the fakeFirewallClient.
 	l := &Linode{}
 	node := nodeFromYAML(t, `
 region: example-region
@@ -106,11 +114,15 @@ token: abc123
 firewall:
   allow_inbound: ['203.0.113.5/32', '198.51.100.0/24']
 `)
-	if err := l.Configure(node); err != nil {
-		t.Fatalf("Configure: %v", err)
+	err := l.Configure(context.Background(), "testtag", node)
+	if err == nil {
+		t.Fatal("expected error: fake token can't authenticate to the Linode API")
+	}
+	if !strings.Contains(err.Error(), "firewall") {
+		t.Errorf("error should be firewall-API-related, got: %v", err)
 	}
 	if l.cfg.Firewall == nil {
-		t.Fatal("Firewall block should be set")
+		t.Fatal("Firewall block should still be decoded onto cfg even on API error")
 	}
 	if len(l.cfg.Firewall.AllowInbound) != 2 {
 		t.Errorf("AllowInbound = %v", l.cfg.Firewall.AllowInbound)
@@ -120,7 +132,7 @@ firewall:
 func TestConfigureMissingFields(t *testing.T) {
 	l := &Linode{}
 	node := nodeFromYAML(t, `region: example-region`)
-	if err := l.Configure(node); err == nil {
+	if err := l.Configure(context.Background(), "testtag", node); err == nil {
 		t.Fatal("expected error for missing type/image/token")
 	}
 }
@@ -132,7 +144,7 @@ region: r
 type: t
 image: i
 `)
-	if err := l.Configure(node); err == nil {
+	if err := l.Configure(context.Background(), "testtag", node); err == nil {
 		t.Fatal("expected error for missing token")
 	}
 }

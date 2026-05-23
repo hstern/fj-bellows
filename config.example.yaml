@@ -54,12 +54,9 @@ provider_config:
   # goes away. Default-deny inbound except tcp/22 from allow_inbound; outbound
   # unrestricted. Mutually exclusive with `firewall_id` below.
   #
-  # `allow_inbound` accepts literal CIDRs plus two sentinels:
-  #   - `auto`           — orchestrator's external IPv4 (/32) + IPv6 (/128),
-  #                        resolved via icanhazip at startup and on refresh.
-  #   - `github-actions` — api.github.com/meta `.actions` egress CIDRs;
-  #                        useful when fj-bellows itself runs from a
-  #                        GH-hosted runner.
+  # `allow_inbound` accepts literal CIDRs plus one sentinel:
+  #   - `auto` — orchestrator's external IPv4 (/32) + IPv6 (/128), resolved
+  #              via icanhazip at startup and on refresh.
   #
   # Sentinel resolution failure or an empty resolved set is FATAL at startup;
   # the daemon refuses to start with a firewall nobody can reach. A refresh
@@ -72,7 +69,6 @@ provider_config:
   #   allow_inbound:
   #     - 203.0.113.5/32
   #     - auto
-  #     - github-actions
   #   refresh_interval: 1h
 
   # Alternative: attach every provisioned worker to a pre-existing Linode

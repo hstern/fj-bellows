@@ -97,7 +97,7 @@ func TestRegisteredInRegistry(t *testing.T) {
 func TestConfigureDefaults(t *testing.T) {
 	d := &Docker{}
 	node := nodeFromYAML(t, `image: example/worker:latest`)
-	if err := d.Configure(node); err != nil {
+	if err := d.Configure(context.Background(), "testtag", node); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
 	if d.DockerBin() != "docker" {
@@ -114,7 +114,7 @@ func TestConfigureDefaults(t *testing.T) {
 func TestConfigureMissingImage(t *testing.T) {
 	d := &Docker{}
 	node := nodeFromYAML(t, `network: foo`)
-	if err := d.Configure(node); err == nil {
+	if err := d.Configure(context.Background(), "testtag", node); err == nil {
 		t.Fatal("expected error for missing image")
 	}
 }
@@ -127,7 +127,7 @@ network: my-net
 docker_bin: /usr/local/bin/docker
 wait_timeout: 5s
 `)
-	if err := d.Configure(node); err != nil {
+	if err := d.Configure(context.Background(), "testtag", node); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
 	if d.DockerBin() != "/usr/local/bin/docker" {
@@ -147,7 +147,7 @@ func TestConfigureBadDuration(t *testing.T) {
 image: example/worker:latest
 wait_timeout: not-a-duration
 `)
-	if err := d.Configure(node); err == nil {
+	if err := d.Configure(context.Background(), "testtag", node); err == nil {
 		t.Fatal("expected duration parse error")
 	}
 }

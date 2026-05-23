@@ -107,9 +107,14 @@ func run(opts runOpts, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if err := prov.Configure(cfg.ProviderConfig); err != nil {
+	// Bound the Configure-time network calls (provider sentinel fetches,
+	// firewall API, etc.) so a hung upstream can't wedge startup forever.
+	cfgCtx, cancelCfg := context.WithTimeout(context.Background(), 60*time.Second)
+	if err := prov.Configure(cfgCtx, cfg.Tag, cfg.ProviderConfig); err != nil {
+		cancelCfg()
 		return err
 	}
+	cancelCfg()
 
 	// Forgejo's job-queue ?labels= filter matches the bare label a workflow
 	// declares in `runs_on`, so strip any `:scheme://image` binding before

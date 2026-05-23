@@ -11,7 +11,7 @@ import (
 
 type stub struct{}
 
-func (stub) Configure(yaml.Node) error { return nil }
+func (stub) Configure(context.Context, string, yaml.Node) error { return nil }
 func (stub) Provision(context.Context, provider.Spec) (provider.Instance, error) {
 	return provider.Instance{}, nil
 }
