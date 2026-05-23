@@ -275,6 +275,19 @@ func (o *Orchestrator) dispatchJobs(ctx context.Context, jobs []forgejo.WaitingJ
 	if needProvision == 0 {
 		return
 	}
+	// Credit in-flight new capacity against unmet demand: nodes that are still
+	// booting (StateProvisioning) or whose Provision call has not yet landed in
+	// the pool (pending) will become Idle without us spawning anything new.
+	// Without this credit, a slow boot (boot_time >> poll_interval) re-evaluates
+	// "I have N waiting and 0 idle" every poll and stamps out ~ceil(boot/poll)×
+	// VMs per real job until MaxScale caps. See #32.
+	soon := len(o.pool.ByState(StateProvisioning)) + o.pendingCount()
+	needProvision -= soon
+	if needProvision <= 0 {
+		return
+	}
+	// MaxScale stays as the final safety net; the credit above is the primary
+	// guard so we no longer rely on it to stop runaway provisioning.
 	active := o.pool.Len() + o.pendingCount()
 	canAdd := o.cfg.MaxScale - active
 	for i := 0; i < needProvision && i < canAdd; i++ {

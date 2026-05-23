@@ -612,3 +612,93 @@ func TestFilterServiceable(t *testing.T) {
 		}
 	}
 }
+
+// TestReconcileCountsProvisioningAsFutureCapacity is the regression test for
+// #32. With a slow boot (boot_time >> poll_interval), nodes sit in
+// StateProvisioning across multiple reconciles while the same waiting jobs are
+// still on the queue. The fix credits StateProvisioning + pending against
+// unmet demand; without it, every tick would re-stamp the same N provisions
+// until MaxScale capped the runaway.
+func TestReconcileCountsProvisioningAsFutureCapacity(t *testing.T) {
+	release := make(chan struct{})
+	prov := trackingProvider()
+	jobs := &omock.JobSource{
+		WaitingJobsFn: func(context.Context) ([]forgejo.WaitingJob, error) {
+			// Forgejo still reports the same jobs as waiting because no runner
+			// has registered yet (the boot is in flight).
+			return nUbuntuJobs(2), nil
+		},
+	}
+	// Dispatcher blocks WaitReady, freezing nodes in StateProvisioning until
+	// the test releases them. This mirrors a real cloud where Provision returns
+	// the instance ID in seconds but SSH readiness lags by ~60-90s.
+	disp := &omock.Dispatcher{
+		WaitReadyFn: func(context.Context, string, string) error {
+			<-release
+			return nil
+		},
+	}
+	cfg := baseConfig()
+	cfg.MaxScale = 8 // generous headroom so MaxScale cannot mask the bug
+	o := New(cfg, prov, jobs, disp, nil)
+
+	// First reconcile: 2 jobs, 0 idle -> 2 provisions, both stuck in WaitReady.
+	o.Reconcile(context.Background())
+	waitFor(t, "two nodes in StateProvisioning", func() bool {
+		return len(o.pool.ByState(StateProvisioning)) == 2
+	})
+
+	// Subsequent reconciles must not stamp out more VMs: the 2 booting nodes
+	// are credited against the 2 still-waiting jobs.
+	o.Reconcile(context.Background())
+	o.Reconcile(context.Background())
+	o.Reconcile(context.Background())
+	time.Sleep(50 * time.Millisecond)
+
+	if got := prov.ProvisionCount(); got != 2 {
+		t.Errorf("ProvisionCount = %d, want 2 (StateProvisioning must credit future capacity; pre-fix would be 8 = MaxScale)", got)
+	}
+
+	// Release and let goroutines finish so goleak stays clean.
+	close(release)
+	waitFor(t, "pool reaches 2 idle nodes", func() bool {
+		return len(o.pool.ByState(StateIdle)) == 2
+	})
+}
+
+// TestReconcileSubtractsProvisioningFromNeed exercises the credit math with a
+// mix: 5 jobs, 1 idle, 2 already-provisioning. Expected new provisions: 2
+// (5 - 1 idle assigned in the loop - 2 provisioning credited as future).
+func TestReconcileSubtractsProvisioningFromNeed(t *testing.T) {
+	prov := trackingProvider(
+		// The idle node is reported by List so syncPool adopts it.
+		provider.Instance{ID: "idle1", IPv4: "10.0.0.1", CreatedAt: time.Now()},
+	)
+	jobs := &omock.JobSource{
+		WaitingJobsFn: func(context.Context) ([]forgejo.WaitingJob, error) {
+			return nUbuntuJobs(5), nil
+		},
+	}
+	disp := &omock.Dispatcher{}
+	cfg := baseConfig()
+	cfg.MaxScale = 10
+	o := New(cfg, prov, jobs, disp, nil)
+	// Pre-seed 2 nodes already booting from a prior tick. They are not in the
+	// provider's List output (we want syncPool to leave them alone via the
+	// StateProvisioning carve-out rather than re-adopt them).
+	o.pool.Put(&Node{InstanceID: "prov1", State: StateProvisioning, IP: "10.0.0.2"})
+	o.pool.Put(&Node{InstanceID: "prov2", State: StateProvisioning, IP: "10.0.0.3"})
+
+	o.Reconcile(context.Background())
+	waitFor(t, "1 dispatch and 2 new provisions", func() bool {
+		return disp.RunCount() == 1 && prov.ProvisionCount() == 2
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	if disp.RunCount() != 1 {
+		t.Errorf("RunCount = %d, want 1 (one job served by the idle node)", disp.RunCount())
+	}
+	if got := prov.ProvisionCount(); got != 2 {
+		t.Errorf("ProvisionCount = %d, want 2 (5 jobs - 1 idle - 2 provisioning)", got)
+	}
+}
