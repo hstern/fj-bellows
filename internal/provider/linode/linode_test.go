@@ -2,6 +2,7 @@ package linode
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,62 @@ firewall_id: 12345
 	}
 	if l.cfg.FirewallID != 12345 {
 		t.Errorf("FirewallID = %d, want 12345", l.cfg.FirewallID)
+	}
+}
+
+func TestConfigureFirewallAndFirewallIDAreMutuallyExclusive(t *testing.T) {
+	l := &Linode{}
+	node := nodeFromYAML(t, `
+region: example-region
+type: example-type
+image: example/image
+token: abc123
+firewall_id: 12345
+firewall:
+  allow_inbound: ['203.0.113.5/32']
+`)
+	err := l.Configure(node)
+	if err == nil {
+		t.Fatal("expected error when both firewall and firewall_id are set")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error %v should mention mutual exclusion", err)
+	}
+}
+
+func TestConfigureFirewallEmptyAllowInboundIsFatal(t *testing.T) {
+	l := &Linode{}
+	node := nodeFromYAML(t, `
+region: example-region
+type: example-type
+image: example/image
+token: abc123
+firewall:
+  allow_inbound: []
+`)
+	if err := l.Configure(node); err == nil {
+		t.Fatal("expected error: empty allow_inbound would leave a firewall nobody can reach")
+	}
+}
+
+func TestConfigureFirewallLiteralOnlyOK(t *testing.T) {
+	l := &Linode{}
+	node := nodeFromYAML(t, `
+region: example-region
+type: example-type
+image: example/image
+token: abc123
+firewall:
+  allow_inbound: ['203.0.113.5/32', '198.51.100.0/24']
+`)
+	if err := l.Configure(node); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if l.cfg.Firewall == nil {
+		t.Fatal("Firewall block should be set")
+	}
+	if len(l.cfg.Firewall.AllowInbound) != 2 {
+		t.Errorf("AllowInbound = %v", l.cfg.Firewall.AllowInbound)
 	}
 }
 

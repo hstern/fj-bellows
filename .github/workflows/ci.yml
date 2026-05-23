@@ -303,7 +303,7 @@ jobs:
           fi
           echo "name=$cid" >> "$GITHUB_OUTPUT"
 
-      - name: Pre-flight cleanup of leaked Linodes (fj-bellows-e2e-ci-*)
+      - name: Pre-flight cleanup of leaked Linodes + firewalls (fj-bellows-e2e-ci-*)
         run: |
           set -euo pipefail
           ids=$(curl -sS -H "Authorization: Bearer $LINODE_TOKEN" \
@@ -313,6 +313,17 @@ jobs:
             echo "destroying leaked Linode $id"
             curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $LINODE_TOKEN" \
               "https://api.linode.com/v4/linode/instances/$id"
+          done
+          # Same prefix sweep for managed firewalls (#26). A firewall with
+          # devices still attached can't be deleted; the loop above removed
+          # the devices first.
+          fwids=$(curl -sS -H "Authorization: Bearer $LINODE_TOKEN" \
+                    'https://api.linode.com/v4/networking/firewalls?page_size=200' \
+                  | jq -r '.data[]? | select(.tags|any(startswith("fj-bellows-e2e-ci-"))) | .id')
+          for id in $fwids; do
+            echo "destroying leaked firewall $id"
+            curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $LINODE_TOKEN" \
+              "https://api.linode.com/v4/networking/firewalls/$id"
           done
 
       - name: Generate ephemeral SSH keypair
@@ -350,6 +361,12 @@ jobs:
             type: g6-nanode-1
             image: linode/debian12
             token: ${LINODE_TOKEN}
+            # Managed firewall: SSH only from GH-hosted runner egress (the
+            # CI orchestrator's source). Validates the managed-mode happy
+            # path against a real Linode account. See #26.
+            firewall:
+              allow_inbound:
+                - github-actions
           ssh:
             private_key_file: $RUNNER_TEMP/id_ed25519
             user: root
@@ -480,7 +497,9 @@ jobs:
           if [ -s fj-bellows.pid ]; then
             kill "$(cat fj-bellows.pid)" 2>/dev/null
           fi
-          # Destroy any Linode left carrying our run tag.
+          # Destroy any Linode + managed firewall left carrying our run tag.
+          # Order matters: a firewall with devices still attached can't be
+          # deleted, so destroy instances first, then the firewall.
           if [ -n "${LINODE_TOKEN:-}" ] && [ -n "${TAG:-}" ]; then
             ids=$(curl -sS -H "Authorization: Bearer $LINODE_TOKEN" \
                     'https://api.linode.com/v4/linode/instances?page_size=200' \
@@ -489,6 +508,14 @@ jobs:
               echo "post-flight: destroying Linode $id"
               curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $LINODE_TOKEN" \
                 "https://api.linode.com/v4/linode/instances/$id"
+            done
+            fwids=$(curl -sS -H "Authorization: Bearer $LINODE_TOKEN" \
+                      'https://api.linode.com/v4/networking/firewalls?page_size=200' \
+                    | jq -r --arg t "$TAG" '.data[]? | select(.tags|index($t)) | .id')
+            for id in $fwids; do
+              echo "post-flight: destroying managed firewall $id"
+              curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $LINODE_TOKEN" \
+                "https://api.linode.com/v4/networking/firewalls/$id"
             done
           fi
 

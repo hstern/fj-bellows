@@ -31,7 +31,7 @@ provider in CI.
 ## Local: `run-local.sh`
 
 ```sh
-echo "$YOUR_LINODE_PAT" > ~/.linode.pat   # Linodes: Read/Write only
+echo "$YOUR_LINODE_PAT" > ~/.linode.pat   # Linodes: R/W + Firewalls: R/W
 chmod 600 ~/.linode.pat
 test/e2e-linode/run-local.sh
 ```

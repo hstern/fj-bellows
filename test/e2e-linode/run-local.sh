@@ -48,6 +48,15 @@ destroy_tagged() {
     log "destroying Linode $id"
     linode_api DELETE "/linode/instances/$id" >/dev/null 2>&1 || true
   done
+  # Same prefix sweep for managed firewalls (#26). Instance deletes above
+  # must finish first so the firewall has no devices when we DELETE it.
+  local fwids
+  fwids=$(linode_api GET '/networking/firewalls?page_size=200' 2>/dev/null \
+          | jq -r --arg p "$prefix" '.data[]? | select(.tags|any(startswith($p))) | .id' 2>/dev/null || true)
+  for id in $fwids; do
+    log "destroying managed firewall $id"
+    linode_api DELETE "/networking/firewalls/$id" >/dev/null 2>&1 || true
+  done
 }
 
 cleanup() {
@@ -114,6 +123,12 @@ provider_config:
   type: g6-nanode-1
   image: linode/debian12
   token: $TOKEN
+  # Managed firewall: SSH only from this host's external IP. Validates the
+  # managed-mode happy path against a real Linode account. See #26. The PAT
+  # in ~/.linode.pat needs Firewalls: R/W in addition to Linodes: R/W.
+  firewall:
+    allow_inbound:
+      - auto
 ssh:
   private_key_file: $KEY
   user: root

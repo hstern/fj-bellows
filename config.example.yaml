@@ -48,9 +48,36 @@ provider_config:
   type: <linode-instance-type>
   image: <linode-image>
   token: <provider-api-token>
-  # Optional: attach every provisioned worker to a pre-existing Linode Cloud
-  # Firewall (operator-managed out of band). Useful for default-deny workers
-  # that only accept inbound SSH from the orchestrator's egress.
+
+  # Managed Cloud Firewall (recommended). One firewall per deployment, keyed
+  # by `tag` above; created on first Provision, deleted when the last worker
+  # goes away. Default-deny inbound except tcp/22 from allow_inbound; outbound
+  # unrestricted. Mutually exclusive with `firewall_id` below.
+  #
+  # `allow_inbound` accepts literal CIDRs plus two sentinels:
+  #   - `auto`           — orchestrator's external IPv4 (/32) + IPv6 (/128),
+  #                        resolved via icanhazip at startup and on refresh.
+  #   - `github-actions` — api.github.com/meta `.actions` egress CIDRs;
+  #                        useful when fj-bellows itself runs from a
+  #                        GH-hosted runner.
+  #
+  # Sentinel resolution failure or an empty resolved set is FATAL at startup;
+  # the daemon refuses to start with a firewall nobody can reach. A refresh
+  # goroutine re-resolves on `refresh_interval` (default 1h, min 1m) and
+  # updates the firewall rules on drift; runtime refresh failure keeps the
+  # previous-known-good rules in place.
+  #
+  # Managed mode needs PAT scope: Linodes: R/W + Firewalls: R/W.
+  # firewall:
+  #   allow_inbound:
+  #     - 203.0.113.5/32
+  #     - auto
+  #     - github-actions
+  #   refresh_interval: 1h
+
+  # Alternative: attach every provisioned worker to a pre-existing Linode
+  # Cloud Firewall (operator-managed out of band). Simpler; only needs
+  # Linodes: R/W. Mutually exclusive with `firewall` above.
   # firewall_id: 123456
 
 poll:
