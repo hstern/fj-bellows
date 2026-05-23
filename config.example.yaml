@@ -36,6 +36,10 @@ provider_config:
   type: <linode-instance-type>
   image: <linode-image>
   token: <provider-api-token>
+  # Optional: attach every provisioned worker to a pre-existing Linode Cloud
+  # Firewall (operator-managed out of band). Useful for default-deny workers
+  # that only accept inbound SSH from the orchestrator's egress.
+  # firewall_id: 123456
 
 poll:
   # How often to reconcile the queue against runners and instances.

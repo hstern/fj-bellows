@@ -38,6 +38,26 @@ token: abc123
 	if l.cfg.Region != "example-region" || l.cfg.Type != "example-type" {
 		t.Errorf("cfg = %+v", l.cfg)
 	}
+	if l.cfg.FirewallID != 0 {
+		t.Errorf("FirewallID = %d, want 0 (unset)", l.cfg.FirewallID)
+	}
+}
+
+func TestConfigureFirewallID(t *testing.T) {
+	l := &Linode{}
+	node := nodeFromYAML(t, `
+region: example-region
+type: example-type
+image: example/image
+token: abc123
+firewall_id: 12345
+`)
+	if err := l.Configure(node); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if l.cfg.FirewallID != 12345 {
+		t.Errorf("FirewallID = %d, want 12345", l.cfg.FirewallID)
+	}
 }
 
 func TestConfigureMissingFields(t *testing.T) {

@@ -25,10 +25,11 @@ import (
 
 // config is the provider_config subtree for Linode.
 type config struct {
-	Region string `yaml:"region"`
-	Type   string `yaml:"type"`
-	Image  string `yaml:"image"`
-	Token  string `yaml:"token"`
+	Region     string `yaml:"region"`
+	Type       string `yaml:"type"`
+	Image      string `yaml:"image"`
+	Token      string `yaml:"token"`
+	FirewallID int    `yaml:"firewall_id"`
 }
 
 // Linode is the provider implementation.
@@ -89,6 +90,9 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	}
 	if key := strings.TrimSpace(spec.AuthorizedKey); key != "" {
 		opts.AuthorizedKeys = []string{key}
+	}
+	if l.cfg.FirewallID != 0 {
+		opts.FirewallID = l.cfg.FirewallID
 	}
 	inst, err := l.client.CreateInstance(ctx, opts)
 	if err != nil {
