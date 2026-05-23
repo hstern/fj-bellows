@@ -9,21 +9,33 @@ import (
 
 func TestNextKillMark(t *testing.T) {
 	created := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
-	margin := 5 * time.Minute
 	tests := []struct {
-		name string
-		now  time.Time
-		want time.Time
+		name   string
+		cycle  time.Duration
+		margin time.Duration
+		now    time.Time
+		want   time.Time
 	}{
-		{"start of first hour", created, created.Add(55 * time.Minute)},
-		{"mid first hour", created.Add(30 * time.Minute), created.Add(55 * time.Minute)},
-		{"into second hour", created.Add(65 * time.Minute), created.Add(115 * time.Minute)},
-		{"into third hour", created.Add(125 * time.Minute), created.Add(175 * time.Minute)},
+		// 1h / 5m: the classic ":55" rule.
+		{"1h start of first hour", time.Hour, 5 * time.Minute, created, created.Add(55 * time.Minute)},
+		{"1h mid first hour", time.Hour, 5 * time.Minute, created.Add(30 * time.Minute), created.Add(55 * time.Minute)},
+		{"1h into second hour", time.Hour, 5 * time.Minute, created.Add(65 * time.Minute), created.Add(115 * time.Minute)},
+		{"1h into third hour", time.Hour, 5 * time.Minute, created.Add(125 * time.Minute), created.Add(175 * time.Minute)},
+
+		// 5m / 2m: the user's worked example — kill at created+3m, +8m, +13m...
+		{"5m start of first cycle", 5 * time.Minute, 2 * time.Minute, created, created.Add(3 * time.Minute)},
+		{"5m mid first cycle", 5 * time.Minute, 2 * time.Minute, created.Add(2 * time.Minute), created.Add(3 * time.Minute)},
+		{"5m into second cycle", 5 * time.Minute, 2 * time.Minute, created.Add(6 * time.Minute), created.Add(8 * time.Minute)},
+		{"5m into third cycle", 5 * time.Minute, 2 * time.Minute, created.Add(11 * time.Minute), created.Add(13 * time.Minute)},
+
+		// Zero cycle falls back to 1h (defensive default).
+		{"zero cycle falls back to 1h", 0, 5 * time.Minute, created, created.Add(55 * time.Minute)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := NextKillMark(created, tc.now, margin); !got.Equal(tc.want) {
-				t.Errorf("NextKillMark = %s, want %s", got, tc.want)
+			if got := NextKillMark(created, tc.now, tc.cycle, tc.margin); !got.Equal(tc.want) {
+				t.Errorf("NextKillMark(cycle=%s, margin=%s) = %s, want %s",
+					tc.cycle, tc.margin, got, tc.want)
 			}
 		})
 	}
@@ -31,25 +43,48 @@ func TestNextKillMark(t *testing.T) {
 
 func TestShouldTeardownHourly(t *testing.T) {
 	created := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
-	tp := TeardownPolicy{Model: provider.BillingHourlyRoundUp, HourMargin: 5 * time.Minute}
-	n := Node{CreatedAt: created, State: StateIdle}
-
 	cases := []struct {
+		name    string
+		cycle   time.Duration
+		margin  time.Duration
 		elapsed time.Duration
 		want    bool
 	}{
-		{30 * time.Minute, false}, // warm, well before :55
-		{54 * time.Minute, false}, // just before kill mark
-		{55 * time.Minute, true},  // at :55 -> kill
-		{56 * time.Minute, true},  // past :55
-		{65 * time.Minute, false}, // rolled into next paid hour, warm again
-		{115 * time.Minute, true}, // :55 of the second hour
+		// 1h / 5m: the classic case. Leaving BillingHour zero must keep this
+		// semantics for backward compatibility with existing callers.
+		{"1h: warm well before kill mark", 0, 5 * time.Minute, 30 * time.Minute, false},
+		{"1h: just before kill mark", 0, 5 * time.Minute, 54 * time.Minute, false},
+		{"1h: at kill mark", 0, 5 * time.Minute, 55 * time.Minute, true},
+		{"1h: past kill mark", 0, 5 * time.Minute, 56 * time.Minute, true},
+		{"1h: rolled into next paid hour", 0, 5 * time.Minute, 65 * time.Minute, false},
+		{"1h: kill mark of second hour", 0, 5 * time.Minute, 115 * time.Minute, true},
+
+		// Same with BillingHour explicitly set (proves the explicit form matches).
+		{"1h explicit: at kill mark", time.Hour, 5 * time.Minute, 55 * time.Minute, true},
+
+		// 5m / 2m: the user's worked example.
+		{"5m/2m: warm well before kill mark", 5 * time.Minute, 2 * time.Minute, 1 * time.Minute, false},
+		{"5m/2m: just before kill mark", 5 * time.Minute, 2 * time.Minute, 2*time.Minute + 59*time.Second, false},
+		{"5m/2m: at first kill mark", 5 * time.Minute, 2 * time.Minute, 3 * time.Minute, true},
+		{"5m/2m: past first kill mark", 5 * time.Minute, 2 * time.Minute, 4 * time.Minute, true},
+		{"5m/2m: rolled into second cycle", 5 * time.Minute, 2 * time.Minute, 6 * time.Minute, false},
+		{"5m/2m: at second kill mark", 5 * time.Minute, 2 * time.Minute, 8 * time.Minute, true},
+		{"5m/2m: at third kill mark", 5 * time.Minute, 2 * time.Minute, 13 * time.Minute, true},
 	}
 	for _, c := range cases {
-		now := created.Add(c.elapsed)
-		if got := tp.ShouldTeardown(n, now); got != c.want {
-			t.Errorf("elapsed %s: ShouldTeardown = %v, want %v", c.elapsed, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			tp := TeardownPolicy{
+				Model:       provider.BillingHourlyRoundUp,
+				HourMargin:  c.margin,
+				BillingHour: c.cycle,
+			}
+			n := Node{CreatedAt: created, State: StateIdle}
+			now := created.Add(c.elapsed)
+			if got := tp.ShouldTeardown(n, now); got != c.want {
+				t.Errorf("elapsed %s (cycle %s, margin %s): ShouldTeardown = %v, want %v",
+					c.elapsed, c.cycle, c.margin, got, c.want)
+			}
+		})
 	}
 }
 

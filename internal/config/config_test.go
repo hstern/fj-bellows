@@ -44,6 +44,9 @@ ssh:
 	if cfg.Poll.Interval.D() != 10*time.Second {
 		t.Errorf("default interval = %s", cfg.Poll.Interval.D())
 	}
+	if cfg.Poll.BillingHour.D() != time.Hour {
+		t.Errorf("default billing_hour = %s, want 1h", cfg.Poll.BillingHour.D())
+	}
 	if cfg.SSH.User != "root" || cfg.SSH.Port != 22 {
 		t.Errorf("ssh defaults = %q:%d", cfg.SSH.User, cfg.SSH.Port)
 	}
@@ -70,6 +73,7 @@ poll:
   interval: 30s
   idle_timeout: 2m
   hour_margin: 90s
+  billing_hour: 5m
 `)
 	cfg, err := Load(path)
 	if err != nil {
@@ -83,6 +87,9 @@ poll:
 	}
 	if cfg.Poll.HourMargin.D() != 90*time.Second {
 		t.Errorf("margin = %s", cfg.Poll.HourMargin.D())
+	}
+	if cfg.Poll.BillingHour.D() != 5*time.Minute {
+		t.Errorf("billing_hour = %s", cfg.Poll.BillingHour.D())
 	}
 }
 

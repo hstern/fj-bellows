@@ -43,8 +43,15 @@ dispatch/teardown goroutines mutate only their own node's state.
 
 - `BillingPerSecond` — tear down after `IdleTimeout`.
 - `BillingHourlyRoundUp` — tear down at the kill mark
-  `created + (completedHours+1)*hour - HourMargin` (the `:55` rule). Timers are
-  **derived from `CreatedAt` each tick**, not stored, so they survive restarts.
+  `created + (completedCycles+1)*BillingHour - HourMargin` (the `:55` rule with
+  the 1h/5m defaults). Both `BillingHour` and `HourMargin` are configurable:
+  defaults match the provider's actual hourly rounding, but operators can
+  shorten `BillingHour` to reclaim idle VMs faster than the paid-hour boundary
+  (the cloud still bills the whole hour — you trade the fill-the-paid-hour
+  benefit for faster reclamation). E2E tests set them to seconds (e.g.
+  `BillingHour=60s, HourMargin=10s` → kill at `created+50s`) to exercise idle
+  teardown live without waiting an hour. Timers are **derived from `CreatedAt`
+  each tick**, not stored, so they survive restarts.
 
 ## Shutdown
 

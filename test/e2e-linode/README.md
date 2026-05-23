@@ -21,8 +21,10 @@ exercises the **docker** provider in CI.
    --handle` over `docker exec`-equivalent SSH. The runner's step container
    (sharing the Linode's network namespace via `--network host`) reaches
    Forgejo via the same loopback URL.
-5. Job completes (orchestrator logs `job complete`). Per-second idle teardown
-   reclaims the Linode.
+5. Job completes (orchestrator logs `job complete`). The E2E config sets
+   `poll.billing_hour: 60s, poll.hour_margin: 10s`, so the orchestrator's
+   hourly-cycle teardown fires within ~50s of the next cycle boundary and the
+   Linode is destroyed.
 6. Cleanup destroys any leaked instance carrying the run's tag, kills the
    tunnel and fj-bellows, and removes the Forgejo container — on **every**
    exit path including failure and SIGINT.
@@ -60,13 +62,18 @@ The CI version lives in `.github/workflows/ci.yml` as the `e2e-linode` job.
 - **Cleanup**: an `if: always()` step lists Linodes by the run's tag and
   destroys any survivor, complementing fj-bellows' own `-destroy-on-exit`.
 
-### What it does NOT assert
+### Idle teardown trade-off
 
-It does NOT wait for idle teardown to fire. Linode bills whole hours rounded
-up, so the orchestrator deliberately keeps the warm worker until `:55` of the
-paid hour — asserting fast teardown would contradict the design. The teardown
-policy is covered by the orchestrator unit tests (`internal/orchestrator/
-teardown_test.go`). The E2E asserts the live behavior that's hardest to mock:
-that a real Linode is provisioned, that the ephemeral REST registration works
-against a v15 Forgejo, and that `forgejo-runner one-job --handle` runs to
-completion.
+Linode bills whole hours rounded up, so by default the orchestrator keeps a
+warm worker until `:55` of the paid hour — maximizing reuse of the already-paid
+hour. The E2E job (both local and CI) overrides that by setting a very short
+`poll.billing_hour` (60s) so the kill-mark fires inside the test budget. **The
+Linode is still billed for one whole hour on Linode's side**; we're choosing
+to close earlier (sacrificing the fill-the-paid-hour benefit) so the test can
+actually observe end-to-end teardown. After "job complete" the E2E waits up to
+~120s for `destroyed idle node` in the log and confirms the Linode is gone
+from the Linode API.
+
+This is the only place `billing_hour` is shortened — production deployments
+should leave it at the default `1h` to fully use each paid hour. The teardown
+policy's pure logic is covered by `internal/orchestrator/teardown_test.go`.

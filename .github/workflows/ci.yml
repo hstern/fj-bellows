@@ -345,7 +345,14 @@ jobs:
           poll:
             interval: 5s
             idle_timeout: 30s
-            hour_margin: 5m
+            # Force a short billing cycle so idle teardown fires inside the
+            # CI budget. Linode still bills a whole hour on its side; we're
+            # just choosing to close earlier (sacrificing the
+            # fill-the-paid-hour benefit) so the E2E can actually observe a
+            # teardown. With billing_hour=60s + hour_margin=10s the kill
+            # mark is created+50s of every minute (then +1m50s, etc.).
+            billing_hour: 60s
+            hour_margin: 10s
           YAML
           chmod 600 config.yaml
           # Mask LINODE_TOKEN so even if a future step accidentally prints
@@ -439,12 +446,37 @@ jobs:
           tail -50 fj-bellows.log
           exit 1
 
-      # No "wait for idle teardown" step: Linode bills hourly-rounded-up, so the
-      # warm-hold deliberately keeps the worker until :55 of the paid hour.
-      # Asserting fast teardown contradicts the design. The unit tests already
-      # validate the teardown policy; the E2E asserts provisioning + ephemeral
-      # job execution. The cleanup step (`if: always()`) plus `-destroy-on-exit`
-      # ensure no Linode is leaked when the job ends.
+      # Idle teardown assertion. Now that billing_hour is configurable, the
+      # config above uses a 60s cycle with a 10s margin, so the orchestrator
+      # destroys an idle worker within ~50s of every cycle boundary. We give
+      # it ~120s after "job complete" to fire — comfortably above one cycle.
+      # Linode still bills the whole hour on its side; the cleanup step plus
+      # `-destroy-on-exit` reclaim the VM regardless.
+      - name: Wait for idle teardown in orchestrator log
+        env:
+          LIP: ${{ steps.linode.outputs.ip }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if grep -q 'destroyed idle node' fj-bellows.log; then
+              echo "idle teardown observed after ${i}*2s"
+              # Confirm the Linode is actually gone from the provider's view.
+              body=$(curl -sS -H "Authorization: Bearer $LINODE_TOKEN" \
+                       'https://api.linode.com/v4/linode/instances?page_size=200')
+              still=$(printf '%s' "$body" | jq -r --arg t "$TAG" \
+                      '[.data[]? | select(.tags|index($t))] | length')
+              if [ "$still" = "0" ]; then
+                echo "Linode with tag $TAG is gone from the API"
+                exit 0
+              fi
+              # The Linode DELETE may lag a few seconds behind the log line.
+              echo "log says destroyed but $still Linode(s) still listed; retrying"
+            fi
+            sleep 2
+          done
+          echo "ERROR: idle teardown did not fire within ~120s; last 50 lines:"
+          tail -50 fj-bellows.log
+          exit 1
 
       - name: Cleanup (always runs)
         if: always()

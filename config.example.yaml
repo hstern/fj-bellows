@@ -49,6 +49,13 @@ poll:
   # Hourly-rounding providers: kill an idle node this long before each paid-hour
   # boundary (5m -> the :55 rule).
   hour_margin: 5m
+  # Cycle length used to compute the kill mark (kill = created + N*billing_hour
+  # - hour_margin). Defaults to 1h, matching every cloud's actual hourly
+  # rounding. Shorten it to close idle VMs faster than the provider's paid-hour
+  # boundary — you sacrifice the fill-the-paid-hour benefit (Linode still bills
+  # the whole hour) in exchange for faster reclamation. E2E tests set this to a
+  # few seconds to exercise idle teardown live.
+  billing_hour: 1h
 
 ssh:
   # The orchestrator dispatches one-job to workers over SSH using this key.

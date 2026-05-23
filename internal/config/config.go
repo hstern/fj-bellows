@@ -66,6 +66,14 @@ type Poll struct {
 	// HourMargin applies to hourly-rounding billing providers: kill an idle
 	// node this long before each paid-hour boundary (5m -> the :55 rule).
 	HourMargin Duration `yaml:"hour_margin"`
+
+	// BillingHour is the cycle length used by hourly-rounding billing providers
+	// to compute kill marks (kill = created + N*BillingHour - HourMargin).
+	// Defaults to 1h, matching every cloud's actual hourly rounding. Operators
+	// can shorten it to close idle VMs faster than the provider's paid-hour
+	// boundary, trading the fill-the-paid-hour benefit for faster reclamation;
+	// E2E tests use a short value (e.g. 60s) to exercise idle teardown live.
+	BillingHour Duration `yaml:"billing_hour"`
 }
 
 // SSH configures how the orchestrator reaches worker VMs to dispatch one-job.
@@ -117,6 +125,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Poll.HourMargin == 0 {
 		c.Poll.HourMargin = Duration(5 * time.Minute)
+	}
+	if c.Poll.BillingHour == 0 {
+		c.Poll.BillingHour = Duration(time.Hour)
 	}
 	if c.SSH.User == "" {
 		c.SSH.User = "root"

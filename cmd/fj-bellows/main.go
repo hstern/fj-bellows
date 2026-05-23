@@ -130,6 +130,7 @@ func run(opts runOpts, log *slog.Logger) error {
 			Model:       prov.BillingModel(),
 			IdleTimeout: cfg.Poll.IdleTimeout.D(),
 			HourMargin:  cfg.Poll.HourMargin.D(),
+			BillingHour: cfg.Poll.BillingHour.D(),
 		},
 		DrainOnShutdown: opts.drain,
 		DrainTimeout:    opts.drainTimeout,

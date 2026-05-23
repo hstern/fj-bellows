@@ -128,7 +128,13 @@ ssh:
 poll:
   interval: 5s
   idle_timeout: 30s
-  hour_margin: 5m
+  # Force a short billing cycle so idle teardown fires inside the local-run
+  # budget. Linode still bills a whole hour on its side; we're just choosing
+  # to close earlier (sacrificing the fill-the-paid-hour benefit) so this
+  # driver can actually observe a teardown. With billing_hour=60s and
+  # hour_margin=10s the kill mark is created+50s, then +1m50s, etc.
+  billing_hour: 60s
+  hour_margin: 10s
 YAML
 chmod 600 "$CONFIG"
 
@@ -205,9 +211,33 @@ if [ "$complete" -ne 1 ]; then
   exit 1
 fi
 
-# Linode's hourly-rounded billing means the warm-hold deliberately keeps the
-# worker until :55 of the paid hour, so we do NOT wait for idle teardown here —
-# asserting fast teardown would contradict the design. The trap cleanup below
-# (and fj-bellows' `-destroy-on-exit`) reclaims the VM on exit.
+# Now that billing_hour is configurable, the config above uses a 60s cycle with
+# a 10s margin, so the orchestrator destroys an idle worker within ~50s of every
+# cycle boundary. Give it ~120s after "job complete" to fire — comfortably above
+# one cycle. Linode still bills the whole hour on its side; the trap cleanup and
+# `-destroy-on-exit` reclaim the VM regardless.
+log "waiting for idle teardown in orchestrator log (up to ~120s)"
+teardown=0
+for i in $(seq 1 60); do
+  if grep -q 'destroyed idle node' "$LOG" 2>/dev/null; then
+    log "idle teardown observed after ${i}*2s"
+    # Confirm the Linode is actually gone from the provider's view.
+    body=$(linode_api GET '/linode/instances?page_size=200')
+    still=$(printf '%s' "$body" | jq -r --arg t "$TAG" \
+            '[.data[]? | select(.tags|index($t))] | length')
+    if [ "$still" = "0" ]; then
+      log "Linode with tag $TAG is gone from the API"
+      teardown=1
+      break
+    fi
+    log "log says destroyed but $still Linode(s) still listed; retrying"
+  fi
+  sleep 2
+done
+if [ "$teardown" -ne 1 ]; then
+  err "idle teardown did not fire within ~120s; last 30 lines:"
+  tail -30 "$LOG" >&2 || true
+  exit 1
+fi
 
 log "ALL OK"
