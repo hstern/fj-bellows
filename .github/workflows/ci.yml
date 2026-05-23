@@ -14,14 +14,20 @@ permissions:
   packages: write
 
 jobs:
-  # Build the canonical multi-arch container image once, push to a
-  # run-scoped temp tag on ghcr.io. Every downstream job (e2e-docker,
-  # e2e-linode, publish) consumes THIS digest — publish becomes a retag,
-  # not a rebuild, so the bytes shipped are byte-for-byte the bytes
-  # tested. Gated on `test` + `lint` so the runtime artifact only exists
-  # when source-quality checks pass. See #49.
+  # Single Docker build pipeline: runs the Dockerfile's `test` stage
+  # (go vet + go test -race + govulncheck on the source the runtime
+  # binary will be built from), then builds and pushes the multi-arch
+  # runtime image to a run-scoped temp tag on ghcr.io. Both buildx
+  # invocations share the `type=gha` cache, so the `source` stage is
+  # built once and reused.
+  #
+  # If tests fail, the image is never pushed → e2e-docker / e2e-linode
+  # / publish (which all consume this image) never run. The "publish
+  # what we tested" property is enforced by the build pipeline itself,
+  # not by job-level dependencies.
+  #
+  # `lint` stays independent (parallel; gates publish only). See #49.
   build-image:
-    needs: [test, lint]
     name: build-image
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -50,7 +56,20 @@ jobs:
           owner_repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "image=ghcr.io/${owner_repo}:ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
 
-      - name: Build + push multi-arch
+      # Test stage runs on the build platform (single arch) so go test
+      # -race executes natively, not under qemu. Cache shared with the
+      # runtime build below means the `source` stage layers carry over.
+      - name: Test (Dockerfile `test` stage)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build + push multi-arch runtime
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -58,31 +77,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.refs.outputs.image }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # Runs the Dockerfile's `test` stage — the same `FROM golang:1.26 AS
-  # source` base that produces the published binary, executing
-  # `go vet`, `go test -race`, and `govulncheck` against it. Reusing the
-  # source stage means the binary build-image produces is built from
-  # source that just passed these checks (build-image needs: test). The
-  # ghcr cache (`type=gha`) is shared with build-image so the source
-  # layer is built once across the two jobs. See #49.
-  test:
-    name: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Run Dockerfile test stage
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: test
-          platforms: linux/amd64
-          push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -639,7 +633,7 @@ jobs:
     # harmless and defensive). This ensures a broken-on-Linode or
     # broken-on-Docker build does not get published, without making publish
     # depend on the Linode secret being configured.
-    needs: [test, lint, check-secrets, build-image, e2e-linode, e2e-docker]
+    needs: [lint, check-secrets, build-image, e2e-linode, e2e-docker]
     if: |
       github.event_name != 'pull_request' &&
       (needs.e2e-linode.result == 'success' || needs.e2e-linode.result == 'skipped') &&
