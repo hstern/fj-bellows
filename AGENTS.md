@@ -62,6 +62,12 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   `id`. The composition root (`cmd/fj-bellows`) injects it. SSH host keys are
   verified via a per-VM key injected through cloud-init and pre-pinned (with TOFU
   fallback) — don't regress to ignoring host keys.
+- **Workers reach Forgejo through the dispatch SSH session.** The SSH dispatcher
+  opens a reverse port-forward on the same connection it uses for `one-job`, and
+  injects a `/etc/hosts` override so the runner's lookup of the Forgejo hostname
+  resolves to `127.0.0.1` on the worker. This lets a LAN-internal Forgejo serve
+  workers in a public cloud out of the box; don't reintroduce an out-of-process
+  side-car tunnel.
 - **Scale-to-N architecture; do not hardcode the single-VM assumption.**
   `scale.max` bounds it (default 1).
 - **A deployment owns instances solely by `cfg.Tag`.** `provider.List(tag)` is

@@ -1,9 +1,9 @@
 # test/e2e-linode
 
 End-to-end test for the **Linode provider** — provisions a real Linode VM via
-fj-bellows, runs an ephemeral `one-job` against a local Forgejo over an SSH
-reverse tunnel, then tears the VM down. Distinct from `test/e2e-docker`, which
-exercises the **docker** provider in CI.
+fj-bellows, runs an ephemeral `one-job` against a local Forgejo, then tears the
+VM down. Distinct from `test/e2e-docker`, which exercises the **docker**
+provider in CI.
 
 ## How it works
 
@@ -11,23 +11,22 @@ exercises the **docker** provider in CI.
    `127.0.0.1:3000` and seeded by `test/e2e-docker/seed.sh` with an admin,
    token, org, repo, and a workflow whose job runs in a container with
    `--network host` so step-container traffic terminates on the same loopback
-   the SSH tunnel will reverse-forward to.
+   the dispatcher's reverse tunnel forwards to.
 2. fj-bellows polls Forgejo, sees the queued job, and provisions a Linode
    nanode in `us-ord` (cloud-init installs Docker + forgejo-runner).
-3. The driver polls the Linode API for the new VM, waits for SSH, and opens
-   `ssh -fN -R 3000:localhost:3000 root@<ip>` so the Linode's loopback:3000 is
-   the runner's Forgejo.
-4. fj-bellows registers an ephemeral runner and runs `forgejo-runner one-job
-   --handle` over `docker exec`-equivalent SSH. The runner's step container
-   (sharing the Linode's network namespace via `--network host`) reaches
-   Forgejo via the same loopback URL.
-5. Job completes (orchestrator logs `job complete`). The E2E config sets
+3. The orchestrator waits for SSH on the new VM and runs `forgejo-runner
+   one-job` over it. The dispatcher opens a reverse port-forward on the same
+   SSH session (`internal/orchestrator/dispatch.go`) so the worker's
+   `127.0.0.1:3000` reaches the orchestrator-side Forgejo — no out-of-process
+   tunnel needed. The runner's step container (sharing the VM's network
+   namespace via `--network host`) reaches Forgejo via the same loopback URL.
+4. Job completes (orchestrator logs `job complete`). The E2E config sets
    `poll.billing_hour: 60s, poll.hour_margin: 10s`, so the orchestrator's
    hourly-cycle teardown fires within ~50s of the next cycle boundary and the
    Linode is destroyed.
-6. Cleanup destroys any leaked instance carrying the run's tag, kills the
-   tunnel and fj-bellows, and removes the Forgejo container — on **every**
-   exit path including failure and SIGINT.
+5. Cleanup destroys any leaked instance carrying the run's tag, stops
+   fj-bellows, and removes the Forgejo container — on **every** exit path
+   including failure and SIGINT.
 
 ## Local: `run-local.sh`
 

@@ -82,5 +82,18 @@ possible MITM). Different addresses are pinned independently. Residual risk: a
 MITM present at the very first contact could still impersonate the VM; after
 that, its identity is verified for the rest of its life.
 
+### Worker → Forgejo path
+
+`RunJob` opens a **reverse port-forward** on the dispatch SSH session: the
+worker binds `127.0.0.1:<forgejo-port>`, and each accepted connection is relayed
+to the orchestrator-side Forgejo using the orchestrator's own resolver. The
+dispatch command prepends a `/etc/hosts` override (`127.0.0.1 <forgejo-host>`)
+so the runner's lookup of the Forgejo hostname inside the worker lands on the
+tunnel. TLS SNI sees the original hostname unchanged, so a public-CA cert
+(e.g. via DNS-01) continues to validate end-to-end. This lets workers on a
+public cloud reach a LAN-internal Forgejo whose hostname does not resolve from
+the public internet — with no worker-side network configuration. The override
+is skipped for IP literals and for `localhost`. See #33.
+
 Dependencies are interfaces (`JobSource`, `Dispatcher`, `provider.Provider`);
 see [`mock`](mock) for the test doubles.

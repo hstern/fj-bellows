@@ -408,29 +408,9 @@ jobs:
           echo "ERROR: SSH never came up on $LIP"
           exit 1
 
-      - name: Open SSH reverse tunnel (Linode loopback:3000 -> our Forgejo)
-        env:
-          LIP: ${{ steps.linode.outputs.ip }}
-        run: |
-          set -euo pipefail
-          # cloud-init reloads sshd to pick up the injected host key, so the
-          # first SSH session can land in a window where sshd is restarting
-          # and the next connection gets reset. Retry a handful of times.
-          for attempt in 1 2 3 4 5 6 7 8; do
-            if ssh -i "$RUNNER_TEMP/id_ed25519" \
-                  -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
-                  -o StrictHostKeyChecking=no \
-                  -o ControlMaster=yes -o ControlPath="$RUNNER_TEMP/ssh-tunnel.sock" \
-                  -o ExitOnForwardFailure=yes \
-                  -fN -R 3000:localhost:3000 root@"$LIP"; then
-              echo "tunnel up on attempt $attempt"
-              exit 0
-            fi
-            echo "attempt $attempt failed; retrying in 3s"
-            sleep 3
-          done
-          echo "ERROR: tunnel failed after 8 attempts"
-          exit 1
+      # The dispatcher now opens a reverse port-forward over the dispatch SSH
+      # session (internal/orchestrator/dispatch.go), so workers reach Forgejo
+      # via the orchestrator's view of it. No side-car tunnel needed; see #33.
 
       - name: Wait for 'job complete' in orchestrator log
         run: |
@@ -484,10 +464,6 @@ jobs:
           LIP: ${{ steps.linode.outputs.ip || '' }}
         run: |
           set +e
-          # Close SSH control connection if open.
-          if [ -S "$RUNNER_TEMP/ssh-tunnel.sock" ] && [ -n "$LIP" ]; then
-            ssh -O exit -o ControlPath="$RUNNER_TEMP/ssh-tunnel.sock" root@"$LIP" 2>/dev/null
-          fi
           # Stop fj-bellows.
           if [ -s fj-bellows.pid ]; then
             kill "$(cat fj-bellows.pid)" 2>/dev/null

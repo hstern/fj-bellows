@@ -24,12 +24,6 @@ KNOWN="$WORKDIR/known_hosts"
 CONFIG="$WORKDIR/config.yaml"
 LOG="$WORKDIR/fj-bellows.log"
 PIDF="$WORKDIR/fj-bellows.pid"
-# macOS sun_path is 104 chars. Honor $TMPDIR, but fall back to /tmp if the
-# prefix would leave too few characters for the socket name.
-_tmp="${TMPDIR:-/tmp}"; _tmp="${_tmp%/}"
-[ ${#_tmp} -gt 70 ] && _tmp=/tmp
-TUNNEL_CTL="$_tmp/fjb-e2e-ssh-$$.sock"
-unset _tmp
 FORGEJO_NAME="fjb-e2e-forgejo-$$"
 
 log() { printf '[e2e] %s\n' "$*" >&2; }
@@ -59,7 +53,6 @@ destroy_tagged() {
 cleanup() {
   local rc=$?
   log "cleanup (rc=$rc)"
-  [ -S "$TUNNEL_CTL" ] && ssh -O exit -o ControlPath="$TUNNEL_CTL" placeholder 2>/dev/null || true
   [ -s "$PIDF" ] && kill "$(cat "$PIDF")" 2>/dev/null || true
   docker rm -f "$FORGEJO_NAME" >/dev/null 2>&1 || true
   destroy_tagged "$TAG"
@@ -175,25 +168,9 @@ for i in $(seq 1 180); do
 done
 [ "$ssh_ready" -eq 1 ] || { err "SSH never came up on $LIP"; exit 1; }
 
-log "opening SSH reverse tunnel (Linode loopback:3000 -> our Forgejo)"
-# cloud-init reloads sshd to pick up the injected host key, so the first SSH
-# session can land in a window where sshd is restarting and the next connection
-# gets reset. Retry a handful of times.
-tunnel_up=0
-for attempt in 1 2 3 4 5 6 7 8; do
-  if ssh -i "$KEY" \
-       -o UserKnownHostsFile="$KNOWN" -o StrictHostKeyChecking=no \
-       -o ControlMaster=yes -o ControlPath="$TUNNEL_CTL" \
-       -o ExitOnForwardFailure=yes \
-       -fN -R 3000:localhost:3000 root@"$LIP" 2>/dev/null; then
-    log "tunnel up on attempt $attempt"
-    tunnel_up=1
-    break
-  fi
-  log "attempt $attempt failed; retrying in 3s"
-  sleep 3
-done
-[ "$tunnel_up" -eq 1 ] || { err "tunnel failed after 8 attempts"; exit 1; }
+# The dispatcher opens a reverse port-forward over the dispatch SSH session
+# (internal/orchestrator/dispatch.go), so workers reach Forgejo via the
+# orchestrator's view of it. No side-car tunnel needed; see #33.
 
 log "waiting for 'job complete' in orchestrator log (up to ~6 min)"
 complete=0
