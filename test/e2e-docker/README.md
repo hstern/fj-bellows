@@ -1,13 +1,13 @@
-# test/integration
+# test/e2e-docker
 
-End-to-end integration test that exercises fj-bellows against a real Forgejo,
-using the local Docker provider for workers. Runs in CI as the `integration`
+End-to-end docker test that exercises fj-bellows against a real Forgejo,
+using the local Docker provider for workers. Runs in CI as the `e2e-docker`
 job (`.github/workflows/ci.yml`) and is intended to become a required check
 on `main`.
 
 ## What it does
 
-1. Builds a worker image (`test/integration/worker/Dockerfile`) that ships
+1. Builds a worker image (`test/e2e-docker/worker/Dockerfile`) that ships
    `forgejo-runner` v12.10.1 plus `tini`, the `docker` CLI, `curl`, and
    `ca-certificates`. Entrypoint is `tini -- sleep infinity` so the
    orchestrator can `docker exec` into a long-lived container.
@@ -38,7 +38,7 @@ on `main`.
 
 ## Forgejo version
 
-The integration test runs against `codeberg.org/forgejo/forgejo:15`, which
+The e2e-docker job runs against `codeberg.org/forgejo/forgejo:15`, which
 provides the ephemeral REST registration (`POST /actions/runners` returning
 `{uuid, token}`) and `forgejo-runner one-job --handle` that fj-bellows
 depends on. Against pre-v15 Forgejo, `RegisterEphemeral` returns a clear
@@ -48,7 +48,7 @@ depends on. Against pre-v15 Forgejo, `RegisterEphemeral` returns a clear
 
 ```sh
 # 1. Build the worker image.
-docker build -t fj-bellows-worker:test test/integration/worker
+docker build -t fj-bellows-worker:test test/e2e-docker/worker
 
 # 2. Bring up Forgejo on localhost:3001.
 docker run -d --name fjb-integ-forgejo \
@@ -69,7 +69,7 @@ export FORGEJO_ADMIN_EMAIL=admin@example.com
 export FORGEJO_ORG=bellowsorg
 export FORGEJO_REPO=demo
 export FORGEJO_LABEL=docker
-TOKEN=$(bash test/integration/seed.sh)
+TOKEN=$(bash test/e2e-docker/seed.sh)
 
 # 4. Build the daemon and write a config.
 go build -o fj-bellows ./cmd/fj-bellows
@@ -105,7 +105,7 @@ FJBELLOWS_PID=$!
 sleep 30
 
 FJBELLOWS_LOG=/tmp/fjb-integ.log FJBELLOWS_TAG=fjb-integ-local \
-  bash test/integration/assert.sh
+  bash test/e2e-docker/assert.sh
 
 # 6. Cleanup.
 kill "$FJBELLOWS_PID" 2>/dev/null || true

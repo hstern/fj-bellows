@@ -81,7 +81,7 @@ else
 fi
 
 # (4) The per-second billing idle timeout must reclaim the worker. The pool's
-# idle_timeout in the integration config is short (~5s); destroy should happen
+# idle_timeout in the e2e-docker config is short (~5s); destroy should happen
 # well within the wait.
 log "waiting up to ${TEARDOWN_WAIT}s for the idle worker to be torn down"
 torn=0

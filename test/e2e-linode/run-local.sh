@@ -104,7 +104,7 @@ export FORGEJO_ORG=e2eorg
 export FORGEJO_REPO=e2erepo
 export FORGEJO_LABEL=linode-e2e
 export FORGEJO_WORKFLOW_CONTAINER_OPTS='--network host'
-FORGEJO_TOKEN=$(bash "$REPO_ROOT/test/integration/seed.sh")
+FORGEJO_TOKEN=$(bash "$REPO_ROOT/test/e2e-docker/seed.sh")
 
 cat > "$CONFIG" <<YAML
 forgejo:

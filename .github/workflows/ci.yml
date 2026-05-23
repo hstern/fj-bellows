@@ -50,12 +50,12 @@ jobs:
         with:
           version: v2.12.1
 
-  # End-to-end integration: build the worker image, bring up Forgejo, seed it,
+  # End-to-end docker E2E: build the worker image, bring up Forgejo, seed it,
   # launch fj-bellows, and assert it polls the live job queue without decode
   # errors and provisions a worker container. Adding this to branch-protection
   # required checks is intentionally out of scope for this PR.
-  integration:
-    name: integration
+  e2e-docker:
+    name: e2e-docker
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -93,7 +93,7 @@ jobs:
         run: go build -o fj-bellows ./cmd/fj-bellows
 
       - name: Build worker image
-        run: docker build -t fj-bellows-worker:test test/integration/worker
+        run: docker build -t fj-bellows-worker:test test/e2e-docker/worker
 
       - name: Identify Forgejo service container
         id: forgejo
@@ -129,8 +129,8 @@ jobs:
           FORGEJO_CONTAINER: ${{ steps.forgejo.outputs.name }}
         run: |
           set -euo pipefail
-          chmod +x test/integration/seed.sh
-          token=$(bash test/integration/seed.sh)
+          chmod +x test/e2e-docker/seed.sh
+          token=$(bash test/e2e-docker/seed.sh)
           # Token is opaque; mask it so it does not leak via the log.
           echo "::add-mask::$token"
           # Pass via env file rather than step output so it stays masked.
@@ -184,8 +184,8 @@ jobs:
           FJBELLOWS_LOG: fj-bellows.log
           PROVISION_WAIT: "60"
         run: |
-          chmod +x test/integration/assert.sh
-          bash test/integration/assert.sh
+          chmod +x test/e2e-docker/assert.sh
+          bash test/e2e-docker/assert.sh
 
       - name: Capture diagnostics on failure
         if: failure()
@@ -201,7 +201,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: integration-logs
+          name: e2e-docker-logs
           path: |
             fj-bellows.log
             fj-bellows.stdout
@@ -310,8 +310,8 @@ jobs:
           FORGEJO_CONTAINER: ${{ steps.forgejo.outputs.name }}
         run: |
           set -euo pipefail
-          chmod +x test/integration/seed.sh
-          token=$(bash test/integration/seed.sh)
+          chmod +x test/e2e-docker/seed.sh
+          token=$(bash test/e2e-docker/seed.sh)
           echo "::add-mask::$token"
           echo "FORGEJO_TOKEN=$token" >> "$GITHUB_ENV"
 

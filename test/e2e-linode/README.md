@@ -2,13 +2,13 @@
 
 End-to-end test for the **Linode provider** — provisions a real Linode VM via
 fj-bellows, runs an ephemeral `one-job` against a local Forgejo over an SSH
-reverse tunnel, then tears the VM down. Distinct from `test/integration`, which
+reverse tunnel, then tears the VM down. Distinct from `test/e2e-docker`, which
 exercises the **docker** provider in CI.
 
 ## How it works
 
 1. A Forgejo v15 service container runs locally (or in CI), published on
-   `127.0.0.1:3000` and seeded by `test/integration/seed.sh` with an admin,
+   `127.0.0.1:3000` and seeded by `test/e2e-docker/seed.sh` with an admin,
    token, org, repo, and a workflow whose job runs in a container with
    `--network host` so step-container traffic terminates on the same loopback
    the SSH tunnel will reverse-forward to.
