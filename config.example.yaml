@@ -1,144 +1,96 @@
 # fj-bellows configuration (example).
-# Copy to config.yaml and edit. config.yaml holds secrets directly, so keep it
-# readable only by the daemon (chmod 600). The SSH key is referenced by path
-# (not inlined) to keep this file tidy.
+#
+# Copy to config.yaml, fill in the two `<…>` secrets, and run. This file is
+# a working bootstrap; the deep reference for each block lives in the
+# package README it points at:
+#
+#   forgejo:        internal/forgejo/README.md
+#   orchestrator:   internal/orchestrator/README.md
+#   provider:linode internal/provider/linode/README.md
+#   provider:docker internal/provider/docker/README.md
+#
+# config.yaml holds secrets directly — keep it `chmod 600`. The SSH key is
+# referenced by path (not inlined).
 
 forgejo:
   # Base URL of your Forgejo instance. Workers reach this URL through a
-  # reverse port-forward opened on the dispatch SSH session, so a LAN-internal
-  # hostname that does not resolve from the public internet still works (the
-  # orchestrator resolves it; the worker just hits 127.0.0.1).
+  # reverse port-forward on the dispatch SSH session — a LAN-internal
+  # hostname works out of the box.
   url: https://forgejo.example.com
-  # Forgejo admin token (scope: all). Polls the job queue and mints per-job
+
+  # Forgejo admin token (all scopes). Polls the job queue and mints per-job
   # ephemeral runner registrations.
   token: <forgejo-admin-token>
+
   # API path segment that owns the runners: "orgs/<org>" or "repos/<owner>/<name>".
   scope: orgs/example
-  # Runner labels this pool services. A job is eligible only if all of its
-  # required labels appear here.
-  #
-  # A label may also carry a forgejo-runner backend binding using the standard
-  # `<name>:<scheme>://<value>` syntax (schemes: docker, host, kubernetes).
-  # The orchestrator strips the binding when matching jobs (a workflow's
-  # `runs_on: ubuntu-latest` still matches a pool label of
-  # `ubuntu-latest:docker://...`), and passes the full binding through to the
-  # worker's `forgejo-runner one-job --label` so the runner picks the right
-  # job-container image. The catthehacker image is the de-facto default for
-  # GH-Actions-style workflows that need docker, apt, etc.
+
+  # Runner labels this pool services. The `<name>:<scheme>://<image>` form
+  # binds a label to a job-container image; the orchestrator strips the
+  # binding for queue matching and passes the full form to one-job. The
+  # catthehacker image is the de-facto default for GH-Actions-style workflows.
   labels:
     - 'ubuntu-latest:docker://catthehacker/ubuntu:act-latest'
 
-# Tag stamped on every instance this deployment owns. It is the ONLY thing
-# scoping ownership: set a UNIQUE tag per deployment if several fj-bellows run
-# against the same cloud account, or they will destroy each other's VMs.
-# Defaults to "fj-bellows" (the daemon warns when the default is used).
+# Tag stamped on every instance this deployment owns. SET A UNIQUE TAG per
+# deployment if multiple fj-bellows run against the same cloud account, or
+# they will destroy each other's VMs. (The default "fj-bellows" warns at
+# startup.)
 tag: fj-bellows
 
 scale:
-  # Maximum number of warm worker VMs. (Architecture supports N; pin to 1 to
-  # start.)
+  # Maximum number of warm worker VMs.
   max: 1
 
-# Selected provider. Must be a registered in-tree provider.
+# Selected in-tree provider.
 provider: linode
 
-# Opaque to the core: decoded by the selected provider.
+# Provider-specific config — decoded by the selected provider above.
+#
+# === Linode ===
+# Full reference: internal/provider/linode/README.md
+# PAT scope for the defaults below: Linodes: R/W + Firewalls: R/W +
+# Placement Groups: R/W.
 provider_config:
-  region: <linode-region>
-  type: <linode-instance-type>
-  image: <linode-image>
-  token: <provider-api-token>
+  region: us-ord
+  type: g6-nanode-1
+  image: linode/debian12
+  token: <linode-pat>
 
-  # Managed Cloud Firewall (recommended). One firewall per deployment, keyed
-  # by `tag` above; created on first Provision, deleted when the last worker
-  # goes away. Default-deny inbound except tcp/22 from allow_inbound; outbound
-  # unrestricted. Mutually exclusive with `firewall_id` below.
-  #
-  # `allow_inbound` (and the addresses: field on extra_inbound /
-  # extra_outbound rules below) accepts literal CIDRs plus sentinels:
-  #   - `auto`    — orchestrator's external IPv4 (/32) + IPv6 (/128),
-  #                 resolved via icanhazip at startup and on refresh.
-  #   - `any`     — 0.0.0.0/0 + ::/0 (any-source).
-  #   - `any-v4`  — 0.0.0.0/0.
-  #   - `any-v6`  — ::/0.
-  #
-  # Sentinel resolution failure or an empty resolved set is FATAL at startup;
-  # the daemon refuses to start with a firewall nobody can reach. A refresh
-  # goroutine re-resolves on `refresh_interval` (default 1h, min 1m) and
-  # updates the firewall rules on drift; runtime refresh failure keeps the
-  # previous-known-good rules in place.
-  #
-  # Managed mode needs PAT scope: Linodes: R/W + Firewalls: R/W.
-  # firewall:
-  #   allow_inbound:
-  #     - 203.0.113.5/32
-  #     - auto
-  #   refresh_interval: 1h
-  #
-  #   # Optional: override the default policies (DROP inbound / ACCEPT outbound).
-  #   # See internal/provider/linode/README.md for the security implications,
-  #   # particularly the egress allow list workers need if you set
-  #   # outbound_policy: DROP.
-  #   # inbound_policy: DROP
-  #   # outbound_policy: ACCEPT
-  #
-  #   # Optional: extra rules appended after the synthesized tcp/22 rules
-  #   # (inbound) or used as the entire outbound list. Per-rule address
-  #   # cap is 255 per family; combined inbound rule count must stay under
-  #   # Linode's 25-per-firewall ceiling.
-  #   # extra_inbound:
-  #   #   - label: prometheus
-  #   #     ports: "9100"
-  #   #     protocol: TCP
-  #   #     action: ACCEPT
-  #   #     addresses:
-  #   #       ipv4: [10.0.0.0/8]
-  #   # extra_outbound:
-  #   #   - label: deny-smtp
-  #   #     ports: "25"
-  #   #     protocol: TCP
-  #   #     action: DROP
-  #   #     addresses: [any]   # 0.0.0.0/0 + ::/0; see sentinel table above
-
-  # Alternative: attach every provisioned worker to a pre-existing Linode
-  # Cloud Firewall (operator-managed out of band). Simpler; only needs
-  # Linodes: R/W. Mutually exclusive with `firewall` above.
+  # Managed Cloud Firewall: one per deployment, default-deny inbound except
+  # tcp/22 from the orchestrator's external IP (auto). Reaped on last
+  # Destroy. README covers sentinels (auto/any/any-v4/any-v6), policy
+  # overrides (inbound_policy / outbound_policy), and operator extra
+  # rules (extra_inbound / extra_outbound).
+  firewall:
+    allow_inbound:
+      - auto
+  # Alternative: attach to a pre-existing firewall (operator-managed).
+  # Mutually exclusive with `firewall:` above. Only needs Linodes: R/W.
   # firewall_id: 123456
 
-  # Managed Linode Placement Group (anti-affinity:local). One PG per
-  # deployment, keyed by `tag` above; created at Configure, deleted when
-  # the last worker goes away. Mutually exclusive with `placement_group_id`.
-  #
-  # `enforcement: flexible` (default) lets Linode fall back to colocation
-  # when the anti-affinity slot isn't available — never blocks a worker
-  # boot. `enforcement: strict` refuses the create instead and the
-  # orchestrator surfaces an error; use when the isolation guarantee
-  # matters more than worker availability.
-  #
-  # Managed mode needs PAT scope: Linodes: R/W + Placement Groups: R/W.
-  # placement_group:
-  #   enforcement: flexible
-
-  # Alternative: attach every provisioned worker to a pre-existing PG by ID
-  # (operator-managed out of band). Mutually exclusive with `placement_group`
-  # above. Only needs Linodes: R/W.
+  # Managed Placement Group (anti-affinity:local) — spreads workers across
+  # distinct hosts within `region`. Reaped on last Destroy. README covers
+  # the strict/flexible enforcement knob (flexible by default lets Linode
+  # fall back to colocation when the anti-affinity slot isn't available).
+  placement_group:
+    enforcement: flexible
+  # Alternative: attach to a pre-existing PG (operator-managed). Mutually
+  # exclusive with `placement_group:` above. Only needs Linodes: R/W.
   # placement_group_id: 67890
 
 poll:
   # How often to reconcile the queue against runners and instances.
   interval: 10s
-  # Per-second billing providers: tear an idle node down after this long.
-  idle_timeout: 5m
-  # Hourly-rounding providers: kill an idle node this long before each paid-hour
-  # boundary (5m -> the :55 rule).
+  # Hourly-rounding providers (Linode): kill an idle node this long before
+  # each paid-hour boundary (5m → the :55 rule).
   hour_margin: 5m
-  # Cycle length used to compute the kill mark (kill = created + N*billing_hour
-  # - hour_margin). Defaults to 1h, matching every cloud's actual hourly
-  # rounding. Shorten it to close idle VMs faster than the provider's paid-hour
-  # boundary — you sacrifice the fill-the-paid-hour benefit (Linode still bills
-  # the whole hour) in exchange for faster reclamation. E2E tests set this to a
-  # few seconds to exercise idle teardown live.
-  billing_hour: 1h
+  # Per-second billing providers (Docker etc.): tear down an idle node
+  # after this long.
+  idle_timeout: 5m
+  # Cycle length for the kill mark; defaults to 1h matching every cloud's
+  # hourly rounding. Shorten for faster idle reclamation (e2e uses seconds).
+  # billing_hour: 1h
 
 ssh:
   # The orchestrator dispatches one-job to workers over SSH using this key.
