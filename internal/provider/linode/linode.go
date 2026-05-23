@@ -27,12 +27,14 @@ import (
 
 // config is the provider_config subtree for Linode.
 type config struct {
-	Region     string          `yaml:"region"`
-	Type       string          `yaml:"type"`
-	Image      string          `yaml:"image"`
-	Token      string          `yaml:"token"`
-	FirewallID int             `yaml:"firewall_id"`
-	Firewall   *firewallConfig `yaml:"firewall"`
+	Region           string                `yaml:"region"`
+	Type             string                `yaml:"type"`
+	Image            string                `yaml:"image"`
+	Token            string                `yaml:"token"`
+	FirewallID       int                   `yaml:"firewall_id"`
+	Firewall         *firewallConfig       `yaml:"firewall"`
+	PlacementGroupID int                   `yaml:"placement_group_id"`
+	PlacementGroup   *placementGroupConfig `yaml:"placement_group"`
 }
 
 // Linode is the provider implementation.
@@ -41,11 +43,13 @@ type Linode struct {
 	client linodego.Client
 	tag    string // cfg.Tag from the orchestrator, captured in Configure
 
-	// fw is non-nil when managed-firewall mode is enabled (the `firewall:`
-	// block is set in provider_config). It's created at Configure time —
-	// no lazy-init, no first-Provision retries hammering upstream sentinels.
-	// nil means firewall_id mode (or no firewall at all).
+	// fw is non-nil when managed-firewall mode is enabled. Created at
+	// Configure time; nil when in firewall_id mode (or no firewall).
 	fw *managedFirewall
+
+	// pg is non-nil when managed-placement-group mode is enabled. Same
+	// lifecycle shape: Configure-time create, last-Destroy reaps. See #51.
+	pg *managedPlacementGroup
 }
 
 func init() {
@@ -69,16 +73,8 @@ func (l *Linode) Configure(ctx context.Context, tag string, node yaml.Node) erro
 	if err := node.Decode(&l.cfg); err != nil {
 		return fmt.Errorf("linode: decode provider_config: %w", err)
 	}
-	if err := l.cfg.validateRequiredFields(); err != nil {
+	if err := l.cfg.validateAll(); err != nil {
 		return err
-	}
-	if l.cfg.Firewall != nil && l.cfg.FirewallID != 0 {
-		return errors.New("linode: provider_config: `firewall` and `firewall_id` are mutually exclusive")
-	}
-	if l.cfg.Firewall != nil {
-		if err := l.cfg.Firewall.validate(); err != nil {
-			return fmt.Errorf("linode: firewall: %w", err)
-		}
 	}
 	client := linodego.NewClient(nil)
 	client.SetToken(l.cfg.Token)
@@ -88,6 +84,38 @@ func (l *Linode) Configure(ctx context.Context, tag string, node yaml.Node) erro
 	if l.cfg.Firewall != nil {
 		if err := l.setupManagedFirewall(ctx, tag); err != nil {
 			return err
+		}
+	}
+	if l.cfg.PlacementGroup != nil {
+		if err := l.setupManagedPlacementGroup(ctx, tag); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateAll runs the syntactic checks on the decoded provider_config:
+// required fields populated, mutex constraints between the managed and
+// attach-by-id modes for both firewall and placement-group, and the
+// per-block validators. Pure validation — no API calls.
+func (c config) validateAll() error {
+	if err := c.validateRequiredFields(); err != nil {
+		return err
+	}
+	if c.Firewall != nil && c.FirewallID != 0 {
+		return errors.New("linode: provider_config: `firewall` and `firewall_id` are mutually exclusive")
+	}
+	if c.PlacementGroup != nil && c.PlacementGroupID != 0 {
+		return errors.New("linode: provider_config: `placement_group` and `placement_group_id` are mutually exclusive")
+	}
+	if c.Firewall != nil {
+		if err := c.Firewall.validate(); err != nil {
+			return fmt.Errorf("linode: firewall: %w", err)
+		}
+	}
+	if c.PlacementGroup != nil {
+		if err := c.PlacementGroup.validate(); err != nil {
+			return fmt.Errorf("linode: placement_group: %w", err)
 		}
 	}
 	return nil
@@ -132,6 +160,18 @@ func (l *Linode) setupManagedFirewall(ctx context.Context, tag string) error {
 	return nil
 }
 
+// setupManagedPlacementGroup constructs the managedPlacementGroup and
+// creates the Linode placement group at Configure time. Same eager-create
+// rationale as the firewall: PAT-scope mistakes surface at startup.
+func (l *Linode) setupManagedPlacementGroup(ctx context.Context, tag string) error {
+	pg := newManagedPlacementGroup(*l.cfg.PlacementGroup, tag, l.cfg.Region, &l.client, slog.Default())
+	if err := pg.ensureAtConfigure(ctx); err != nil {
+		return fmt.Errorf("linode: placement_group: %w", err)
+	}
+	l.pg = pg
+	return nil
+}
+
 // Provision creates a tagged Linode with the rendered cloud-init as user-data.
 func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.Instance, error) {
 	rootPass, err := randomPassword(32)
@@ -160,6 +200,12 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	case l.cfg.FirewallID != 0:
 		opts.FirewallID = l.cfg.FirewallID
 	}
+	switch {
+	case l.pg != nil:
+		opts.PlacementGroup = &linodego.InstanceCreatePlacementGroupOptions{ID: l.pg.id}
+	case l.cfg.PlacementGroupID != 0:
+		opts.PlacementGroup = &linodego.InstanceCreatePlacementGroupOptions{ID: l.cfg.PlacementGroupID}
+	}
 	inst, err := l.client.CreateInstance(ctx, opts)
 	if err != nil {
 		return provider.Instance{}, fmt.Errorf("linode: create instance: %w", err)
@@ -169,10 +215,11 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 
 // Destroy deletes the instance with the given ID.
 //
-// When managed-firewall mode is on, the last Destroy in a deployment triggers
-// firewall cleanup (the firewall is removed once no devices remain attached).
-// -destroy-on-exit naturally flows through here per instance, so we get
-// cleanup for free without a Provider.Shutdown hook.
+// When managed-firewall / managed-placement-group modes are on, the last
+// Destroy in a deployment triggers cleanup of those resources (each is
+// removed once no devices/members remain attached). -destroy-on-exit
+// naturally flows through here per instance, so we get cleanup for free
+// without a Provider.Shutdown hook.
 func (l *Linode) Destroy(ctx context.Context, id string) error {
 	n, err := strconv.Atoi(id)
 	if err != nil {
@@ -183,6 +230,9 @@ func (l *Linode) Destroy(ctx context.Context, id string) error {
 	}
 	if l.fw != nil {
 		l.fw.maybeCleanupFirewall(ctx)
+	}
+	if l.pg != nil {
+		l.pg.maybeCleanupPlacementGroup(ctx)
 	}
 	return nil
 }

@@ -105,6 +105,25 @@ provider_config:
   # Linodes: R/W. Mutually exclusive with `firewall` above.
   # firewall_id: 123456
 
+  # Managed Linode Placement Group (anti-affinity:local). One PG per
+  # deployment, keyed by `tag` above; created at Configure, deleted when
+  # the last worker goes away. Mutually exclusive with `placement_group_id`.
+  #
+  # `enforcement: flexible` (default) lets Linode fall back to colocation
+  # when the anti-affinity slot isn't available — never blocks a worker
+  # boot. `enforcement: strict` refuses the create instead and the
+  # orchestrator surfaces an error; use when the isolation guarantee
+  # matters more than worker availability.
+  #
+  # Managed mode needs PAT scope: Linodes: R/W + Placement Groups: R/W.
+  # placement_group:
+  #   enforcement: flexible
+
+  # Alternative: attach every provisioned worker to a pre-existing PG by ID
+  # (operator-managed out of band). Mutually exclusive with `placement_group`
+  # above. Only needs Linodes: R/W.
+  # placement_group_id: 67890
+
 poll:
   # How often to reconcile the queue against runners and instances.
   interval: 10s

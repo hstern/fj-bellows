@@ -99,7 +99,7 @@ func TestFirewallLabel(t *testing.T) {
 		maxLen   int
 		mustHave string // substring that must appear (e.g. sanitized prefix)
 	}{
-		{in: "fj-bellows", minLen: 3, maxLen: 32, mustHave: "fj-bellows-fj-bellows"},
+		{in: testLabelPrefix, minLen: 3, maxLen: 32, mustHave: "fj-bellows-fj-bellows"},
 		{in: "deploy.one_two-3", minLen: 3, maxLen: 32, mustHave: "fj-bellows-deploy.one_two-3"},
 		// Invalid chars get replaced with '-'.
 		{in: "weird/chars!", minLen: 3, maxLen: 32, mustHave: "fj-bellows-weird-chars-"},

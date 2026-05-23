@@ -46,6 +46,15 @@ provider_config:
   # Alternative: attach to an operator-managed firewall by ID. Use this when
   # you'd rather manage the rules yourself. Mutually exclusive with `firewall`.
   # firewall_id: 12345
+
+  # Managed Linode Placement Group (anti-affinity:local). Mutually exclusive
+  # with placement_group_id below.
+  placement_group:
+    enforcement: flexible   # or strict — see below
+
+  # Alternative: attach every worker to a pre-existing PG by ID. Mutually
+  # exclusive with `placement_group` above.
+  # placement_group_id: 67890
 ```
 
 ### Managed firewall (`firewall:` block)
@@ -138,6 +147,65 @@ creation only requires the standard `Linodes: Read/Write` scope. The Linode
 API treats `firewall_id` as an attachment-by-reference parameter on
 `POST /linode/instances` and does not require any `Firewalls` scope. We do
 not list, create, or modify firewalls in this mode.
+
+### Managed placement group (`placement_group:` block)
+
+When the `placement_group` block is set, fj-bellows creates **one Linode
+Placement Group per deployment** (keyed by `cfg.Tag`'s label), attaches
+every provisioned worker to it, and reaps the group when the last worker
+is destroyed. The affinity type is `anti_affinity:local` (the only value
+Linode accepts today) — workers spread across distinct hosts within the
+region, so a single hardware failure doesn't take out the whole pool.
+
+```yaml
+provider_config:
+  # ...
+  placement_group:
+    # Optional. flexible (default) lets Linode fall back to colocation
+    # when no compliant slot is available; strict refuses the Provision
+    # instead.
+    enforcement: flexible
+```
+
+**Enforcement**:
+
+- **`flexible`** (default): when Linode can't satisfy the anti-affinity
+  constraint (host pool exhausted, etc.), it places the Linode on a
+  shared host anyway. Best-effort isolation; never blocks a worker boot.
+- **`strict`**: refuses the create when the anti-affinity slot isn't
+  available. Provision returns an error; the orchestrator surfaces it
+  and retries next tick. Use when the isolation guarantee matters more
+  than worker availability.
+
+**PAT scope** for managed mode: `Linodes: Read/Write` **and** `Placement
+Groups: Read/Write`. The simpler `placement_group_id` mode below only
+needs `Linodes: Read/Write`.
+
+**Label**: `fj-bellows-<sanitize(cfg.Tag)>`, truncated to Linode's 64-char
+PG label cap with a SHA-256 suffix when needed. Unlike Cloud Firewalls,
+placement groups have no `tags` field — ownership matching is by label
+alone. Two deployments with distinct `cfg.Tag` get distinct labels →
+distinct groups.
+
+**Lifecycle**:
+
+- Eager create at Configure (mirror of managed firewall — PAT-scope
+  mistakes surface at startup).
+- No refresh goroutine; PG policy + label can't drift the way an
+  external IP can.
+- Last `Destroy` in a deployment triggers `maybeCleanupPlacementGroup`
+  via the same per-instance Destroy path that reaps the firewall. The
+  PG is deleted once `GetPlacementGroup.Members` is empty (Linode
+  auto-unassigns destroyed instances from their group).
+
+### `placement_group_id` — attach to an operator-managed PG
+
+Mutually exclusive with `placement_group`. Mirrors `firewall_id`: every
+provisioned worker is attached to the named group at create time, and
+fj-bellows does nothing else. No extra PAT scope.
+
+The group's region must match `region:` above (Linode rejects the
+attach otherwise).
 
 - **Provision** — `CreateInstance` with the rendered cloud-init passed as
   base64 user-data via the Linode Metadata service, the orchestrator's public

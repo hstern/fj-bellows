@@ -636,13 +636,19 @@ func (m *managedFirewall) maybeCleanupFirewall(ctx context.Context) {
 }
 
 // firewallLabel renders cfg.Tag into a string that fits Linode's firewall
-// label rules: 3-32 chars from [A-Za-z0-9_.-]. Long or invalid-character
-// tags are sanitized and truncated with a short hash suffix to keep
-// uniqueness across truncation collisions.
+// label rules: 3-32 chars from [A-Za-z0-9_.-].
 func firewallLabel(tag string) string {
-	const prefix = "fj-bellows-"
-	const maxLen = 32
+	const firewallLabelMin = 3
+	const firewallLabelMax = 32
+	return sanitizeLabel("fj-bellows-", tag, firewallLabelMin, firewallLabelMax)
+}
 
+// sanitizeLabel renders a deployment tag into a Linode label that fits a
+// given min/max character budget. Invalid characters are replaced with '-';
+// long candidates are truncated with a SHA-256-derived suffix so two
+// distinct long tags can't accidentally collide. Used by both
+// firewallLabel (cap 32) and placementGroupLabel (cap 64).
+func sanitizeLabel(prefix, tag string, minLen, maxLen int) string {
 	clean := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
@@ -654,17 +660,14 @@ func firewallLabel(tag string) string {
 	}, tag)
 	candidate := prefix + clean
 	if len(candidate) <= maxLen {
-		// Pad short candidates to the 3-char minimum if needed.
-		if len(candidate) < 3 {
+		for len(candidate) < minLen {
 			candidate += "-x"
 		}
 		return candidate
 	}
-	// Hash the tag and use the first 8 hex chars as a suffix so two
-	// distinct long tags can't accidentally collide on the truncated label.
-	// SHA-256 is overkill for collision avoidance on a label suffix, but it
-	// avoids the linter's blocklist on weaker primitives and the cost is
-	// trivial for a startup-time call.
+	// SHA-256 is overkill for a label-collision suffix, but avoids the
+	// linter's blocklist on weaker primitives and the cost is trivial at
+	// startup.
 	sum := sha256.Sum256([]byte(tag))
 	suffix := "-" + hex.EncodeToString(sum[:])[:8]
 	head := candidate[:maxLen-len(suffix)]

@@ -62,6 +62,69 @@ firewall_id: 12345
 	}
 }
 
+func TestConfigurePlacementGroupAndPlacementGroupIDAreMutuallyExclusive(t *testing.T) {
+	l := &Linode{}
+	node := nodeFromYAML(t, `
+region: example-region
+type: example-type
+image: example/image
+token: abc123
+placement_group_id: 999
+placement_group:
+  enforcement: strict
+`)
+	err := l.Configure(context.Background(), "testtag", node)
+	if err == nil {
+		t.Fatal("expected error when both placement_group and placement_group_id are set")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error %v should mention mutual exclusion", err)
+	}
+}
+
+func TestConfigurePlacementGroupBadEnforcement(t *testing.T) {
+	l := &Linode{}
+	node := nodeFromYAML(t, `
+region: example-region
+type: example-type
+image: example/image
+token: abc123
+placement_group:
+  enforcement: loose
+`)
+	err := l.Configure(context.Background(), "testtag", node)
+	if err == nil {
+		t.Fatal("expected error on invalid enforcement value")
+	}
+	if !strings.Contains(err.Error(), "enforcement") {
+		t.Errorf("error should mention enforcement, got: %v", err)
+	}
+}
+
+func TestConfigurePlacementGroupIDOnlyDecodes(t *testing.T) {
+	// The attach-by-ID path doesn't hit the placement-group API at
+	// Configure time, so a fake token doesn't error here. Verifies the
+	// YAML decodes onto cfg.PlacementGroupID and the mutex check
+	// doesn't fire when only one mode is set.
+	l := &Linode{}
+	node := nodeFromYAML(t, `
+region: example-region
+type: example-type
+image: example/image
+token: abc123
+placement_group_id: 12345
+`)
+	if err := l.Configure(context.Background(), "testtag", node); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if l.cfg.PlacementGroupID != 12345 {
+		t.Errorf("PlacementGroupID = %d, want 12345", l.cfg.PlacementGroupID)
+	}
+	if l.cfg.PlacementGroup != nil {
+		t.Errorf("PlacementGroup should be nil, got %+v", l.cfg.PlacementGroup)
+	}
+}
+
 func TestConfigureFirewallAndFirewallIDAreMutuallyExclusive(t *testing.T) {
 	l := &Linode{}
 	node := nodeFromYAML(t, `
@@ -174,13 +237,13 @@ func TestToInstance(t *testing.T) {
 		Label:   "fj-bellows-abcd",
 		IPv4:    []*net.IP{&ip},
 		Created: &created,
-		Tags:    []string{"fj-bellows"},
+		Tags:    []string{testLabelPrefix},
 	}
 	got := toInstance(in)
 	if got.ID != "42" || got.Name != "fj-bellows-abcd" || got.IPv4 != "203.0.113.7" {
 		t.Errorf("toInstance = %+v", got)
 	}
-	if !got.CreatedAt.Equal(created) || got.Tag != "fj-bellows" {
+	if !got.CreatedAt.Equal(created) || got.Tag != testLabelPrefix {
 		t.Errorf("toInstance time/tag = %+v", got)
 	}
 }

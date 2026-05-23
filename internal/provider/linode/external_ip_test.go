@@ -19,13 +19,16 @@ const (
 	testCIDR2 = "198.51.100.5/32"
 	testTag   = "test-deploy"
 
-	testIP4   = "203.0.113.10"
 	testCIDR3 = "203.0.113.10/32"
 	testCIDR4 = "203.0.113.5/32"
 	anyV4CIDR = "0.0.0.0/0"
 	anyV6CIDR = "::/0"
 
 	testIP4Body = "203.0.113.10\n"
+
+	// Reused across multiple test files; centralised so goconst doesn't
+	// flag the repeated literal.
+	testLabelPrefix = "fj-bellows"
 )
 
 // stubDoer returns a fixed (response, err) per URL. Hand-rolled — no httptest
