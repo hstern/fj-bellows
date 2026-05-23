@@ -4,7 +4,10 @@
 # (not inlined) to keep this file tidy.
 
 forgejo:
-  # Base URL of your Forgejo instance.
+  # Base URL of your Forgejo instance. Workers reach this URL through a
+  # reverse port-forward opened on the dispatch SSH session, so a LAN-internal
+  # hostname that does not resolve from the public internet still works (the
+  # orchestrator resolves it; the worker just hits 127.0.0.1).
   url: https://forgejo.example.com
   # Forgejo admin token (scope: all). Polls the job queue and mints per-job
   # ephemeral runner registrations.

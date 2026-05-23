@@ -37,6 +37,12 @@ just cheap on one.
   one-job ... --wait` on the warm VM over SSH. Forgejo invalidates the
   credentials and removes the registration after the single job. The worker VM
   never holds an admin token.
+- **Workers reach Forgejo over the dispatch SSH session.** The orchestrator
+  opens a reverse port-forward on the same SSH connection and injects a
+  `/etc/hosts` override on the worker, so a LAN-internal Forgejo whose hostname
+  does not resolve from the public internet works out of the box. No
+  worker-side DNS, proxy, or VPN configuration required; TLS validation against
+  the original hostname is unchanged.
 - **Reconcile**: every tick the orchestrator reconciles three sources — waiting
   jobs, registered runners, and provider instances — into one internal view,
   modeling each node as a state machine

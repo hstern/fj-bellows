@@ -83,6 +83,95 @@ func TestTOFUHostKeyCallback(t *testing.T) {
 // Verify SSHDispatcher satisfies the HostKeyPinner interface.
 var _ HostKeyPinner = (*SSHDispatcher)(nil)
 
+// hostInternal is the generic placeholder used across parse/hosts-override
+// tests. Kept as a const so goconst doesn't flag the repeated literal.
+const hostInternal = "forgejo.internal"
+
+func TestParseForgejoURL(t *testing.T) {
+	cases := []struct {
+		in        string
+		wantHost  string
+		wantPort  int
+		wantIPLit bool
+		wantErr   bool
+	}{
+		{in: "https://" + hostInternal, wantHost: hostInternal, wantPort: 443},
+		{in: "http://" + hostInternal, wantHost: hostInternal, wantPort: 80},
+		{in: "http://localhost:3000", wantHost: "localhost", wantPort: 3000},
+		{in: "https://" + hostInternal + ":8443/", wantHost: hostInternal, wantPort: 8443},
+		{in: "http://192.0.2.10:8080", wantHost: "192.0.2.10", wantPort: 8080, wantIPLit: true},
+		{in: "https://[2001:db8::1]:8443", wantHost: "2001:db8::1", wantPort: 8443, wantIPLit: true},
+		{in: "ftp://" + hostInternal, wantErr: true}, // unsupported scheme
+		{in: "https://", wantErr: true},              // no host
+		{in: "http://" + hostInternal + ":0", wantErr: true},
+		{in: "http://" + hostInternal + ":99999", wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			got, err := parseForgejoURL(c.in)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.host != c.wantHost {
+				t.Errorf("host = %q, want %q", got.host, c.wantHost)
+			}
+			if got.port != c.wantPort {
+				t.Errorf("port = %d, want %d", got.port, c.wantPort)
+			}
+			if got.isIPLit != c.wantIPLit {
+				t.Errorf("isIPLit = %v, want %v", got.isIPLit, c.wantIPLit)
+			}
+		})
+	}
+}
+
+func TestHostsOverrideCommand(t *testing.T) {
+	cases := []struct {
+		name string
+		in   forgejoTarget
+		want string
+	}{
+		{
+			name: "hostname needs override",
+			in:   forgejoTarget{host: "forgejo.internal", port: 443},
+			want: "grep -qF '127.0.0.1 forgejo.internal' /etc/hosts || echo '127.0.0.1 forgejo.internal' >> /etc/hosts",
+		},
+		{
+			name: "localhost already mapped",
+			in:   forgejoTarget{host: "localhost", port: 3000},
+			want: "",
+		},
+		{
+			name: "Localhost case-insensitive",
+			in:   forgejoTarget{host: "LOCALHOST", port: 3000},
+			want: "",
+		},
+		{
+			name: "IPv4 literal needs no DNS",
+			in:   forgejoTarget{host: "192.0.2.10", port: 8080, isIPLit: true},
+			want: "",
+		},
+		{
+			name: "IPv6 literal needs no DNS",
+			in:   forgejoTarget{host: "2001:db8::1", port: 8443, isIPLit: true},
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := hostsOverrideCommand(c.in); got != c.want {
+				t.Errorf("hostsOverrideCommand(%+v)\n  got:  %q\n  want: %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 func TestPinHostKeyRequiresSeededKeyOnFirstContact(t *testing.T) {
 	keyA := newTestHostKey(t)
 	keyB := newTestHostKey(t)

@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,9 +52,20 @@ type SSHDispatcher struct {
 	ReadyWait   time.Duration // total time to wait for readiness
 	DialTimeout time.Duration
 
+	// Log is the optional logger for tunnel warnings (per-conn dial failures
+	// etc.). Falls back to slog.Default when nil.
+	Log *slog.Logger
+
 	// pinsMu guards pins, the per-VM trust-on-first-use host-key store.
 	pinsMu sync.Mutex
 	pins   map[string]ssh.PublicKey
+}
+
+func (d *SSHDispatcher) logger() *slog.Logger {
+	if d.Log != nil {
+		return d.Log
+	}
+	return slog.Default()
 }
 
 // PinHostKey seeds the pin store with the host key the worker at ip is expected
@@ -100,12 +113,32 @@ func (d *SSHDispatcher) WaitReady(ctx context.Context, _, addr string) error {
 }
 
 // RunJob delivers the token and runs one-job to completion.
+//
+// The dispatch SSH session also carries Forgejo traffic: a reverse port
+// forward binds 127.0.0.1:<forgejo-port> on the worker and relays each
+// accepted connection to the orchestrator-side Forgejo via the orchestrator's
+// own resolver. Combined with a /etc/hosts override on the worker, this lets
+// workers on a public cloud reach a LAN-internal Forgejo whose hostname does
+// not resolve from the public internet, without any worker-side network
+// configuration. TLS SNI is the original hostname, so a public-CA certificate
+// for the Forgejo continues to validate end-to-end. See #33.
 func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.Registration, job forgejo.WaitingJob) error {
+	target, err := parseForgejoURL(d.ForgejoURL)
+	if err != nil {
+		return fmt.Errorf("parse forgejo url: %w", err)
+	}
+
 	client, err := d.dial(ctx, addr)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = client.Close() }()
+
+	tunnel, err := d.startReverseTunnel(ctx, client, target)
+	if err != nil {
+		return fmt.Errorf("forgejo reverse-tunnel: %w", err)
+	}
+	defer func() { _ = tunnel.Close() }()
 
 	// Write the one-shot token via stdin so it never appears on the command
 	// line / process list.
@@ -120,10 +153,111 @@ func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.
 		shellQuote(strings.Join(d.Labels, ",")),
 		shellQuote(job.Handle),
 	)
+	if prep := hostsOverrideCommand(target); prep != "" {
+		cmd = prep + " && " + cmd
+	}
 	if err := runRemote(ctx, client, cmd, nil); err != nil {
 		return fmt.Errorf("one-job: %w", err)
 	}
 	return nil
+}
+
+// forgejoTarget is the parsed Forgejo URL: the hostname or IP literal the
+// worker will see in --url, and the effective port (used to bind the worker
+// loopback listener and to dial the upstream Forgejo).
+type forgejoTarget struct {
+	host    string
+	port    int
+	isIPLit bool
+}
+
+// parseForgejoURL extracts {host, port} from the Forgejo URL, defaulting the
+// port from scheme when absent. Only http/https are accepted.
+func parseForgejoURL(raw string) (forgejoTarget, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return forgejoTarget{}, err
+	}
+	host := u.Hostname()
+	if host == "" {
+		return forgejoTarget{}, fmt.Errorf("forgejo url has no host: %q", raw)
+	}
+	port := 0
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n <= 0 || n > 65535 {
+			return forgejoTarget{}, fmt.Errorf("forgejo url has invalid port %q", p)
+		}
+		port = n
+	} else {
+		switch strings.ToLower(u.Scheme) {
+		case "http":
+			port = 80
+		case "https":
+			port = 443
+		default:
+			return forgejoTarget{}, fmt.Errorf("forgejo url has unsupported scheme %q", u.Scheme)
+		}
+	}
+	return forgejoTarget{host: host, port: port, isIPLit: net.ParseIP(host) != nil}, nil
+}
+
+// hostsOverrideCommand returns a shell snippet that adds `127.0.0.1 <host>` to
+// the worker's /etc/hosts if it isn't already there. Returns "" when no
+// override is needed: IP literals don't need DNS, and `localhost` is already
+// mapped to 127.0.0.1 on every standard image.
+func hostsOverrideCommand(t forgejoTarget) string {
+	if t.isIPLit || strings.EqualFold(t.host, "localhost") {
+		return ""
+	}
+	line := "127.0.0.1 " + t.host
+	return "grep -qF " + shellQuote(line) + " /etc/hosts || echo " + shellQuote(line) + " >> /etc/hosts"
+}
+
+// startReverseTunnel binds 127.0.0.1:port on the worker (via the SSH client's
+// global remote-forward channel) and forwards each accepted connection to the
+// orchestrator-side Forgejo. The returned io.Closer ends the listener; in-flight
+// forwarded connections will close when their underlying client.Close fires.
+func (d *SSHDispatcher) startReverseTunnel(ctx context.Context, client *ssh.Client, target forgejoTarget) (io.Closer, error) {
+	bind := net.JoinHostPort("127.0.0.1", strconv.Itoa(target.port))
+	listener, err := client.Listen("tcp", bind)
+	if err != nil {
+		return nil, fmt.Errorf("remote-forward %s: %w", bind, err)
+	}
+	go d.acceptLoop(ctx, listener, target)
+	return listener, nil
+}
+
+// acceptLoop accepts connections from the worker and hands each off to a
+// per-conn forward goroutine. It exits when listener.Accept returns an error
+// (typically because the listener was closed during defer in RunJob).
+func (d *SSHDispatcher) acceptLoop(ctx context.Context, listener net.Listener, target forgejoTarget) {
+	for {
+		workerConn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		go d.forwardOne(ctx, workerConn, target)
+	}
+}
+
+// forwardOne dials the orchestrator-side Forgejo and bridges bytes both ways
+// until either side closes. A dial failure logs and drops just this one conn,
+// leaving the listener up so subsequent connections can still try.
+func (d *SSHDispatcher) forwardOne(ctx context.Context, workerConn net.Conn, target forgejoTarget) {
+	defer func() { _ = workerConn.Close() }()
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	upstream, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(target.host, strconv.Itoa(target.port)))
+	if err != nil {
+		d.logger().Warn("forgejo tunnel: dial upstream", "host", target.host, "port", target.port, "err", err)
+		return
+	}
+	defer func() { _ = upstream.Close() }()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = io.Copy(upstream, workerConn) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(workerConn, upstream) }()
+	wg.Wait()
 }
 
 func (d *SSHDispatcher) dial(ctx context.Context, ip string) (*ssh.Client, error) {
