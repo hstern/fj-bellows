@@ -16,8 +16,17 @@ forgejo:
   scope: orgs/example
   # Runner labels this pool services. A job is eligible only if all of its
   # required labels appear here.
+  #
+  # A label may also carry a forgejo-runner backend binding using the standard
+  # `<name>:<scheme>://<value>` syntax (schemes: docker, host, kubernetes).
+  # The orchestrator strips the binding when matching jobs (a workflow's
+  # `runs_on: ubuntu-latest` still matches a pool label of
+  # `ubuntu-latest:docker://...`), and passes the full binding through to the
+  # worker's `forgejo-runner one-job --label` so the runner picks the right
+  # job-container image. The catthehacker image is the de-facto default for
+  # GH-Actions-style workflows that need docker, apt, etc.
   labels:
-    - ubuntu-latest
+    - 'ubuntu-latest:docker://catthehacker/ubuntu:act-latest'
 
 # Tag stamped on every instance this deployment owns. It is the ONLY thing
 # scoping ownership: set a UNIQUE tag per deployment if several fj-bellows run

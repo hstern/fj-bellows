@@ -479,9 +479,11 @@ func (o *Orchestrator) unmarkDispatching(handle string) {
 }
 
 // filterServiceable keeps jobs whose required labels are all offered by pool.
+// The pool's labels may carry a `:scheme://image` binding (see #39); strip it
+// before comparing so the binding doesn't make matching fail.
 func filterServiceable(jobs []forgejo.WaitingJob, labels []string) []forgejo.WaitingJob {
 	have := map[string]struct{}{}
-	for _, l := range labels {
+	for _, l := range forgejo.BareLabels(labels) {
 		have[l] = struct{}{}
 	}
 	var out []forgejo.WaitingJob

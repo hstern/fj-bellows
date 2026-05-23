@@ -613,6 +613,21 @@ func TestFilterServiceable(t *testing.T) {
 	}
 }
 
+// TestFilterServiceableStripsLabelBinding is the regression for #39: a pool
+// label of `ubuntu-latest:docker://catthehacker/ubuntu:act-latest` must still
+// match a job that just declared `runs_on: ubuntu-latest` in its workflow.
+// Pre-fix the full label was compared as a single string and missed every job.
+func TestFilterServiceableStripsLabelBinding(t *testing.T) {
+	pool := []string{labelUbuntu + ":docker://catthehacker/ubuntu:act-latest"}
+	jobs := []forgejo.WaitingJob{
+		{Handle: "ubuntu", Labels: []string{labelUbuntu}},
+	}
+	got := filterServiceable(jobs, pool)
+	if len(got) != 1 {
+		t.Fatalf("got %d serviceable jobs, want 1: %+v", len(got), got)
+	}
+}
+
 // TestReconcileCountsProvisioningAsFutureCapacity is the regression test for
 // #32. With a slow boot (boot_time >> poll_interval), nodes sit in
 // StateProvisioning across multiple reconciles while the same waiting jobs are

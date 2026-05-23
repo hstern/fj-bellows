@@ -111,7 +111,11 @@ func run(opts runOpts, log *slog.Logger) error {
 		return err
 	}
 
-	fj := forgejo.New(cfg.Forgejo.URL, cfg.Forgejo.Scope, cfg.Forgejo.Token, cfg.Forgejo.Labels...)
+	// Forgejo's job-queue ?labels= filter matches the bare label a workflow
+	// declares in `runs_on`, so strip any `:scheme://image` binding before
+	// passing labels to the client. Registration and the worker's --label arg
+	// still see the full strings via the orchestrator config below. See #39.
+	fj := forgejo.New(cfg.Forgejo.URL, cfg.Forgejo.Scope, cfg.Forgejo.Token, forgejo.BareLabels(cfg.Forgejo.Labels)...)
 
 	dispatcher, err := dispatcherFor(cfg, prov, signer)
 	if err != nil {

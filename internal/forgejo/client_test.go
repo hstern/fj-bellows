@@ -108,7 +108,7 @@ func TestRegisterEphemeral(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "orgs/example", "t", "docker")
-	reg, err := c.RegisterEphemeral(context.Background(), "runner-x", []string{"ubuntu-latest"})
+	reg, err := c.RegisterEphemeral(context.Background(), "runner-x", []string{labelUbuntu})
 	if err != nil {
 		t.Fatal(err)
 	}
