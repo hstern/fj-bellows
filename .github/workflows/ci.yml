@@ -153,6 +153,11 @@ jobs:
           provider_config:
             image: fj-bellows-worker:test
             network: ${{ steps.forgejo.outputs.network }}
+            # Bind-mount the host Docker socket so forgejo-runner inside the
+            # worker can spawn per-step containers on the host daemon (no
+            # nested Docker required).
+            volumes:
+              - /var/run/docker.sock:/var/run/docker.sock
           poll:
             interval: 2s
             idle_timeout: 5s
