@@ -9,16 +9,23 @@ import (
 	"testing"
 )
 
-// Stable URLs / values reused across the external-IP / GH-meta / firewall
-// tests. goconst would otherwise flag the repetition.
+// Stable URLs / values reused across the external-IP / firewall tests.
+// goconst would otherwise flag the repetition.
 const (
-	testV4URL   = "https://ipv4.example"
-	testV6URL   = "https://ipv6.example"
-	testMetaURL = "https://meta.example"
+	testV4URL = "https://ipv4.example"
+	testV6URL = "https://ipv6.example"
 
 	testCIDR1 = "192.0.2.10/32"
 	testCIDR2 = "198.51.100.5/32"
 	testTag   = "test-deploy"
+
+	testIP4   = "203.0.113.10"
+	testCIDR3 = "203.0.113.10/32"
+	testCIDR4 = "203.0.113.5/32"
+	anyV4CIDR = "0.0.0.0/0"
+	anyV6CIDR = "::/0"
+
+	testIP4Body = "203.0.113.10\n"
 )
 
 // stubDoer returns a fixed (response, err) per URL. Hand-rolled — no httptest
@@ -53,7 +60,7 @@ func TestResolveExternalIPBothFamilies(t *testing.T) {
 		v4URL: testV4URL,
 		v6URL: testV6URL,
 		client: stubDoer{
-			testV4URL: {body: "203.0.113.10\n"},
+			testV4URL: {body: testIP4Body},
 			testV6URL: {body: "2001:db8::1\n"},
 		},
 	}
@@ -61,7 +68,7 @@ func TestResolveExternalIPBothFamilies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := []string{"203.0.113.10/32", "2001:db8::1/128"}
+	want := []string{testCIDR3, "2001:db8::1/128"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -77,7 +84,7 @@ func TestResolveExternalIPOnlyV4(t *testing.T) {
 		v4URL: testV4URL,
 		v6URL: testV6URL,
 		client: stubDoer{
-			testV4URL: {body: "203.0.113.10\n"},
+			testV4URL: {body: testIP4Body},
 			testV6URL: {err: errors.New("no v6")},
 		},
 	}
@@ -85,7 +92,7 @@ func TestResolveExternalIPOnlyV4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(got) != 1 || got[0] != "203.0.113.10/32" {
+	if len(got) != 1 || got[0] != testCIDR3 {
 		t.Errorf("got %v, want [203.0.113.10/32]", got)
 	}
 }
@@ -129,7 +136,7 @@ func TestResolveExternalIPRejectsWrongFamily(t *testing.T) {
 		v6URL: testV6URL,
 		client: stubDoer{
 			testV4URL: {body: "2001:db8::1\n"},
-			testV6URL: {body: "203.0.113.10\n"},
+			testV6URL: {body: testIP4Body},
 		},
 	}
 	if _, err := resolveExternalIP(context.Background(), probe); err == nil {

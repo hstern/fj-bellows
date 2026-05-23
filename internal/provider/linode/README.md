@@ -19,6 +19,30 @@ provider_config:
       - auto              # host's external IPv4 (/32) + IPv6 (/128)
     refresh_interval: 1h  # optional; default 1h, minimum 1m
 
+    # Optional. Override the defaults (DROP / ACCEPT). DROP outbound forces
+    # an explicit allow list — workers need HTTPS to Forgejo, registries,
+    # and apt/yum, so this typically requires extra_outbound rules below to
+    # avoid breaking runner boot.
+    # inbound_policy: DROP
+    # outbound_policy: ACCEPT
+
+    # Optional. Extra rules appended after the synthesized tcp/22 rules
+    # (inbound) or used as the entire outbound list. Each rule mirrors the
+    # Linode FirewallRule shape; addresses are already-shaped CIDRs.
+    # extra_inbound:
+    #   - label: prometheus
+    #     ports: "9100"
+    #     protocol: TCP
+    #     action: ACCEPT
+    #     addresses:
+    #       ipv4: [10.0.0.0/8]
+    # extra_outbound:
+    #   - label: deny-smtp
+    #     ports: "25"
+    #     protocol: TCP
+    #     action: DROP
+    #     addresses: [any]   # 0.0.0.0/0 + ::/0; see sentinel table below
+
   # Alternative: attach to an operator-managed firewall by ID. Use this when
   # you'd rather manage the rules yourself. Mutually exclusive with `firewall`.
   # firewall_id: 12345
@@ -33,12 +57,21 @@ default-deny inbound posture: only tcp/22 from the resolved `allow_inbound`
 CIDRs. Outbound is unrestricted (workers need HTTPS to Forgejo, registries,
 etc.).
 
-`allow_inbound` accepts literal CIDRs plus one sentinel:
+`allow_inbound` (and the `addresses:` field on `extra_inbound` /
+`extra_outbound` rules) accept literal CIDRs plus a unified set of sentinels:
 
 | Token | Expands to |
 |---|---|
 | `<cidr>` | itself |
 | `auto` | host's external IPv4 (`/32`) and IPv6 (`/128`), via icanhazip |
+| `any` | `0.0.0.0/0` + `::/0` |
+| `any-v4` | `0.0.0.0/0` |
+| `any-v6` | `::/0` |
+
+The sentinel vocabulary is the same across both surfaces — `auto` lets an
+extra rule track the operator's IP (e.g. an SSH allow-from-here rule on a
+non-standard port), and `any[-vN]` is the natural shorthand for a
+permissive rule (e.g. an `extra_outbound` DROP-from-anywhere block).
 
 Sentinel resolution is **fatal at Configure** (startup) — a sentinel that
 can't resolve or an `allow_inbound` that ends up empty makes the daemon
@@ -55,6 +88,34 @@ gated.
 **PAT scope** for managed mode: `Linodes: Read/Write` **and** `Firewalls:
 Read/Write`. The simpler `firewall_id` mode below only needs `Linodes:
 Read/Write`.
+
+#### Policy overrides + extra rules (`inbound_policy`, `outbound_policy`, `extra_inbound`, `extra_outbound`)
+
+The defaults — `inbound_policy: DROP`, `outbound_policy: ACCEPT` — are right
+for the common case (workers accept only inbound tcp/22 from `allow_inbound`,
+and need unrestricted outbound for HTTPS to Forgejo, registries, package
+mirrors). The optional knobs cover the cases the defaults don't fit:
+
+- **`inbound_policy: ACCEPT`** flips to default-allow on inbound. Don't use
+  this unless `extra_inbound` lists every port you want to block — workers
+  with default-allow inbound and only your synthesized SSH rule are
+  effectively wide open. A misuse this way is a bigger footgun than the
+  default.
+- **`outbound_policy: DROP`** forces an explicit egress allow list. Workers
+  must still reach Forgejo (over the dispatcher's reverse-tunnel; see #33),
+  the runner-version download (`code.forgejo.org`), and whatever package /
+  image registries the workflow uses (Docker Hub, GHCR, apt/yum mirrors).
+  Set this only with `extra_outbound` rules listing every required egress —
+  an over-tight outbound list stops the worker from booting.
+- **`extra_inbound` / `extra_outbound`** add rules verbatim in the linodego
+  shape. Each rule's `addresses.ipv4` and `addresses.ipv6` are capped at 255
+  entries (the Linode per-rule limit); the combined inbound rule count
+  (synth + extras) must stay under the 25-rule-per-firewall ceiling, same
+  for outbound on its own.
+
+The refresh goroutine only re-resolves the `allow_inbound` sentinels; the
+operator's extras + policies are read once at Configure and never reloaded
+on the running daemon. Restart to pick up edits to those fields.
 
 **Label / tag**: the firewall is labelled `fj-bellows-<sanitize(cfg.Tag)>`
 (truncated to Linode's 32-char cap with a SHA-256 suffix when needed) and

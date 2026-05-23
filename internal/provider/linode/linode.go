@@ -69,24 +69,16 @@ func (l *Linode) Configure(ctx context.Context, tag string, node yaml.Node) erro
 	if err := node.Decode(&l.cfg); err != nil {
 		return fmt.Errorf("linode: decode provider_config: %w", err)
 	}
-	var missing []string
-	if l.cfg.Region == "" {
-		missing = append(missing, "region")
-	}
-	if l.cfg.Type == "" {
-		missing = append(missing, "type")
-	}
-	if l.cfg.Image == "" {
-		missing = append(missing, "image")
-	}
-	if l.cfg.Token == "" {
-		missing = append(missing, "token")
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("linode: provider_config missing: %s", strings.Join(missing, ", "))
+	if err := l.cfg.validateRequiredFields(); err != nil {
+		return err
 	}
 	if l.cfg.Firewall != nil && l.cfg.FirewallID != 0 {
 		return errors.New("linode: provider_config: `firewall` and `firewall_id` are mutually exclusive")
+	}
+	if l.cfg.Firewall != nil {
+		if err := l.cfg.Firewall.validate(); err != nil {
+			return fmt.Errorf("linode: firewall: %w", err)
+		}
 	}
 	client := linodego.NewClient(nil)
 	client.SetToken(l.cfg.Token)
@@ -94,16 +86,49 @@ func (l *Linode) Configure(ctx context.Context, tag string, node yaml.Node) erro
 	l.tag = tag
 
 	if l.cfg.Firewall != nil {
-		fw := newManagedFirewall(*l.cfg.Firewall, tag, &l.client, slog.Default())
-		if err := fw.primeResolved(ctx); err != nil {
-			return fmt.Errorf("linode: firewall: %w", err)
+		if err := l.setupManagedFirewall(ctx, tag); err != nil {
+			return err
 		}
-		if err := fw.ensureAtConfigure(ctx); err != nil {
-			return fmt.Errorf("linode: firewall: %w", err)
-		}
-		fw.startRefreshLoop()
-		l.fw = fw
 	}
+	return nil
+}
+
+// validateRequiredFields collects all missing required Linode provider_config
+// fields and reports them in one go (operator can fix them in one pass).
+func (c config) validateRequiredFields() error {
+	var missing []string
+	if c.Region == "" {
+		missing = append(missing, "region")
+	}
+	if c.Type == "" {
+		missing = append(missing, "type")
+	}
+	if c.Image == "" {
+		missing = append(missing, "image")
+	}
+	if c.Token == "" {
+		missing = append(missing, "token")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("linode: provider_config missing: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// setupManagedFirewall constructs the managedFirewall, resolves the sentinels,
+// creates/updates the firewall, and starts the refresh goroutine. Extracted
+// from Configure so each piece has a clear name and the parent function stays
+// under the cyclomatic-complexity budget.
+func (l *Linode) setupManagedFirewall(ctx context.Context, tag string) error {
+	fw := newManagedFirewall(*l.cfg.Firewall, tag, &l.client, slog.Default())
+	if err := fw.primeResolved(ctx); err != nil {
+		return fmt.Errorf("linode: firewall: %w", err)
+	}
+	if err := fw.ensureAtConfigure(ctx); err != nil {
+		return fmt.Errorf("linode: firewall: %w", err)
+	}
+	fw.startRefreshLoop()
+	l.fw = fw
 	return nil
 }
 

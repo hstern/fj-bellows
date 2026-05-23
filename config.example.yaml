@@ -54,9 +54,13 @@ provider_config:
   # goes away. Default-deny inbound except tcp/22 from allow_inbound; outbound
   # unrestricted. Mutually exclusive with `firewall_id` below.
   #
-  # `allow_inbound` accepts literal CIDRs plus one sentinel:
-  #   - `auto` — orchestrator's external IPv4 (/32) + IPv6 (/128), resolved
-  #              via icanhazip at startup and on refresh.
+  # `allow_inbound` (and the addresses: field on extra_inbound /
+  # extra_outbound rules below) accepts literal CIDRs plus sentinels:
+  #   - `auto`    — orchestrator's external IPv4 (/32) + IPv6 (/128),
+  #                 resolved via icanhazip at startup and on refresh.
+  #   - `any`     — 0.0.0.0/0 + ::/0 (any-source).
+  #   - `any-v4`  — 0.0.0.0/0.
+  #   - `any-v6`  — ::/0.
   #
   # Sentinel resolution failure or an empty resolved set is FATAL at startup;
   # the daemon refuses to start with a firewall nobody can reach. A refresh
@@ -70,6 +74,31 @@ provider_config:
   #     - 203.0.113.5/32
   #     - auto
   #   refresh_interval: 1h
+  #
+  #   # Optional: override the default policies (DROP inbound / ACCEPT outbound).
+  #   # See internal/provider/linode/README.md for the security implications,
+  #   # particularly the egress allow list workers need if you set
+  #   # outbound_policy: DROP.
+  #   # inbound_policy: DROP
+  #   # outbound_policy: ACCEPT
+  #
+  #   # Optional: extra rules appended after the synthesized tcp/22 rules
+  #   # (inbound) or used as the entire outbound list. Per-rule address
+  #   # cap is 255 per family; combined inbound rule count must stay under
+  #   # Linode's 25-per-firewall ceiling.
+  #   # extra_inbound:
+  #   #   - label: prometheus
+  #   #     ports: "9100"
+  #   #     protocol: TCP
+  #   #     action: ACCEPT
+  #   #     addresses:
+  #   #       ipv4: [10.0.0.0/8]
+  #   # extra_outbound:
+  #   #   - label: deny-smtp
+  #   #     ports: "25"
+  #   #     protocol: TCP
+  #   #     action: DROP
+  #   #     addresses: [any]   # 0.0.0.0/0 + ::/0; see sentinel table above
 
   # Alternative: attach every provisioned worker to a pre-existing Linode
   # Cloud Firewall (operator-managed out of band). Simpler; only needs

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -131,12 +132,29 @@ func TestFirewallLabelDifferentLongTagsDontCollide(t *testing.T) {
 	}
 }
 
+// testFirewall returns a managedFirewall configured purely for
+// buildRuleSet / buildExtraRule testing — the IP probe is wired to a
+// fake httpDoer that errors so any unexpected `auto` resolution fails
+// loudly, and the firewallClient is nil because these tests don't
+// touch the Linode API.
+func testFirewall(cfg firewallConfig) *managedFirewall {
+	return &managedFirewall{
+		cfg: cfg,
+		ipProbe: externalIPProbe{
+			v4URL:  "https://test/v4",
+			v6URL:  "https://test/v6",
+			client: stubDoer{},
+		},
+		log: slog.Default(),
+	}
+}
+
 // mustBuildRuleSet is the test sugar for buildRuleSet — Fatals on error.
 // Most tests want the rule-chunk error to propagate as a fatal, since their
 // inputs are tiny and never exceed the cap.
 func mustBuildRuleSet(t *testing.T, cidrs []string) linodego.FirewallRuleSet {
 	t.Helper()
-	rs, err := buildRuleSet(cidrs)
+	rs, err := testFirewall(firewallConfig{}).buildRuleSet(context.Background(), cidrs)
 	if err != nil {
 		t.Fatalf("buildRuleSet(%v): %v", cidrs, err)
 	}
@@ -145,7 +163,7 @@ func mustBuildRuleSet(t *testing.T, cidrs []string) linodego.FirewallRuleSet {
 
 func TestBuildRuleSet(t *testing.T) {
 	rs := mustBuildRuleSet(t, []string{testCIDR1, "2001:db8::1/128", "198.51.100.0/24"})
-	if rs.InboundPolicy != "DROP" || rs.OutboundPolicy != "ACCEPT" {
+	if rs.InboundPolicy != fwInboundDrop || rs.OutboundPolicy != fwActionAccept {
 		t.Errorf("policies = %q/%q, want DROP/ACCEPT", rs.InboundPolicy, rs.OutboundPolicy)
 	}
 	// v4 and v6 get separate rules to keep each rule under Linode's
@@ -183,7 +201,7 @@ func splitFamilyRules(t *testing.T, rs linodego.FirewallRuleSet) (v4, v6 *linode
 
 func checkFamilyRule(t *testing.T, r *linodego.FirewallRule, wantEntries int, family string) {
 	t.Helper()
-	if r.Action != "ACCEPT" || r.Ports != "22" || r.Protocol != linodego.TCP {
+	if r.Action != fwActionAccept || r.Ports != "22" || r.Protocol != linodego.TCP {
 		t.Errorf("%s rule fields off: %+v", family, r)
 	}
 	var got int
@@ -206,7 +224,7 @@ func TestBuildRuleSetChunksAcrossMultipleRules(t *testing.T) {
 	for i := range 300 {
 		cidrs = append(cidrs, fmt.Sprintf("198.51.100.%d/32", i%256))
 	}
-	rs, err := buildRuleSet(cidrs)
+	rs, err := testFirewall(firewallConfig{}).buildRuleSet(context.Background(), cidrs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -227,8 +245,197 @@ func TestBuildRuleSetRejectsWhenOverMaxRules(t *testing.T) {
 	for i := range 6376 {
 		cidrs = append(cidrs, fmt.Sprintf("203.0.113.%d/32", i%256))
 	}
-	if _, err := buildRuleSet(cidrs); err == nil {
+	if _, err := testFirewall(firewallConfig{}).buildRuleSet(context.Background(), cidrs); err == nil {
 		t.Fatal("want error when allow_inbound would need more than maxRulesPerFW rules")
+	}
+}
+
+// --- #46: policy overrides + extra rules ---
+
+func TestFirewallConfigValidatePolicies(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     firewallConfig
+		wantErr bool
+	}{
+		{name: "empty defaults", cfg: firewallConfig{}, wantErr: false},
+		{name: "explicit valid", cfg: firewallConfig{InboundPolicy: fwActionAccept, OutboundPolicy: fwInboundDrop}, wantErr: false},
+		{name: "invalid inbound", cfg: firewallConfig{InboundPolicy: "REJECT"}, wantErr: true},
+		{name: "invalid outbound", cfg: firewallConfig{OutboundPolicy: "drop"}, wantErr: true}, // case-sensitive
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.cfg.validate()
+			if (err != nil) != c.wantErr {
+				t.Errorf("validate() err=%v, wantErr=%v", err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestExtraRuleValidate(t *testing.T) {
+	cases := []struct {
+		name    string
+		rule    extraRule
+		wantErr string
+	}{
+		{
+			name:    "valid",
+			rule:    extraRule{Label: "ok", Action: fwActionAccept, Protocol: fwProtoTCP, Ports: "22", Addresses: []string{"203.0.113.0/24"}},
+			wantErr: "",
+		},
+		{
+			name:    "missing label",
+			rule:    extraRule{Action: fwActionAccept, Protocol: fwProtoTCP},
+			wantErr: "label is required",
+		},
+		{
+			name:    "bad action",
+			rule:    extraRule{Label: "ok", Action: "ALLOW", Protocol: fwProtoTCP},
+			wantErr: "ACCEPT or DROP",
+		},
+		{
+			name:    "bad protocol",
+			rule:    extraRule{Label: "ok", Action: fwActionAccept, Protocol: "SCTP"},
+			wantErr: "TCP/UDP/ICMP/IPENCAP",
+		},
+		{
+			name:    "non-CIDR v4",
+			rule:    extraRule{Label: "ok", Action: fwActionAccept, Protocol: fwProtoTCP, Addresses: []string{"not-a-cidr"}},
+			wantErr: "is not a CIDR",
+		},
+		// (Per-family cap now enforced post-resolution by buildExtraRule,
+		// not by validate() — validate is syntactic only after the
+		// sentinels-supported refactor. See TestBuildExtraRuleRejectsOverCap
+		// below.)
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.rule.validate()
+			switch {
+			case c.wantErr == "" && err != nil:
+				t.Errorf("want no error, got %v", err)
+			case c.wantErr != "" && err == nil:
+				t.Errorf("want error containing %q, got nil", c.wantErr)
+			case c.wantErr != "" && err != nil && !strings.Contains(err.Error(), c.wantErr):
+				t.Errorf("err = %v, want substring %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestBuildRuleSetHonoursPolicyOverrides(t *testing.T) {
+	cfg := firewallConfig{
+		InboundPolicy:  fwActionAccept, // override the default DROP
+		OutboundPolicy: fwInboundDrop,  // override the default ACCEPT
+	}
+	rs, err := testFirewall(cfg).buildRuleSet(context.Background(), []string{testCIDR1})
+	if err != nil {
+		t.Fatalf("buildRuleSet: %v", err)
+	}
+	if rs.InboundPolicy != fwActionAccept {
+		t.Errorf("InboundPolicy = %q, want ACCEPT", rs.InboundPolicy)
+	}
+	if rs.OutboundPolicy != fwInboundDrop {
+		t.Errorf("OutboundPolicy = %q, want DROP", rs.OutboundPolicy)
+	}
+}
+
+func TestBuildRuleSetAppendsExtraInboundAfterSynth(t *testing.T) {
+	extra := extraRule{
+		Label:     "prometheus",
+		Action:    fwActionAccept,
+		Protocol:  fwProtoTCP,
+		Ports:     "9100",
+		Addresses: []string{"10.0.0.0/8"},
+	}
+	cfg := firewallConfig{ExtraInbound: []extraRule{extra}}
+	rs, err := testFirewall(cfg).buildRuleSet(context.Background(), []string{testCIDR1})
+	if err != nil {
+		t.Fatalf("buildRuleSet: %v", err)
+	}
+	// 1 synth (v4 only — testCIDR1 is v4) + 1 extra = 2 inbound.
+	if len(rs.Inbound) != 2 {
+		t.Fatalf("want 2 inbound rules (1 synth + 1 extra), got %d", len(rs.Inbound))
+	}
+	last := rs.Inbound[len(rs.Inbound)-1]
+	if last.Label != "prometheus" {
+		t.Errorf("extra rule should be last; got label %q", last.Label)
+	}
+	if last.Ports != "9100" {
+		t.Errorf("extra rule ports = %q, want 9100", last.Ports)
+	}
+}
+
+func TestBuildRuleSetExtraOutboundReplacesEmptyDefault(t *testing.T) {
+	extra := extraRule{
+		Label:     "deny-smtp",
+		Action:    fwInboundDrop,
+		Protocol:  fwProtoTCP,
+		Ports:     "25",
+		Addresses: []string{anyV4CIDR, anyV6CIDR},
+	}
+	cfg := firewallConfig{ExtraOutbound: []extraRule{extra}}
+	rs, err := testFirewall(cfg).buildRuleSet(context.Background(), []string{testCIDR1})
+	if err != nil {
+		t.Fatalf("buildRuleSet: %v", err)
+	}
+	if len(rs.Outbound) != 1 {
+		t.Fatalf("want 1 outbound rule, got %d", len(rs.Outbound))
+	}
+	if rs.Outbound[0].Label != "deny-smtp" || rs.Outbound[0].Action != fwInboundDrop {
+		t.Errorf("outbound rule wrong: %+v", rs.Outbound[0])
+	}
+}
+
+func TestBuildRuleSetRejectsWhenSynthPlusExtrasOverCap(t *testing.T) {
+	// One synth v4 rule + 25 extras = 26 inbound rules, over the 25 cap.
+	extras := make([]extraRule, 25)
+	for i := range extras {
+		extras[i] = extraRule{
+			Label:     fmt.Sprintf("extra-%d", i),
+			Action:    fwActionAccept,
+			Protocol:  fwProtoTCP,
+			Ports:     strconv.Itoa(10000 + i),
+			Addresses: []string{"203.0.113.0/24"},
+		}
+	}
+	cfg := firewallConfig{ExtraInbound: extras}
+	if _, err := testFirewall(cfg).buildRuleSet(context.Background(), []string{testCIDR1}); err == nil {
+		t.Fatal("want error when synth + extras exceed Linode's 25-rule cap")
+	}
+}
+
+func TestBuildRuleSetIPv6ExtrasRoundTrip(t *testing.T) {
+	// Operator supplies an IPv6-only rule. Make sure both family slices land
+	// in the linodego rule (one populated, one empty-but-non-nil) so the
+	// Linode API JSON-encodes them.
+	cfg := firewallConfig{
+		ExtraInbound: []extraRule{{
+			Label:     "v6-only",
+			Action:    fwActionAccept,
+			Protocol:  fwProtoTCP,
+			Ports:     "443",
+			Addresses: []string{"2001:db8::/32"},
+		}},
+	}
+	rs, err := testFirewall(cfg).buildRuleSet(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("buildRuleSet: %v", err)
+	}
+	// allow_inbound was nil -> 1 placeholder synth rule + 1 extra = 2.
+	if len(rs.Inbound) != 2 {
+		t.Fatalf("want 2 inbound rules (placeholder + extra), got %d", len(rs.Inbound))
+	}
+	extra := rs.Inbound[1]
+	if extra.Addresses.IPv4 == nil || extra.Addresses.IPv6 == nil {
+		t.Fatalf("both family slices must be non-nil; got %+v", extra.Addresses)
+	}
+	if got := *extra.Addresses.IPv6; len(got) != 1 || got[0] != "2001:db8::/32" {
+		t.Errorf("v6 addresses = %v, want [2001:db8::/32]", got)
+	}
+	if got := *extra.Addresses.IPv4; len(got) != 0 {
+		t.Errorf("v4 addresses should be empty, got %v", got)
 	}
 }
 
@@ -238,7 +445,7 @@ func TestRuleSetAddrsEqual(t *testing.T) {
 	if !ruleSetAddrsEqual(a, b) {
 		t.Error("identical rulesets compared unequal")
 	}
-	c := mustBuildRuleSet(t, []string{"203.0.113.10/32"})
+	c := mustBuildRuleSet(t, []string{testCIDR3})
 	if ruleSetAddrsEqual(a, c) {
 		t.Error("different rulesets compared equal")
 	}
@@ -295,7 +502,7 @@ func TestEnsureFirewallUpdatesOnDrift(t *testing.T) {
 		log:    slog.Default(),
 	}
 	_, _ = m.ensureFirewall(context.Background(), mustBuildRuleSet(t, []string{testCIDR1}))
-	_, _ = m.ensureFirewall(context.Background(), mustBuildRuleSet(t, []string{testCIDR1, "203.0.113.5/32"}))
+	_, _ = m.ensureFirewall(context.Background(), mustBuildRuleSet(t, []string{testCIDR1, testCIDR4}))
 	if fake.updateCalls != 1 {
 		t.Errorf("updateCalls = %d, want 1 (rules drifted)", fake.updateCalls)
 	}
@@ -358,7 +565,7 @@ func TestResolveAllowInboundLiteralPlusAuto(t *testing.T) {
 	}
 	m := &managedFirewall{
 		cfg: firewallConfig{
-			AllowInbound: []string{testCIDR2, "auto"},
+			AllowInbound: []string{testCIDR2, sentinelAuto},
 		},
 		ipProbe: externalIPProbe{v4URL: testV4URL, v6URL: testV6URL, client: httpStub},
 		log:     slog.Default(),
@@ -391,7 +598,7 @@ func TestResolveAllowInboundSentinelFailureIsFatal(t *testing.T) {
 	}
 	m := &managedFirewall{
 		cfg: firewallConfig{
-			AllowInbound: []string{testCIDR2, "auto"},
+			AllowInbound: []string{testCIDR2, sentinelAuto},
 		},
 		ipProbe: externalIPProbe{v4URL: testV4URL, v6URL: testV6URL, client: httpStub},
 		log:     slog.Default(),
@@ -411,7 +618,7 @@ func TestRefreshOnceKeepsExistingRulesOnFailure(t *testing.T) {
 	}
 	m := &managedFirewall{
 		cfg: firewallConfig{
-			AllowInbound: []string{testCIDR2, "auto"},
+			AllowInbound: []string{testCIDR2, sentinelAuto},
 		},
 		tag:     testTag,
 		client:  fake,
@@ -448,3 +655,167 @@ var _ firewallClient = (*fakeFirewallClient)(nil)
 
 // http import kept for the stubDoer test file (separate package member).
 var _ = http.MethodGet
+
+// --- sentinel coverage across BOTH surfaces (allow_inbound + extras) ---
+
+// testFirewallWithProbe lets sentinel tests inject a stubDoer for the IP
+// probe so `auto` resolves deterministically without hitting icanhazip.
+func testFirewallWithProbe(cfg firewallConfig, doer stubDoer) *managedFirewall {
+	return &managedFirewall{
+		cfg: cfg,
+		ipProbe: externalIPProbe{
+			v4URL:  testV4URL,
+			v6URL:  testV6URL,
+			client: doer,
+		},
+		log: slog.Default(),
+	}
+}
+
+func TestResolveSentinelsAnyVariants(t *testing.T) {
+	m := testFirewall(firewallConfig{}) // probe never consulted for the any* set
+	got, err := m.resolveSentinels(context.Background(), []string{"any-v4", "any-v6", "any", testCIDR4})
+	if err != nil {
+		t.Fatalf("resolveSentinels: %v", err)
+	}
+	want := []string{anyV4CIDR, anyV6CIDR, anyV4CIDR, anyV6CIDR, testCIDR4}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("got[%d]=%q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestResolveSentinelsAutoUsesProbe(t *testing.T) {
+	doer := stubDoer{
+		testV4URL: {body: "203.0.113.99\n"},
+		testV6URL: {err: errors.New("no v6")},
+	}
+	m := testFirewallWithProbe(firewallConfig{}, doer)
+	got, err := m.resolveSentinels(context.Background(), []string{sentinelAuto})
+	if err != nil {
+		t.Fatalf("resolveSentinels: %v", err)
+	}
+	if len(got) != 1 || got[0] != "203.0.113.99/32" {
+		t.Errorf("got %v, want [203.0.113.99/32]", got)
+	}
+}
+
+func TestResolveSentinelsRejectsTypo(t *testing.T) {
+	m := testFirewall(firewallConfig{})
+	_, err := m.resolveSentinels(context.Background(), []string{"any-v5"})
+	if err == nil {
+		t.Fatal("want error on unknown sentinel")
+	}
+	if !strings.Contains(err.Error(), "auto, any, any-v4, any-v6") {
+		t.Errorf("error should list the supported sentinels, got: %v", err)
+	}
+}
+
+func TestAllowInboundAcceptsAnySentinels(t *testing.T) {
+	m := testFirewall(firewallConfig{
+		AllowInbound: []string{"any-v4", testCIDR4},
+	})
+	got, err := m.resolveAllowInbound(context.Background())
+	if err != nil {
+		t.Fatalf("resolveAllowInbound: %v", err)
+	}
+	// Sorted+deduped.
+	want := []string{anyV4CIDR, testCIDR4}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("got[%d]=%q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExtraRuleAcceptsAutoSentinel(t *testing.T) {
+	doer := stubDoer{
+		testV4URL: {body: testIP4Body},
+		testV6URL: {err: errors.New("no v6")},
+	}
+	m := testFirewallWithProbe(firewallConfig{
+		ExtraInbound: []extraRule{{
+			Label:     "ssh-from-me",
+			Action:    fwActionAccept,
+			Protocol:  fwProtoTCP,
+			Ports:     "22",
+			Addresses: []string{sentinelAuto},
+		}},
+	}, doer)
+	rs, err := m.buildRuleSet(context.Background(), []string{testCIDR1})
+	if err != nil {
+		t.Fatalf("buildRuleSet: %v", err)
+	}
+	// 1 synth (v4 only) + 1 extra = 2 inbound.
+	if len(rs.Inbound) != 2 {
+		t.Fatalf("want 2 inbound rules, got %d", len(rs.Inbound))
+	}
+	extra := rs.Inbound[1]
+	if got := *extra.Addresses.IPv4; len(got) != 1 || got[0] != testCIDR3 {
+		t.Errorf("extra v4 addresses = %v, want [203.0.113.10/32]", got)
+	}
+}
+
+func TestExtraRuleAcceptsAnySentinel(t *testing.T) {
+	m := testFirewall(firewallConfig{
+		ExtraOutbound: []extraRule{{
+			Label:     "deny-smtp",
+			Action:    fwInboundDrop,
+			Protocol:  fwProtoTCP,
+			Ports:     "25",
+			Addresses: []string{"any"},
+		}},
+	})
+	rs, err := m.buildRuleSet(context.Background(), []string{testCIDR1})
+	if err != nil {
+		t.Fatalf("buildRuleSet: %v", err)
+	}
+	if len(rs.Outbound) != 1 {
+		t.Fatalf("want 1 outbound rule, got %d", len(rs.Outbound))
+	}
+	out := rs.Outbound[0]
+	if got := *out.Addresses.IPv4; len(got) != 1 || got[0] != anyV4CIDR {
+		t.Errorf("v4 = %v, want [0.0.0.0/0]", got)
+	}
+	if got := *out.Addresses.IPv6; len(got) != 1 || got[0] != anyV6CIDR {
+		t.Errorf("v6 = %v, want [::/0]", got)
+	}
+}
+
+func TestExtraRuleValidateAcceptsSentinelTokens(t *testing.T) {
+	// validate is syntactic only — sentinels pass without touching the
+	// probe. Per-family cap enforcement happens later in buildExtraRule.
+	for _, sent := range []string{"auto", "any", "any-v4", "any-v6"} {
+		r := extraRule{Label: "ok", Action: fwActionAccept, Protocol: fwProtoTCP, Addresses: []string{sent}}
+		if err := r.validate(); err != nil {
+			t.Errorf("validate rejected sentinel %q: %v", sent, err)
+		}
+	}
+}
+
+func TestBuildExtraRuleRejectsOverCap(t *testing.T) {
+	addrs := make([]string, 256)
+	for i := range addrs {
+		addrs[i] = fmt.Sprintf("198.51.100.%d/32", i)
+	}
+	m := testFirewall(firewallConfig{})
+	_, err := m.buildExtraRule(context.Background(), extraRule{
+		Label:     "too-many",
+		Action:    fwActionAccept,
+		Protocol:  fwProtoTCP,
+		Addresses: addrs,
+	})
+	if err == nil {
+		t.Fatal("want error when extra rule resolves to >255 v4 addresses")
+	}
+	if !strings.Contains(err.Error(), "caps a rule at") {
+		t.Errorf("err = %v, want substring 'caps a rule at'", err)
+	}
+}
