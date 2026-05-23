@@ -44,6 +44,12 @@ type config struct {
 	// Network optionally attaches the container to a named docker network.
 	Network string `yaml:"network"`
 
+	// Volumes are docker -v bind mounts applied to every worker container,
+	// each formatted "<host>:<container>[:<mode>]". A typical use is mounting
+	// the host's Docker socket so forgejo-runner can spawn step containers on
+	// the host daemon without nested Docker.
+	Volumes []string `yaml:"volumes"`
+
 	// DockerBin overrides the docker binary name (default "docker"). Useful
 	// when docker is installed under a non-standard name (podman shim, etc.).
 	DockerBin string `yaml:"docker_bin"`
@@ -119,6 +125,9 @@ func (d *Docker) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	}
 	if d.cfg.Network != "" {
 		args = append(args, "--network", d.cfg.Network)
+	}
+	for _, v := range d.cfg.Volumes {
+		args = append(args, "-v", v)
 	}
 	args = append(args, d.cfg.Image)
 	out, err := d.cli.Run(ctx, nil, args...)

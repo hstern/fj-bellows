@@ -62,7 +62,7 @@ jobs:
       # container starts already installed (skipping the web wizard). Action
       # runs are enabled so workflow files trigger queued jobs.
       forgejo:
-        image: codeberg.org/forgejo/forgejo:12.0.4
+        image: codeberg.org/forgejo/forgejo:15
         ports:
           - 3000:3000
         env:
@@ -106,7 +106,7 @@ jobs:
         # image we pinned above to avoid hardcoding it.
         run: |
           set -euo pipefail
-          cid=$(docker ps --filter ancestor=codeberg.org/forgejo/forgejo:12.0.4 -q | head -n1)
+          cid=$(docker ps --filter ancestor=codeberg.org/forgejo/forgejo:15 -q | head -n1)
           if [ -z "$cid" ]; then
             echo "ERROR: forgejo service container not found"; docker ps -a; exit 1
           fi
@@ -153,6 +153,11 @@ jobs:
           provider_config:
             image: fj-bellows-worker:test
             network: ${{ steps.forgejo.outputs.network }}
+            # Bind-mount the host Docker socket so forgejo-runner inside the
+            # worker can spawn per-step containers on the host daemon (no
+            # nested Docker required).
+            volumes:
+              - /var/run/docker.sock:/var/run/docker.sock
           poll:
             interval: 2s
             idle_timeout: 5s

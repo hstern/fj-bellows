@@ -160,7 +160,10 @@ func TestBillingModel(t *testing.T) {
 }
 
 // containerID is a canned container ID used across provision/destroy tests.
-const containerID = "abc123def456"
+const (
+	containerID = "abc123def456"
+	workerImage = "example/worker:latest"
+)
 
 // testImage is the canned image string used in tests where the exact value
 // does not matter (only that one is set).
@@ -170,7 +173,7 @@ func TestProvisionSendsRunCommand(t *testing.T) {
 	fc := &fakeCLI{
 		responses: []fakeResponse{{stdout: []byte(containerID + "\n")}},
 	}
-	d := &Docker{cli: fc, cfg: config{Image: "example/worker:latest", Network: "my-net"}}
+	d := &Docker{cli: fc, cfg: config{Image: workerImage, Network: "my-net"}}
 	inst, err := d.Provision(context.Background(), provider.Spec{
 		Tag:  "my-tag",
 		Name: "fj-bellows-x",
@@ -200,7 +203,34 @@ func TestProvisionSendsRunCommand(t *testing.T) {
 		"--label", "fj-bellows.tag=my-tag",
 		"--name", "fj-bellows-x",
 		"--network", "my-net",
-		"example/worker:latest",
+		workerImage,
+	}
+	if strings.Join(calls[0].args, " ") != strings.Join(want, " ") {
+		t.Errorf("docker args = %v, want %v", calls[0].args, want)
+	}
+}
+
+func TestProvisionAppendsVolumes(t *testing.T) {
+	fc := &fakeCLI{
+		responses: []fakeResponse{{stdout: []byte(containerID + "\n")}},
+	}
+	d := &Docker{cli: fc, cfg: config{
+		Image:   workerImage,
+		Volumes: []string{"/var/run/docker.sock:/var/run/docker.sock", "/tmp/cache:/cache:ro"},
+	}}
+	if _, err := d.Provision(context.Background(), provider.Spec{Tag: "t"}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	calls := fc.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	want := []string{
+		"run", "-d",
+		"--label", "fj-bellows.tag=t",
+		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"-v", "/tmp/cache:/cache:ro",
+		workerImage,
 	}
 	if strings.Join(calls[0].args, " ") != strings.Join(want, " ") {
 		t.Errorf("docker args = %v, want %v", calls[0].args, want)

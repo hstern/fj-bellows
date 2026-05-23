@@ -17,7 +17,13 @@ provider_config:
   network: my-network            # optional; --network passed to docker run
   docker_bin: docker             # optional; default "docker"
   wait_timeout: 30s              # optional; bounds WaitReady polling
+  volumes:                       # optional; one -v <host>:<container>[:mode] per entry
+    - /var/run/docker.sock:/var/run/docker.sock
 ```
+
+Mounting the host Docker socket via `volumes` is the standard way to let
+`forgejo-runner` inside the worker spawn per-step containers on the host
+daemon without nested Docker.
 
 ## Worker image contract
 
