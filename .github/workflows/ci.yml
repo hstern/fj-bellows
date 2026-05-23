@@ -550,6 +550,28 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Need full tag history so the "highest semver" step below can
+          # compare the pushed ref against every prior release tag.
+          fetch-depth: 0
+
+      # Guard the floating `{{major}}` and `{{major}}.{{minor}}` tags against
+      # backport pushes. A later v0.1.5 published after v0.2.0 would otherwise
+      # silently move `:0` and `:0.1` back to v0.1.5. We only emit the floating
+      # tags when the pushed tag is the highest semver in the repo; backport
+      # publishes still get `:0.1.5` + `:<sha>` but leave the floating tags
+      # pinned at the true latest. Branch pushes (no tag) just see yes=false,
+      # which doesn't matter — the semver patterns wouldn't emit anyway.
+      - name: Is this the highest semver tag?
+        id: highest
+        run: |
+          set -euo pipefail
+          latest=$(git tag -l 'v*' | sort -V | tail -n1)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" = "$latest" ]; then
+            echo "yes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "yes=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/setup-qemu-action@v3
 
@@ -579,10 +601,22 @@ jobs:
           images: |
             ghcr.io/${{ github.repository }}
             ${{ needs.check-secrets.outputs.dockerhub == 'true' && format('docker.io/{0}/fj-bellows', secrets.DOCKERHUB_USERNAME) || '' }}
+          # Disable the default `latest=auto` (which would stamp `:latest` on
+          # the highest semver tag push). We want a single source for `:latest`:
+          # main HEAD — declared explicitly in the tags list below.
+          flavor: |
+            latest=false
+          # `:latest` follows main HEAD — explicitly gated to main pushes so
+          # tag pushes don't also stamp `:latest` (we don't want a backport
+          # release to move `:latest` backward, same concern as `:0`).
+          # `{{major}}` and `{{major}}.{{minor}}` are gated on being the highest
+          # semver; see the `highest` step above.
           tags: |
             type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.highest.outputs.yes == 'true' }}
+            type=semver,pattern={{major}},enable=${{ steps.highest.outputs.yes == 'true' }}
             type=sha
 
       - name: Build and push

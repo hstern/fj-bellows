@@ -82,6 +82,20 @@ docker run -d --name fj-bellows \
   ghcr.io/hstern/fj-bellows:latest
 ```
 
+Available tags:
+
+| Tag | Points to |
+|-----|-----------|
+| `:latest` | latest main HEAD (bleeding edge) |
+| `:0.1.0` | a specific release |
+| `:0.1` | latest 0.1.x release |
+| `:0` | latest 0.x release |
+| `:<sha>` | an immutable commit |
+
+The floating tags (`:0.1`, `:0`, `:latest`) are only moved forward, never
+backward — a backport release after a higher version has shipped publishes
+only its exact version + `:<sha>`.
+
 ## Repository layout
 
 | Path | Purpose |
