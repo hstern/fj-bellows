@@ -83,6 +83,10 @@ func TestTOFUHostKeyCallback(t *testing.T) {
 // Verify SSHDispatcher satisfies the HostKeyPinner interface.
 var _ HostKeyPinner = (*SSHDispatcher)(nil)
 
+// hostInternal is the generic placeholder used across parse/hosts-override
+// tests. Kept as a const so goconst doesn't flag the repeated literal.
+const hostInternal = "forgejo.internal"
+
 func TestParseForgejoURL(t *testing.T) {
 	cases := []struct {
 		in        string
@@ -91,16 +95,16 @@ func TestParseForgejoURL(t *testing.T) {
 		wantIPLit bool
 		wantErr   bool
 	}{
-		{in: "https://forgejo.internal", wantHost: "forgejo.internal", wantPort: 443},
-		{in: "http://forgejo.internal", wantHost: "forgejo.internal", wantPort: 80},
+		{in: "https://" + hostInternal, wantHost: hostInternal, wantPort: 443},
+		{in: "http://" + hostInternal, wantHost: hostInternal, wantPort: 80},
 		{in: "http://localhost:3000", wantHost: "localhost", wantPort: 3000},
-		{in: "https://forgejo.internal:8443/", wantHost: "forgejo.internal", wantPort: 8443},
+		{in: "https://" + hostInternal + ":8443/", wantHost: hostInternal, wantPort: 8443},
 		{in: "http://192.0.2.10:8080", wantHost: "192.0.2.10", wantPort: 8080, wantIPLit: true},
 		{in: "https://[2001:db8::1]:8443", wantHost: "2001:db8::1", wantPort: 8443, wantIPLit: true},
-		{in: "ftp://forgejo.internal", wantErr: true}, // unsupported scheme
-		{in: "https://", wantErr: true},               // no host
-		{in: "http://forgejo.internal:0", wantErr: true},
-		{in: "http://forgejo.internal:99999", wantErr: true},
+		{in: "ftp://" + hostInternal, wantErr: true}, // unsupported scheme
+		{in: "https://", wantErr: true},              // no host
+		{in: "http://" + hostInternal + ":0", wantErr: true},
+		{in: "http://" + hostInternal + ":99999", wantErr: true},
 	}
 	for _, c := range cases {
 		t.Run(c.in, func(t *testing.T) {

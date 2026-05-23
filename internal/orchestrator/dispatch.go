@@ -163,8 +163,8 @@ func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.
 }
 
 // forgejoTarget is the parsed Forgejo URL: the hostname or IP literal the
-// worker will see in --url, and the effective port the orchestrator listens on
-// on the worker side and dials on the orchestrator side.
+// worker will see in --url, and the effective port (used to bind the worker
+// loopback listener and to dial the upstream Forgejo).
 type forgejoTarget struct {
 	host    string
 	port    int
