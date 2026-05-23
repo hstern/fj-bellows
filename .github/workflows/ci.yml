@@ -501,14 +501,17 @@ jobs:
     # gates both main pushes and v* tags behind green CI. ghcr.io publishes
     # unconditionally (only needs GITHUB_TOKEN); Docker Hub is added when its
     # secrets are configured.
-    # Block publish if e2e-linode FAILED, but allow it through when e2e-linode
-    # was skipped (no LINODE_E2E_TOKEN set). This ensures a broken-on-Linode
-    # build does not get published, without making publish depend on the
-    # Linode secret being configured.
-    needs: [test, lint, check-secrets, e2e-linode]
+    # Block publish if either e2e job FAILED, but allow it through when an
+    # e2e job was skipped (e.g. e2e-linode skips when LINODE_E2E_TOKEN is
+    # unset; e2e-docker runs unconditionally, but the || skipped clause is
+    # harmless and defensive). This ensures a broken-on-Linode or
+    # broken-on-Docker build does not get published, without making publish
+    # depend on the Linode secret being configured.
+    needs: [test, lint, check-secrets, e2e-linode, e2e-docker]
     if: |
       github.event_name != 'pull_request' &&
-      (needs.e2e-linode.result == 'success' || needs.e2e-linode.result == 'skipped')
+      (needs.e2e-linode.result == 'success' || needs.e2e-linode.result == 'skipped') &&
+      (needs.e2e-docker.result == 'success' || needs.e2e-docker.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read
