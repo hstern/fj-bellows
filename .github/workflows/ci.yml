@@ -243,6 +243,18 @@ jobs:
     # real-money job. A job-level `if:` skip reports as success, so this job
     # may remain in the branch-protection required-checks list.
     # Cost per real run: ~1¢ (one paid hour on a g6-nanode-1).
+    #
+    # Serialize: only one e2e-linode runs at a time across the whole repo,
+    # others queue. The pre-flight cleanup below prefix-matches every
+    # `fj-bellows-e2e-ci-*` tag, so two concurrent runs would race —
+    # whichever pre-flight fires second wipes the other's just-provisioned
+    # Linode mid-job (we hit exactly this when a v* tag push fires seconds
+    # after the merge-to-main push and the second run's pre-flight destroyed
+    # the first's Linode). cancel-in-progress: false queues rather than
+    # killing the older run.
+    concurrency:
+      group: e2e-linode-${{ github.repository }}
+      cancel-in-progress: false
     needs: check-linode-secret
     if: github.event_name != 'pull_request' && needs.check-linode-secret.outputs.enabled == 'true'
     runs-on: ubuntu-latest
