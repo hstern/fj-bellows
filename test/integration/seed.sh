@@ -20,6 +20,14 @@
 #   FORGEJO_REPO         repo name to create under the org
 #   FORGEJO_LABEL        single runs-on label (e.g. "docker")
 #
+# Optional env:
+#   FORGEJO_WORKFLOW_CONTAINER_OPTS  if set, the seeded workflow runs its job
+#                                    inside an alpine container with these
+#                                    `container.options` (e.g. "--network host"
+#                                    so a reverse-tunnel-on-loopback design
+#                                    works for steps too). Unset = no container
+#                                    block, default forgejo-runner behavior.
+#
 # Prints the admin token on stdout. Logs go to stderr.
 
 set -euo pipefail
@@ -122,12 +130,17 @@ curl -fsS -o /dev/null \
   "$FORGEJO_URL/api/v1/repos/$FORGEJO_ORG/$FORGEJO_REPO"
 
 # Commit .forgejo/workflows/echo.yml — the push auto-queues a workflow run.
+container_block=""
+if [ -n "${FORGEJO_WORKFLOW_CONTAINER_OPTS:-}" ]; then
+  # The two-space leading indent keeps the block at job level under `hello:`.
+  container_block=$'\n    container:\n      image: alpine:3.19\n      options: '"$FORGEJO_WORKFLOW_CONTAINER_OPTS"
+fi
 workflow_yaml=$(cat <<EOF
 name: echo
 on: push
 jobs:
   hello:
-    runs-on: $FORGEJO_LABEL
+    runs-on: $FORGEJO_LABEL$container_block
     steps:
       - run: echo "hello from fj-bellows"
 EOF

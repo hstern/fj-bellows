@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -220,6 +221,263 @@ jobs:
           # Remove any worker containers stamped with our run tag.
           docker ps -a --filter "label=fj-bellows.tag=${FJBELLOWS_TAG}" -q | xargs -r docker rm -f
 
+  # Gate the Linode E2E job on the LINODE_E2E_TOKEN secret existing. The
+  # secret value is never exposed — only a boolean output is emitted.
+  check-linode-secret:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        run: |
+          if [ -n "${{ secrets.LINODE_E2E_TOKEN }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  e2e-linode:
+    # Runs on every trigger (push, PR, tag, manual) whenever LINODE_E2E_TOKEN is
+    # configured; without the secret the job skips entirely. **Never** added to
+    # branch-protection required checks — a real-money job must not block PR
+    # merges. Cost per real run: ~1¢ (one paid hour on a g6-nanode-1).
+    needs: check-linode-secret
+    if: needs.check-linode-secret.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      forgejo:
+        image: codeberg.org/forgejo/forgejo:15
+        env:
+          FORGEJO__security__INSTALL_LOCK: "true"
+          FORGEJO__server__ROOT_URL: http://localhost:3000/
+          FORGEJO__database__DB_TYPE: sqlite3
+          FORGEJO__database__PATH: /tmp/forgejo.db
+          FORGEJO__actions__ENABLED: "true"
+        ports:
+          - 3000:3000
+    env:
+      LINODE_TOKEN: ${{ secrets.LINODE_E2E_TOKEN }}
+      FORGEJO_URL: http://localhost:3000
+      FORGEJO_ADMIN_USER: e2eadmin
+      FORGEJO_ADMIN_PASS: e2e-CI-Pass-1!
+      FORGEJO_ADMIN_EMAIL: e2e@example.com
+      FORGEJO_ORG: e2eorg
+      FORGEJO_REPO: e2erepo
+      FORGEJO_LABEL: linode-e2e
+      FORGEJO_WORKFLOW_CONTAINER_OPTS: --network host
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build fj-bellows
+        run: go build -o ./fj-bellows ./cmd/fj-bellows
+
+      - name: Resolve Forgejo service container name (for `forgejo admin user create`)
+        id: forgejo
+        run: |
+          set -euo pipefail
+          cid=$(docker ps --filter ancestor=codeberg.org/forgejo/forgejo:15 -q | head -n1)
+          if [ -z "$cid" ]; then
+            echo "ERROR: forgejo service container not found"
+            docker ps -a
+            exit 1
+          fi
+          echo "name=$cid" >> "$GITHUB_OUTPUT"
+
+      - name: Pre-flight cleanup of leaked Linodes (fj-bellows-e2e-ci-*)
+        run: |
+          set -euo pipefail
+          ids=$(curl -sS -H "Authorization: Bearer $LINODE_TOKEN" \
+                  'https://api.linode.com/v4/linode/instances?page_size=200' \
+                | jq -r '.data[]? | select(.tags|any(startswith("fj-bellows-e2e-ci-"))) | .id')
+          for id in $ids; do
+            echo "destroying leaked Linode $id"
+            curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $LINODE_TOKEN" \
+              "https://api.linode.com/v4/linode/instances/$id"
+          done
+
+      - name: Generate ephemeral SSH keypair
+        run: |
+          ssh-keygen -t ed25519 -N '' -f "$RUNNER_TEMP/id_ed25519" -C 'fj-bellows-e2e-ci' -q
+
+      - name: Seed Forgejo
+        env:
+          FORGEJO_CONTAINER: ${{ steps.forgejo.outputs.name }}
+        run: |
+          set -euo pipefail
+          chmod +x test/integration/seed.sh
+          token=$(bash test/integration/seed.sh)
+          echo "::add-mask::$token"
+          echo "FORGEJO_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Write fj-bellows config
+        env:
+          TAG: fj-bellows-e2e-ci-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+          cat > config.yaml <<YAML
+          forgejo:
+            url: http://localhost:3000
+            token: ${FORGEJO_TOKEN}
+            scope: orgs/${FORGEJO_ORG}
+            labels: [${FORGEJO_LABEL}]
+          tag: ${TAG}
+          scale:
+            max: 1
+          provider: linode
+          provider_config:
+            region: us-ord
+            type: g6-nanode-1
+            image: linode/debian12
+            token: ${LINODE_TOKEN}
+          ssh:
+            private_key_file: $RUNNER_TEMP/id_ed25519
+            user: root
+            port: 22
+          poll:
+            interval: 5s
+            idle_timeout: 30s
+            hour_margin: 5m
+          YAML
+          chmod 600 config.yaml
+          # Mask LINODE_TOKEN so even if a future step accidentally prints
+          # the rendered config, the token does not leak via the run log.
+          echo "::add-mask::${LINODE_TOKEN}"
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+
+      - name: Launch fj-bellows
+        run: |
+          set -euo pipefail
+          ./fj-bellows \
+            -config "$PWD/config.yaml" \
+            -lock "$PWD/fj-bellows.lock" \
+            -drain=false \
+            -destroy-on-exit \
+            > fj-bellows.stdout 2> fj-bellows.log &
+          echo $! > fj-bellows.pid
+          sleep 2
+
+      - name: Wait for the Linode to appear in the API
+        id: linode
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 180); do
+            body=$(curl -sS -H "Authorization: Bearer $LINODE_TOKEN" \
+                     'https://api.linode.com/v4/linode/instances?page_size=200')
+            ip=$(printf '%s' "$body" | jq -r --arg t "$TAG" \
+                  '.data[]? | select(.tags|index($t)) | .ipv4[0]' | head -n1)
+            if [ -n "$ip" ] && [ "$ip" != "null" ]; then
+              echo "Linode IP $ip after ${i}*2s"
+              echo "ip=$ip" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERROR: Linode did not appear within ~6 min"
+          exit 1
+
+      - name: Wait for SSH on the Linode
+        env:
+          LIP: ${{ steps.linode.outputs.ip }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 180); do
+            if ssh -i "$RUNNER_TEMP/id_ed25519" -o StrictHostKeyChecking=accept-new \
+                   -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+                   -o ConnectTimeout=3 root@"$LIP" 'true' 2>/dev/null; then
+              echo "SSH ready after ${i}*2s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERROR: SSH never came up on $LIP"
+          exit 1
+
+      - name: Open SSH reverse tunnel (Linode loopback:3000 -> our Forgejo)
+        env:
+          LIP: ${{ steps.linode.outputs.ip }}
+        run: |
+          set -euo pipefail
+          # cloud-init reloads sshd to pick up the injected host key, so the
+          # first SSH session can land in a window where sshd is restarting
+          # and the next connection gets reset. Retry a handful of times.
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if ssh -i "$RUNNER_TEMP/id_ed25519" \
+                  -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+                  -o StrictHostKeyChecking=no \
+                  -o ControlMaster=yes -o ControlPath="$RUNNER_TEMP/ssh-tunnel.sock" \
+                  -o ExitOnForwardFailure=yes \
+                  -fN -R 3000:localhost:3000 root@"$LIP"; then
+              echo "tunnel up on attempt $attempt"
+              exit 0
+            fi
+            echo "attempt $attempt failed; retrying in 3s"
+            sleep 3
+          done
+          echo "ERROR: tunnel failed after 8 attempts"
+          exit 1
+
+      - name: Wait for 'job complete' in orchestrator log
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 180); do
+            if grep -q 'job complete' fj-bellows.log; then
+              echo "'job complete' after ${i}*2s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERROR: job did not complete; last 50 lines of orchestrator log:"
+          tail -50 fj-bellows.log
+          exit 1
+
+      # No "wait for idle teardown" step: Linode bills hourly-rounded-up, so the
+      # warm-hold deliberately keeps the worker until :55 of the paid hour.
+      # Asserting fast teardown contradicts the design. The unit tests already
+      # validate the teardown policy; the E2E asserts provisioning + ephemeral
+      # job execution. The cleanup step (`if: always()`) plus `-destroy-on-exit`
+      # ensure no Linode is leaked when the job ends.
+
+      - name: Cleanup (always runs)
+        if: always()
+        env:
+          LIP: ${{ steps.linode.outputs.ip || '' }}
+        run: |
+          set +e
+          # Close SSH control connection if open.
+          if [ -S "$RUNNER_TEMP/ssh-tunnel.sock" ] && [ -n "$LIP" ]; then
+            ssh -O exit -o ControlPath="$RUNNER_TEMP/ssh-tunnel.sock" root@"$LIP" 2>/dev/null
+          fi
+          # Stop fj-bellows.
+          if [ -s fj-bellows.pid ]; then
+            kill "$(cat fj-bellows.pid)" 2>/dev/null
+          fi
+          # Destroy any Linode left carrying our run tag.
+          if [ -n "${LINODE_TOKEN:-}" ] && [ -n "${TAG:-}" ]; then
+            ids=$(curl -sS -H "Authorization: Bearer $LINODE_TOKEN" \
+                    'https://api.linode.com/v4/linode/instances?page_size=200' \
+                  | jq -r --arg t "$TAG" '.data[]? | select(.tags|index($t)) | .id')
+            for id in $ids; do
+              echo "post-flight: destroying Linode $id"
+              curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $LINODE_TOKEN" \
+                "https://api.linode.com/v4/linode/instances/$id"
+            done
+          fi
+
+      - name: Upload orchestrator log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fj-bellows-log
+          path: fj-bellows.log
+          if-no-files-found: ignore
+
   # Gate publishing on the DockerHub secrets existing, so publish skips cleanly
   # (no failed run) until they are configured. Only a boolean is emitted; the
   # secret values are never exposed.
@@ -241,8 +499,14 @@ jobs:
     # gates both main pushes and v* tags behind green CI. ghcr.io publishes
     # unconditionally (only needs GITHUB_TOKEN); Docker Hub is added when its
     # secrets are configured.
-    needs: [test, lint, check-secrets]
-    if: github.event_name != 'pull_request'
+    # Block publish if e2e-linode FAILED, but allow it through when e2e-linode
+    # was skipped (no LINODE_E2E_TOKEN set). This ensures a broken-on-Linode
+    # build does not get published, without making publish depend on the
+    # Linode secret being configured.
+    needs: [test, lint, check-secrets, e2e-linode]
+    if: |
+      github.event_name != 'pull_request' &&
+      (needs.e2e-linode.result == 'success' || needs.e2e-linode.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read
