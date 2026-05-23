@@ -9,8 +9,56 @@ on:
 
 permissions:
   contents: read
+  # `build-image` + `publish` push to ghcr; declared at workflow level so
+  # both jobs inherit. test/lint/e2e jobs only read (and don't need this).
+  packages: write
 
 jobs:
+  # Build the canonical multi-arch container image once, push to a
+  # run-scoped temp tag on ghcr.io. Every downstream job (e2e-docker,
+  # e2e-linode, publish) consumes THIS digest — publish becomes a retag,
+  # not a rebuild, so the bytes shipped are byte-for-byte the bytes tested.
+  # See #49.
+  build-image:
+    name: build-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      image: ${{ steps.refs.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image refs
+        id: refs
+        run: |
+          # Lower-cased repo because Docker refs must be lowercase but
+          # GH allows mixed-case repository names.
+          owner_repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/${owner_repo}:ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push multi-arch
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.refs.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   test:
     name: test
     runs-on: ubuntu-latest
@@ -56,6 +104,7 @@ jobs:
   # required checks is intentionally out of scope for this PR.
   e2e-docker:
     name: e2e-docker
+    needs: build-image
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -84,13 +133,30 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
         with:
-          go-version: '1.26'
-          cache: true
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build fj-bellows
-        run: go build -o fj-bellows ./cmd/fj-bellows
+      # Pull the canonical image that build-image just pushed, and extract
+      # its binary onto the runner so the orchestrator runs as a host
+      # process (matches how it ran when this job built its own binary;
+      # the e2e harness reads the orchestrator's log + writes a lockfile
+      # on the runner's filesystem). Containerising the orchestrator here
+      # would add bind-mounts for state without exercising anything the
+      # binary doesn't already exercise.
+      - name: Pull built image and extract daemon binary
+        run: |
+          set -euo pipefail
+          image='${{ needs.build-image.outputs.image }}'
+          echo "consuming image: $image"
+          docker pull "$image"
+          cid=$(docker create "$image")
+          docker cp "$cid:/usr/local/bin/fj-bellows" ./fj-bellows
+          docker rm "$cid" >/dev/null
+          chmod +x ./fj-bellows
 
       - name: Build worker image
         run: docker build -t fj-bellows-worker:test test/e2e-docker/worker
@@ -255,7 +321,7 @@ jobs:
     concurrency:
       group: e2e-linode-${{ github.repository }}
       cancel-in-progress: false
-    needs: check-linode-secret
+    needs: [check-linode-secret, build-image]
     if: github.event_name != 'pull_request' && needs.check-linode-secret.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -283,13 +349,26 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
         with:
-          go-version: '1.26'
-          cache: true
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build fj-bellows
-        run: go build -o ./fj-bellows ./cmd/fj-bellows
+      # Same image-consumption pattern as e2e-docker: pull the canonical
+      # build-image artifact, extract the daemon binary, run it on the
+      # runner. See #49.
+      - name: Pull built image and extract daemon binary
+        run: |
+          set -euo pipefail
+          image='${{ needs.build-image.outputs.image }}'
+          echo "consuming image: $image"
+          docker pull "$image"
+          cid=$(docker create "$image")
+          docker cp "$cid:/usr/local/bin/fj-bellows" ./fj-bellows
+          docker rm "$cid" >/dev/null
+          chmod +x ./fj-bellows
 
       - name: Resolve Forgejo service container name (for `forgejo admin user create`)
         id: forgejo
@@ -556,15 +635,12 @@ jobs:
     # harmless and defensive). This ensures a broken-on-Linode or
     # broken-on-Docker build does not get published, without making publish
     # depend on the Linode secret being configured.
-    needs: [test, lint, check-secrets, e2e-linode, e2e-docker]
+    needs: [test, lint, check-secrets, build-image, e2e-linode, e2e-docker]
     if: |
       github.event_name != 'pull_request' &&
       (needs.e2e-linode.result == 'success' || needs.e2e-linode.result == 'skipped') &&
       (needs.e2e-docker.result == 'success' || needs.e2e-docker.result == 'skipped')
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -590,8 +666,8 @@ jobs:
             echo "yes=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: docker/setup-qemu-action@v3
-
+      # buildx is required for `imagetools create`; qemu is not (we're not
+      # building, just rewriting the manifest in the registry).
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
@@ -636,13 +712,24 @@ jobs:
             type=semver,pattern={{major}},enable=${{ steps.highest.outputs.yes == 'true' }}
             type=sha
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # Retag the multi-arch artifact build-image already produced. No
+      # rebuild — the bytes we publish here are the same bytes e2e-docker
+      # and e2e-linode just validated. See #49.
+      #
+      # docker buildx imagetools create rewrites the registry manifest to
+      # add new tag refs pointing at the same digest, preserving the
+      # multi-arch (amd64 + arm64) manifest list as-is.
+      - name: Retag build-image with release tags
+        env:
+          SRC: ${{ needs.build-image.outputs.image }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            args+=(--tag "$tag")
+          done <<< "$TAGS"
+          echo "retagging $SRC →"
+          printf '  %s\n' "${args[@]}"
+          docker buildx imagetools create "${args[@]}" "$SRC"
