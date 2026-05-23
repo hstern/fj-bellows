@@ -43,8 +43,9 @@ test/e2e-linode/run-local.sh
 
 ## CI: `e2e-linode` job
 
-The CI version lives in `.github/workflows/ci.yml`. It is **manual-only**
-(`workflow_dispatch`) and **gated on the `LINODE_E2E_TOKEN` secret** — the job
-skips with a notice if the secret is not configured, so it costs nothing until
-you intentionally turn it on. It is **never** added to branch-protection
-required checks (PRs should not spend money).
+The CI version lives in `.github/workflows/ci.yml`. It is **gated solely on the
+`LINODE_E2E_TOKEN` secret** — runs on every push/PR/tag (and manual
+`workflow_dispatch`) when the secret is set, skips entirely when it isn't, so
+it costs nothing until you configure it. It is **never** added to
+branch-protection required checks (PRs should not be blocked on a real-money
+spend).

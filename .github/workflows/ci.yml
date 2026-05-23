@@ -237,12 +237,13 @@ jobs:
           fi
 
   e2e-linode:
-    # Manual-only, never required by branch protection. The actual run is
-    # further gated on LINODE_E2E_TOKEN existing — without it the job skips
-    # with a notice and spends nothing. Cost on each real run: ~1¢
-    # (one paid hour on a g6-nanode-1, destroyed at exit).
+    # Runs whenever LINODE_E2E_TOKEN is configured (on push, PR, tag, or manual
+    # dispatch). Without the secret the job skips and spends nothing. Never
+    # added to branch-protection required checks — PRs should not be blocked
+    # on a real-money spend. Cost per real run: ~1¢ (one paid hour on a
+    # g6-nanode-1, destroyed at exit).
     needs: check-linode-secret
-    if: github.event_name == 'workflow_dispatch' && needs.check-linode-secret.outputs.enabled == 'true'
+    if: needs.check-linode-secret.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
