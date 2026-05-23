@@ -32,9 +32,28 @@ RUN set -eu; \
 RUN set -eu; \
     arch="${TARGETARCH:-amd64}"; \
     url="https://code.forgejo.org/forgejo/runner/releases/download/v${FORGEJO_RUNNER_VERSION}/forgejo-runner-${FORGEJO_RUNNER_VERSION}-linux-${arch}"; \
-    curl -fsSL -o /usr/local/bin/forgejo-runner "$url"; \
-    chmod 0755 /usr/local/bin/forgejo-runner; \
-    /usr/local/bin/forgejo-runner --version
+    curl -fsSL -o /usr/local/bin/forgejo-runner.bin "$url"; \
+    chmod 0755 /usr/local/bin/forgejo-runner.bin; \
+    /usr/local/bin/forgejo-runner.bin --version
+
+# The worker container has no Docker daemon, so forgejo-runner is configured for
+# host mode (`docker_host: "-"`) — steps run directly inside this container as
+# host processes instead of spawning a per-step container. The wrapper at
+# /usr/local/bin/forgejo-runner injects --config so the orchestrator's
+# `docker exec ... forgejo-runner one-job ...` command stays mechanism-agnostic.
+RUN set -eu; \
+    mkdir -p /etc/forgejo-runner; \
+    printf '%s\n' \
+      'log:' \
+      '  job_level: info' \
+      'container:' \
+      '  docker_host: "-"' \
+      > /etc/forgejo-runner/config.yaml; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'exec /usr/local/bin/forgejo-runner.bin --config /etc/forgejo-runner/config.yaml "$@"' \
+      > /usr/local/bin/forgejo-runner; \
+    chmod 0755 /usr/local/bin/forgejo-runner
 
 # tini reaps zombies; sleep infinity keeps the container alive so the
 # orchestrator can `docker exec` into it.
