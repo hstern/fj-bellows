@@ -237,12 +237,14 @@ jobs:
           fi
 
   e2e-linode:
-    # Runs on every trigger (push, PR, tag, manual) whenever LINODE_E2E_TOKEN is
-    # configured; without the secret the job skips entirely. **Never** added to
-    # branch-protection required checks — a real-money job must not block PR
-    # merges. Cost per real run: ~1¢ (one paid hour on a g6-nanode-1).
+    # Runs on push to main, tag pushes, and workflow_dispatch whenever
+    # LINODE_E2E_TOKEN is configured; without the secret the job skips entirely.
+    # Pull-request events are skipped to avoid spending ~1¢ per PR push on a
+    # real-money job. A job-level `if:` skip reports as success, so this job
+    # may remain in the branch-protection required-checks list.
+    # Cost per real run: ~1¢ (one paid hour on a g6-nanode-1).
     needs: check-linode-secret
-    if: needs.check-linode-secret.outputs.enabled == 'true'
+    if: github.event_name != 'pull_request' && needs.check-linode-secret.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:

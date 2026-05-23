@@ -45,7 +45,8 @@ test/e2e-linode/run-local.sh
 
 The CI version lives in `.github/workflows/ci.yml` as the `e2e-linode` job.
 
-- **Trigger**: every push, PR, tag, and manual `workflow_dispatch`.
+- **Trigger**: push to `main`, tag pushes, and manual `workflow_dispatch`.
+  Pull-request events are skipped to avoid spending ~1¢ per PR push.
 - **Gate**: the `LINODE_E2E_TOKEN` secret existing. Without it the job skips
   with no spend — so the workflow can be merged before the secret is
   configured.
@@ -54,8 +55,8 @@ The CI version lives in `.github/workflows/ci.yml` as the `e2e-linode` job.
   isn't set, the job skips and counts as success for branch protection.)
 - **Publish gate**: `publish` will not run if `e2e-linode` failed. A skip is
   fine — publish proceeds when the Linode secret isn't configured.
-- **Cost per real run**: ~1¢ (one paid hour on `g6-nanode-1`). PRs that push
-  multiple commits cost ~1¢ each.
+- **Cost per real run**: ~1¢ (one paid hour on `g6-nanode-1`). Only push to
+  `main`, tag pushes, and manual dispatches incur cost; PR pushes are skipped.
 - **Cleanup**: an `if: always()` step lists Linodes by the run's tag and
   destroys any survivor, complementing fj-bellows' own `-destroy-on-exit`.
 
