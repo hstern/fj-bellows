@@ -404,12 +404,24 @@ jobs:
           LIP: ${{ steps.linode.outputs.ip }}
         run: |
           set -euo pipefail
-          ssh -i "$RUNNER_TEMP/id_ed25519" \
-            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
-            -o StrictHostKeyChecking=no \
-            -o ControlMaster=yes -o ControlPath="$RUNNER_TEMP/ssh-tunnel.sock" \
-            -o ExitOnForwardFailure=yes \
-            -fN -R 3000:localhost:3000 root@"$LIP"
+          # cloud-init reloads sshd to pick up the injected host key, so the
+          # first SSH session can land in a window where sshd is restarting
+          # and the next connection gets reset. Retry a handful of times.
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if ssh -i "$RUNNER_TEMP/id_ed25519" \
+                  -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+                  -o StrictHostKeyChecking=no \
+                  -o ControlMaster=yes -o ControlPath="$RUNNER_TEMP/ssh-tunnel.sock" \
+                  -o ExitOnForwardFailure=yes \
+                  -fN -R 3000:localhost:3000 root@"$LIP"; then
+              echo "tunnel up on attempt $attempt"
+              exit 0
+            fi
+            echo "attempt $attempt failed; retrying in 3s"
+            sleep 3
+          done
+          echo "ERROR: tunnel failed after 8 attempts"
+          exit 1
 
       - name: Wait for 'job complete' in orchestrator log
         run: |
@@ -487,8 +499,14 @@ jobs:
     # gates both main pushes and v* tags behind green CI. ghcr.io publishes
     # unconditionally (only needs GITHUB_TOKEN); Docker Hub is added when its
     # secrets are configured.
-    needs: [test, lint, check-secrets]
-    if: github.event_name != 'pull_request'
+    # Block publish if e2e-linode FAILED, but allow it through when e2e-linode
+    # was skipped (no LINODE_E2E_TOKEN set). This ensures a broken-on-Linode
+    # build does not get published, without making publish depend on the
+    # Linode secret being configured.
+    needs: [test, lint, check-secrets, e2e-linode]
+    if: |
+      github.event_name != 'pull_request' &&
+      (needs.e2e-linode.result == 'success' || needs.e2e-linode.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read

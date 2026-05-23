@@ -170,11 +170,24 @@ done
 [ "$ssh_ready" -eq 1 ] || { err "SSH never came up on $LIP"; exit 1; }
 
 log "opening SSH reverse tunnel (Linode loopback:3000 -> our Forgejo)"
-ssh -i "$KEY" \
-  -o UserKnownHostsFile="$KNOWN" -o StrictHostKeyChecking=no \
-  -o ControlMaster=yes -o ControlPath="$TUNNEL_CTL" \
-  -o ExitOnForwardFailure=yes \
-  -fN -R 3000:localhost:3000 root@"$LIP"
+# cloud-init reloads sshd to pick up the injected host key, so the first SSH
+# session can land in a window where sshd is restarting and the next connection
+# gets reset. Retry a handful of times.
+tunnel_up=0
+for attempt in 1 2 3 4 5 6 7 8; do
+  if ssh -i "$KEY" \
+       -o UserKnownHostsFile="$KNOWN" -o StrictHostKeyChecking=no \
+       -o ControlMaster=yes -o ControlPath="$TUNNEL_CTL" \
+       -o ExitOnForwardFailure=yes \
+       -fN -R 3000:localhost:3000 root@"$LIP" 2>/dev/null; then
+    log "tunnel up on attempt $attempt"
+    tunnel_up=1
+    break
+  fi
+  log "attempt $attempt failed; retrying in 3s"
+  sleep 3
+done
+[ "$tunnel_up" -eq 1 ] || { err "tunnel failed after 8 attempts"; exit 1; }
 
 log "waiting for 'job complete' in orchestrator log (up to ~6 min)"
 complete=0
