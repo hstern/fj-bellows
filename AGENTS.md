@@ -74,6 +74,10 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   the entire world the reconcile/orphan-sweep acts on. Multiple deployments on
   one cloud account MUST use distinct tags or they destroy each other's VMs; the
   daemon warns when the default tag (`config.DefaultTag`) is used.
+- **The Dockerfile pre-creates `/run/fj-bellows.lock` owned `65532:65532`** so
+  the distroless nonroot user can take the singleton flock without a writable
+  `/run`. Don't move the default `-lock` flag value without updating the
+  Dockerfile.
 
 ## Known limitations / open work
 

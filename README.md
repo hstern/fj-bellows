@@ -88,6 +88,26 @@ docker run -d --name fj-bellows \
   ghcr.io/hstern/fj-bellows:latest
 ```
 
+The image runs as the distroless `nonroot` user (uid 65532) and ships with
+`/run/fj-bellows.lock` pre-created and owned `65532:65532` so the singleton
+lock works out of the box — no extra mounts needed.
+
+If you overlay a fresh tmpfs on `/run` (some systemd unit / Quadlet styles
+do), the pre-created lock file is shadowed and the daemon falls back to
+creating it itself, which needs a writable `/run`. Two compatible options:
+
+1. **Leave `/run` alone** (default; recommended). The pre-created lock
+   suffices.
+2. **`tmpfs /run` with sticky-bit-writable mode** so the daemon can create
+   the lock fresh:
+
+   ```ini
+   [Container]
+   Image=ghcr.io/hstern/fj-bellows:latest
+   Volume=/host/fj-bellows:/etc/fj-bellows:ro
+   Tmpfs=/run:size=64k,mode=1777
+   ```
+
 Available tags:
 
 | Tag | Points to |
