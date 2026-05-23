@@ -74,6 +74,12 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   from inside a containerized step NXDOMAINs even though the runner process
   is happily on the tunnel. Don't drop the runner config; don't reintroduce
   an out-of-process side-car tunnel.
+- **The runner config also sets `container.docker_host: automount`** so the
+  host docker socket is bind-mounted into every spawned job container. Without
+  it, `docker …` steps fail with `no such file or directory`. The worker is
+  single-tenant ephemeral and treats its job as trusted (operator's own
+  repos), matching every other CI runner stack — same security posture as
+  GitHub Actions, GitLab Runner, Drone.
 - **Scale-to-N architecture; do not hardcode the single-VM assumption.**
   `scale.max` bounds it (default 1).
 - **A deployment owns instances solely by `cfg.Tag`.** `provider.List(tag)` is

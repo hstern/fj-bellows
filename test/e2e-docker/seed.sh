@@ -143,6 +143,13 @@ jobs:
     runs-on: $FORGEJO_LABEL$container_block
     steps:
       - run: echo "hello from fj-bellows"
+      # Regression for #41: docker_host: automount in the runner config makes
+      # the runner mount /var/run/docker.sock into every spawned job container,
+      # so DinD steps work. If that ever regresses, this step exits 1, the
+      # workflow fails, the orchestrator never logs "job complete", and the
+      # e2e times out — surfacing the regression.
+      - name: docker socket is mounted into job container
+        run: test -S /var/run/docker.sock
 EOF
 )
 content_b64=$(printf '%s' "$workflow_yaml" | base64 | tr -d '\n')

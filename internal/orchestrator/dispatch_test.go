@@ -179,24 +179,24 @@ func TestRunnerConfigYAML(t *testing.T) {
 		want string
 	}{
 		{
-			name: "hostname renders network=host + add-host override",
+			name: "hostname: docker_host=automount + tunnel propagation",
 			in:   forgejoTarget{host: hostInternal, port: 443},
-			want: "container:\n  network: host\n  options: \"--add-host=" + hostInternal + ":127.0.0.1\"\n",
+			want: "container:\n  docker_host: automount\n  network: host\n  options: \"--add-host=" + hostInternal + ":127.0.0.1\"\n",
 		},
 		{
-			name: "localhost still gets config (containers need host networking to reach worker loopback)",
+			name: "localhost: same shape (host networking still needed for container -> worker loopback)",
 			in:   forgejoTarget{host: "localhost", port: 3000},
-			want: "container:\n  network: host\n  options: \"--add-host=localhost:127.0.0.1\"\n",
+			want: "container:\n  docker_host: automount\n  network: host\n  options: \"--add-host=localhost:127.0.0.1\"\n",
 		},
 		{
-			name: "IPv4 literal -> empty (hosts files cannot redirect IPs; documented limitation)",
+			name: "IPv4 literal: minimal config with just docker_host (no host-override possible; documented limitation)",
 			in:   forgejoTarget{host: "192.0.2.10", port: 8080, isIPLit: true},
-			want: "",
+			want: "container:\n  docker_host: automount\n",
 		},
 		{
-			name: "IPv6 literal -> empty",
+			name: "IPv6 literal: same minimal config",
 			in:   forgejoTarget{host: "2001:db8::1", port: 8443, isIPLit: true},
-			want: "",
+			want: "container:\n  docker_host: automount\n",
 		},
 	}
 	for _, c := range cases {

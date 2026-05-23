@@ -157,28 +157,22 @@ func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.
 		return fmt.Errorf("write token: %w", err)
 	}
 
-	// Write the runner config that propagates the tunnel into spawned job
-	// containers (empty for IP-literal Forgejo URLs — see runnerConfigYAML).
-	runnerCfg := runnerConfigYAML(target)
-	if runnerCfg != "" {
-		if err := runRemote(ctx, client,
-			"cat > /tmp/runner-cfg.yml && chmod 600 /tmp/runner-cfg.yml",
-			strings.NewReader(runnerCfg),
-		); err != nil {
-			return fmt.Errorf("write runner config: %w", err)
-		}
+	// Write the runner config: docker_host: automount (always), plus tunnel
+	// propagation for hostname Forgejo URLs. See runnerConfigYAML.
+	if err := runRemote(ctx, client,
+		"cat > /tmp/runner-cfg.yml && chmod 600 /tmp/runner-cfg.yml",
+		strings.NewReader(runnerConfigYAML(target)),
+	); err != nil {
+		return fmt.Errorf("write runner config: %w", err)
 	}
 
 	cmd := fmt.Sprintf(
-		"forgejo-runner one-job --url %s --uuid %s --token-url file:/tmp/tok --label %s --handle %s --wait",
+		"forgejo-runner one-job --url %s --uuid %s --token-url file:/tmp/tok --label %s --handle %s --wait --config /tmp/runner-cfg.yml",
 		shellQuote(d.ForgejoURL),
 		shellQuote(reg.UUID),
 		shellQuote(strings.Join(d.Labels, ",")),
 		shellQuote(job.Handle),
 	)
-	if runnerCfg != "" {
-		cmd += " --config /tmp/runner-cfg.yml"
-	}
 	if prep := hostsOverrideCommand(target); prep != "" {
 		cmd = prep + " && " + cmd
 	}
@@ -188,29 +182,37 @@ func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.
 	return nil
 }
 
-// runnerConfigYAML returns a forgejo-runner config snippet that propagates the
-// dispatcher-managed Forgejo tunnel into the docker containers the runner
-// spawns for each workflow step. Returns "" when no propagation is needed:
-// an IP-literal Forgejo URL can't be redirected via /etc/hosts (which maps
-// names, not IPs) and stays a documented limitation — prefer a hostname.
+// runnerConfigYAML returns the forgejo-runner config snippet the dispatcher
+// stages at /tmp/runner-cfg.yml and passes via `forgejo-runner one-job
+// --config`. Two things go in it:
 //
-// `container.network: host` makes the container's loopback the worker's
-// loopback (where the tunnel listener sits). `container.options` adds a hosts
-// entry into every spawned container so the Forgejo hostname resolves to
-// 127.0.0.1 → the tunnel. The `localhost` case still gets the config because
-// host networking is also what lets containers reach the worker's loopback;
-// the duplicate `--add-host=localhost:127.0.0.1` is benign (first match wins).
+//  1. `docker_host: automount` (always) — forgejo-runner's default `"-"`
+//     finds a docker host for the runner process but does NOT mount
+//     /var/run/docker.sock into the spawned job containers. Any `docker ...`
+//     step then fails with "no such file or directory". automount fixes that.
+//     The worker is single-tenant ephemeral; granting the job container
+//     root-equivalent access to the host daemon matches every other CI
+//     runner stack (GH Actions, GitLab Runner). See #41.
+//
+//  2. `network: host` + `--add-host=<host>:127.0.0.1` (hostname Forgejo URLs
+//     only) — propagates the dispatcher-managed Forgejo tunnel into the
+//     spawned job containers, since they have their own network namespace
+//     and /etc/hosts. host networking makes the container's loopback the
+//     worker's loopback (where the tunnel listener sits); the hosts entry
+//     points the Forgejo hostname at it. IP-literal URLs can't be
+//     redirected via /etc/hosts (maps names, not IPs) and stay a
+//     documented limitation. See #37.
 func runnerConfigYAML(t forgejoTarget) string {
-	if t.isIPLit {
-		return ""
+	var sb strings.Builder
+	sb.WriteString("container:\n")
+	sb.WriteString("  docker_host: automount\n")
+	if !t.isIPLit {
+		sb.WriteString("  network: host\n")
+		// YAML double-quoted scalar so a hostname containing special chars
+		// (unlikely but cheap to defend) parses safely.
+		fmt.Fprintf(&sb, "  options: %q\n", "--add-host="+t.host+":127.0.0.1")
 	}
-	// Quoting the value as a YAML double-quoted scalar so a future hostname
-	// containing colons / special chars (unlikely but cheap to defend) parses
-	// safely. forgejo-runner reads this as YAML.
-	return fmt.Sprintf(`container:
-  network: host
-  options: "--add-host=%s:127.0.0.1"
-`, t.host)
+	return sb.String()
 }
 
 // forgejoTarget is the parsed Forgejo URL: the hostname or IP literal the

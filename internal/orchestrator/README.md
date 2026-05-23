@@ -97,22 +97,32 @@ hosts override is skipped for IP literals and for `localhost`. See #33.
 
 The runner process is only half the story: each workflow step runs in a
 spawned docker job container with its own network namespace and `/etc/hosts`.
-To carry the tunnel into those containers `RunJob` also writes a forgejo-runner
-config (`runnerConfigYAML`) and passes it via `--config /tmp/runner-cfg.yml`:
+`RunJob` also writes a forgejo-runner config (`runnerConfigYAML`) and passes
+it via `--config /tmp/runner-cfg.yml`:
 
 ```yaml
 container:
-  network: host
-  options: "--add-host=<forgejo-host>:127.0.0.1"
+  docker_host: automount                              # always
+  network: host                                       # hostname URLs only
+  options: "--add-host=<forgejo-host>:127.0.0.1"      # hostname URLs only
 ```
 
-`network: host` makes the container's loopback the worker's loopback (where
-the tunnel listener sits); `--add-host` injects the hosts entry into every
-spawned container so the Forgejo hostname resolves to `127.0.0.1` there too.
-Without this, `actions/checkout` and any other step that talks back to Forgejo
-from inside a containerized step NXDOMAINs even when the runner process is
-on the tunnel. The runner config is skipped for IP-literal Forgejo URLs —
-hosts files can't redirect IPs to IPs; prefer a hostname. See #37.
+- **`docker_host: automount`** bind-mounts `/var/run/docker.sock` into every
+  spawned job container. Without it, forgejo-runner's default (`"-"`) finds a
+  docker host for the runner process but does not mount the socket into job
+  containers, so any `docker …` step fails with `no such file or directory`.
+  This is also what makes `actions/setup-buildx`, image builds, and the rest
+  of the DinD-shaped tooling work. The worker is single-tenant ephemeral and
+  the job is treated as trusted (operator's own repos), matching every other
+  CI runner stack. See #41.
+- **`network: host`** makes the container's loopback the worker's loopback
+  (where the tunnel listener sits); **`--add-host`** injects the hosts entry
+  into every spawned container so the Forgejo hostname resolves to
+  `127.0.0.1` there too. Without these, `actions/checkout` (and any other
+  step that talks back to Forgejo) NXDOMAINs from inside a containerized step
+  even when the runner process is on the tunnel. These two are skipped for
+  IP-literal Forgejo URLs — hosts files can't redirect IPs to IPs; prefer a
+  hostname. See #37.
 
 Dependencies are interfaces (`JobSource`, `Dispatcher`, `provider.Provider`);
 see [`mock`](mock) for the test doubles.
