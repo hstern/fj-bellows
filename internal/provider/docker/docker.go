@@ -89,8 +89,10 @@ func init() {
 }
 
 // Configure decodes provider_config, applies defaults, validates, and
-// prepares the docker CLI client.
-func (d *Docker) Configure(node yaml.Node) error {
+// prepares the docker CLI client. The ctx + tag parameters are part of the
+// provider.Provider interface but the docker provider has no startup-time
+// network calls or tag-scoped resources to create — it ignores them.
+func (d *Docker) Configure(_ context.Context, _ string, node yaml.Node) error {
 	if err := node.Decode(&d.cfg); err != nil {
 		return fmt.Errorf("docker: decode provider_config: %w", err)
 	}

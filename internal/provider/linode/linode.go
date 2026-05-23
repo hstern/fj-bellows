@@ -39,8 +39,13 @@ type config struct {
 type Linode struct {
 	cfg    config
 	client linodego.Client
-	tag    string           // cfg.Tag from the orchestrator, captured on first Provision
-	fw     *managedFirewall // nil when Firewall block is absent (firewall_id mode or no firewall)
+	tag    string // cfg.Tag from the orchestrator, captured in Configure
+
+	// fw is non-nil when managed-firewall mode is enabled (the `firewall:`
+	// block is set in provider_config). It's created at Configure time —
+	// no lazy-init, no first-Provision retries hammering upstream sentinels.
+	// nil means firewall_id mode (or no firewall at all).
+	fw *managedFirewall
 }
 
 func init() {
@@ -49,14 +54,18 @@ func init() {
 
 // Configure decodes the opaque node and prepares the API client.
 //
-// For the managed-firewall mode (`firewall:` block), Configure also resolves
-// the allow_inbound sentinels EAGERLY (`auto`, `github-actions`) and fails
-// fast if any sentinel cannot be resolved or if the resolved set is empty —
-// rather than starting the daemon with a default-deny firewall nobody can
-// reach. The actual Linode firewall is created lazily on first Provision
-// (once we have the orchestrator's tag); the refresh goroutine starts then
-// too. See #26.
-func (l *Linode) Configure(node yaml.Node) error {
+// For the managed-firewall mode (`firewall:` block), Configure also:
+//   - resolves the allow_inbound sentinels (`auto`, `github-actions`) and
+//     fails fast on any error (silent fallback to literal CIDRs would risk
+//     locking out the orchestrator from its own workers);
+//   - creates the Cloud Firewall via the Linode API and starts the refresh
+//     goroutine.
+//
+// All firewall work happens here, at startup. Failures surface immediately
+// (PAT-scope misconfiguration, network blips, missing sentinels) instead
+// of deferred to the first Provision call when the first job lands.
+// See #26.
+func (l *Linode) Configure(ctx context.Context, tag string, node yaml.Node) error {
 	if err := node.Decode(&l.cfg); err != nil {
 		return fmt.Errorf("linode: decode provider_config: %w", err)
 	}
@@ -79,54 +88,27 @@ func (l *Linode) Configure(node yaml.Node) error {
 	if l.cfg.Firewall != nil && l.cfg.FirewallID != 0 {
 		return errors.New("linode: provider_config: `firewall` and `firewall_id` are mutually exclusive")
 	}
-	if l.cfg.Firewall != nil {
-		probe := newManagedFirewall(*l.cfg.Firewall, "<configure-probe>", nil, slog.Default())
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		cidrs, err := probe.resolveAllowInbound(ctx)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("linode: firewall.allow_inbound: %w", err)
-		}
-		if len(cidrs) == 0 {
-			return errors.New("linode: firewall.allow_inbound resolved to zero CIDRs; refusing to start with a default-deny firewall nobody can reach")
-		}
-	}
 	client := linodego.NewClient(nil)
 	client.SetToken(l.cfg.Token)
 	l.client = client
-	return nil
-}
-
-// ensureManagedFirewall lazy-creates the managed firewall on first Provision
-// (when we finally know spec.Tag) and starts the refresh goroutine. Safe
-// against concurrent Provisions; retries on each call until init succeeds so
-// a transient API blip during the very first Provision doesn't wedge the
-// deployment permanently.
-func (l *Linode) ensureManagedFirewall(ctx context.Context, tag string) error {
-	if l.cfg.Firewall == nil {
-		return nil
-	}
-	if l.fw != nil {
-		return nil
-	}
-	m := newManagedFirewall(*l.cfg.Firewall, tag, &l.client, slog.Default())
-	if err := m.ensureAtConfigure(ctx); err != nil {
-		return fmt.Errorf("linode: managed firewall: %w", err)
-	}
-	m.startRefreshLoop()
-	l.fw = m
 	l.tag = tag
+
+	if l.cfg.Firewall != nil {
+		fw := newManagedFirewall(*l.cfg.Firewall, tag, &l.client, slog.Default())
+		if err := fw.primeResolved(ctx); err != nil {
+			return fmt.Errorf("linode: firewall: %w", err)
+		}
+		if err := fw.ensureAtConfigure(ctx); err != nil {
+			return fmt.Errorf("linode: firewall: %w", err)
+		}
+		fw.startRefreshLoop()
+		l.fw = fw
+	}
 	return nil
 }
 
 // Provision creates a tagged Linode with the rendered cloud-init as user-data.
 func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.Instance, error) {
-	// If managed-firewall mode is enabled, lazy-create the firewall on the
-	// very first Provision and start the refresh goroutine. Subsequent
-	// Provisions short-circuit immediately.
-	if err := l.ensureManagedFirewall(ctx, spec.Tag); err != nil {
-		return provider.Instance{}, err
-	}
 	rootPass, err := randomPassword(32)
 	if err != nil {
 		return provider.Instance{}, err

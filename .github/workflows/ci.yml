@@ -361,12 +361,14 @@ jobs:
             type: g6-nanode-1
             image: linode/debian12
             token: ${LINODE_TOKEN}
-            # Managed firewall: SSH only from GH-hosted runner egress (the
-            # CI orchestrator's source). Validates the managed-mode happy
-            # path against a real Linode account. See #26.
+            # Managed firewall: SSH only from this CI runner's external IP.
+            # `auto` resolves to the GH-hosted runner's egress, which is the
+            # one address that needs to reach the worker for dispatch. The
+            # PAT `LINODE_E2E_TOKEN` needs `Firewalls: R/W` in addition to
+            # `Linodes: R/W`. See #26.
             firewall:
               allow_inbound:
-                - github-actions
+                - auto
           ssh:
             private_key_file: $RUNNER_TEMP/id_ed25519
             user: root

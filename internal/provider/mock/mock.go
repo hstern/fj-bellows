@@ -15,7 +15,7 @@ import (
 // Provider is a configurable provider.Provider. It records calls for
 // assertions and is safe for concurrent use.
 type Provider struct {
-	ConfigureFn    func(node yaml.Node) error
+	ConfigureFn    func(ctx context.Context, tag string, node yaml.Node) error
 	ProvisionFn    func(ctx context.Context, spec provider.Spec) (provider.Instance, error)
 	DestroyFn      func(ctx context.Context, id string) error
 	ListFn         func(ctx context.Context, tag string) ([]provider.Instance, error)
@@ -30,9 +30,9 @@ type Provider struct {
 var _ provider.Provider = (*Provider)(nil)
 
 // Configure delegates to ConfigureFn if set.
-func (m *Provider) Configure(node yaml.Node) error {
+func (m *Provider) Configure(ctx context.Context, tag string, node yaml.Node) error {
 	if m.ConfigureFn != nil {
-		return m.ConfigureFn(node)
+		return m.ConfigureFn(ctx, tag, node)
 	}
 	return nil
 }

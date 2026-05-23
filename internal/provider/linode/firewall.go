@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"reflect"
 	"slices"
 	"sort"
@@ -55,31 +54,26 @@ type firewallConfig struct {
 // orchestration tag, the probes for sentinel resolution, and the logger for
 // runtime warnings.
 type managedFirewall struct {
-	cfg       firewallConfig
-	tag       string // cfg.Tag from the outer Linode provider
-	client    firewallClient
-	ipProbe   externalIPProbe
-	ghMetaURL string
-	httpDoer  httpDoer
-	log       *slog.Logger
+	cfg     firewallConfig
+	tag     string // cfg.Tag from the outer Linode provider
+	client  firewallClient
+	ipProbe externalIPProbe
+	log     *slog.Logger
 
 	// id and lastApplied are the in-process cache. id == 0 means the firewall
-	// either has not been created yet, or was deleted by the cleanup path
-	// (next Provision will lazy-create it). lastApplied is the sorted CIDR
-	// set we last pushed; the refresh tick only calls UpdateFirewallRules
-	// when the resolved set differs.
+	// has been deleted by the cleanup path (next Provision lazy-recreates via
+	// the refresh tick). lastApplied is the sorted CIDR set we last pushed;
+	// the refresh tick only calls UpdateFirewallRules when the resolved set
+	// differs.
 	id          int
 	lastApplied []string
 }
 
 // supportedSentinelSchemes is the set of well-known tokens allow_inbound
 // accepts in place of a CIDR. Anything else that doesn't parse as CIDR is a
-// hard error at Configure time so a typo (`gha`, `github_actions`) fails
+// hard error at Configure time so a typo (`auto-detect`, `myip`) fails
 // loudly instead of silently disabling the protection.
-const (
-	sentinelAuto          = "auto"
-	sentinelGithubActions = "github-actions"
-)
+const sentinelAuto = "auto"
 
 // newManagedFirewall constructs the runtime helper. It validates the config
 // (mutual exclusion with firewall_id is enforced by the caller); a zero
@@ -92,34 +86,51 @@ func newManagedFirewall(cfg firewallConfig, tag string, client firewallClient, l
 		cfg.RefreshInterval = time.Minute
 	}
 	return &managedFirewall{
-		cfg:       cfg,
-		tag:       tag,
-		client:    client,
-		ipProbe:   defaultExternalIPProbe(),
-		ghMetaURL: defaultGithubMetaURL,
-		httpDoer:  &http.Client{Timeout: 5 * time.Second},
-		log:       log,
+		cfg:     cfg,
+		tag:     tag,
+		client:  client,
+		ipProbe: defaultExternalIPProbe(),
+		log:     log,
 	}
 }
 
-// ensureAtConfigure resolves the allow-list and creates/updates the firewall
-// at orchestrator startup. Failures here are FATAL — Configure returns the
-// error, the daemon refuses to start. Better than provisioning workers
-// nobody can reach. See #26.
-func (m *managedFirewall) ensureAtConfigure(ctx context.Context) error {
+// primeResolved resolves the sentinels once and caches the result on
+// m.lastApplied. Called from Configure as the first step of standing up the
+// managed firewall; ensureAtConfigure then uses the cached CIDRs to call
+// CreateFirewall. The refresh goroutine re-resolves on its schedule for
+// drift tracking, but Configure-time work happens exactly once.
+func (m *managedFirewall) primeResolved(ctx context.Context) error {
 	cidrs, err := m.resolveAllowInbound(ctx)
 	if err != nil {
 		return err
 	}
 	if len(cidrs) == 0 {
-		return errors.New("managed firewall: allow_inbound resolved to zero CIDRs; refusing to start with a default-deny firewall nobody can reach")
+		return errors.New("managed firewall: allow_inbound resolved to zero CIDRs")
 	}
-	id, err := m.ensureFirewall(ctx, buildRuleSet(cidrs))
+	m.lastApplied = append([]string(nil), cidrs...)
+	return nil
+}
+
+// ensureAtConfigure creates/updates the firewall using the CIDRs already
+// cached on m (resolved either at Configure time or by an earlier refresh).
+// Failures here are returned to the caller; for the FIRST Provision the
+// caller logs them and retries on the next tick. The retries hit only the
+// Linode firewall API (not the sentinel sources), since the resolved CIDRs
+// are cached — so a transient Linode-side error doesn't fan out into
+// hammering GitHub or icanhazip.
+func (m *managedFirewall) ensureAtConfigure(ctx context.Context) error {
+	if len(m.lastApplied) == 0 {
+		return errors.New("managed firewall: no CIDRs cached; Configure should have populated them")
+	}
+	ruleset, err := buildRuleSet(m.lastApplied)
+	if err != nil {
+		return err
+	}
+	id, err := m.ensureFirewall(ctx, ruleset)
 	if err != nil {
 		return err
 	}
 	m.id = id
-	m.lastApplied = append([]string(nil), cidrs...)
 	return nil
 }
 
@@ -159,9 +170,14 @@ func (m *managedFirewall) refreshOnce(ctx context.Context) {
 	if reflect.DeepEqual(cidrs, m.lastApplied) {
 		return
 	}
+	ruleset, err := buildRuleSet(cidrs)
+	if err != nil {
+		m.log.Warn("managed firewall: refresh buildRuleSet failed, keeping previous rules", "err", err)
+		return
+	}
 	// If the firewall has been cleaned up (no instances remain) since we last
 	// applied, ensureFirewall lazy-creates it. Otherwise it just updates rules.
-	id, err := m.ensureFirewall(ctx, buildRuleSet(cidrs))
+	id, err := m.ensureFirewall(ctx, ruleset)
 	if err != nil {
 		m.log.Warn("managed firewall: refresh ensureFirewall failed, keeping previous rules", "err", err)
 		return
@@ -196,17 +212,9 @@ func (m *managedFirewall) resolveAllowInbound(ctx context.Context) ([]string, er
 			for _, c := range got {
 				add(c)
 			}
-		case sentinelGithubActions:
-			got, err := fetchGithubActionsCIDRs(ctx, m.httpDoer, m.ghMetaURL)
-			if err != nil {
-				return nil, fmt.Errorf("resolve %q: %w", sentinelGithubActions, err)
-			}
-			for _, c := range got {
-				add(c)
-			}
 		default:
 			if _, _, err := net.ParseCIDR(entry); err != nil {
-				return nil, fmt.Errorf("allow_inbound entry %q is neither a CIDR nor a recognised sentinel (auto, github-actions)", entry)
+				return nil, fmt.Errorf("allow_inbound entry %q is neither a CIDR nor a recognised sentinel (auto)", entry)
 			}
 			add(entry)
 		}
@@ -219,29 +227,101 @@ func (m *managedFirewall) resolveAllowInbound(ctx context.Context) ([]string, er
 	return out, nil
 }
 
-// buildRuleSet renders a CIDR set into a default-deny inbound firewall ruleset
-// that accepts only tcp/22 from those CIDRs. Outbound is unrestricted (workers
-// need HTTPS to Forgejo and registries). The CIDRs are bucketed into v4/v6
-// because Linode's API requires separate arrays.
-func buildRuleSet(cidrs []string) linodego.FirewallRuleSet {
+// Linode caps each firewall rule at 255 addresses per family and each
+// firewall at 25 rules total. github-actions on its own can already exceed
+// 255 v4 CIDRs, so we chunk the resolved set across multiple rules.
+const (
+	maxAddrsPerRule = 255
+	maxRulesPerFW   = 25
+)
+
+// buildRuleSet renders a CIDR set into a default-deny inbound firewall
+// ruleset that accepts only tcp/22 from those CIDRs. Outbound is unrestricted
+// (workers need HTTPS to Forgejo and registries).
+//
+// Linode caps each rule at 255 addresses TOTAL (v4+v6 combined; the API error
+// `[rules.inbound[0].addresses] Too many addresses submitted. Max allowed
+// is 255` was observed for a rule mixing 255 v4 + a handful of v6). To avoid
+// the totalling trap we split families into separate rules entirely — every
+// emitted rule is either v4-only or v6-only, capped at 255 entries.
+//
+// Returns an error if the resulting rule count would exceed Linode's
+// 25-rule-per-firewall cap.
+func buildRuleSet(cidrs []string) (linodego.FirewallRuleSet, error) {
 	v4, v6 := bucketCIDRs(cidrs)
-	rule := linodego.FirewallRule{
-		Action:      fwActionAccept,
-		Label:       "fj-bellows-ssh",
-		Description: "fj-bellows: tcp/22 from configured allow_inbound",
-		Protocol:    linodego.TCP,
-		Ports:       "22",
-		Addresses: linodego.NetworkAddresses{
-			IPv4: &v4,
-			IPv6: &v6,
-		},
+	v4Chunks := chunkAddrs(v4, maxAddrsPerRule)
+	v6Chunks := chunkAddrs(v6, maxAddrsPerRule)
+	nRules := len(v4Chunks) + len(v6Chunks)
+	if nRules == 0 {
+		// Degenerate: caller built a ruleset from an empty CIDR list. Emit
+		// a single empty rule so the firewall create succeeds (the
+		// orchestrator already errored at Configure if allow_inbound was
+		// empty post-resolve; this branch only fires in tests).
+		empty := []string{}
+		return linodego.FirewallRuleSet{
+			Inbound: []linodego.FirewallRule{{
+				Action:    fwActionAccept,
+				Label:     "fj-bellows-ssh-v4-1",
+				Protocol:  linodego.TCP,
+				Ports:     "22",
+				Addresses: linodego.NetworkAddresses{IPv4: &empty, IPv6: &empty},
+			}},
+			InboundPolicy:  fwInboundDrop,
+			Outbound:       []linodego.FirewallRule{},
+			OutboundPolicy: fwOutboundAccept,
+		}, nil
+	}
+	if nRules > maxRulesPerFW {
+		return linodego.FirewallRuleSet{}, fmt.Errorf(
+			"firewall: allow_inbound resolves to %d v4 + %d v6 CIDRs, which needs %d rules (255/family/rule) but Linode caps a firewall at %d",
+			len(v4), len(v6), nRules, maxRulesPerFW,
+		)
+	}
+	rules := make([]linodego.FirewallRule, 0, nRules)
+	empty := []string{}
+	for i, chunk := range v4Chunks {
+		c := chunk // capture
+		rules = append(rules, linodego.FirewallRule{
+			Action:      fwActionAccept,
+			Label:       fmt.Sprintf("fj-bellows-ssh-v4-%d", i+1),
+			Description: "fj-bellows: tcp/22 from allow_inbound (v4)",
+			Protocol:    linodego.TCP,
+			Ports:       "22",
+			Addresses:   linodego.NetworkAddresses{IPv4: &c, IPv6: &empty},
+		})
+	}
+	for i, chunk := range v6Chunks {
+		c := chunk
+		rules = append(rules, linodego.FirewallRule{
+			Action:      fwActionAccept,
+			Label:       fmt.Sprintf("fj-bellows-ssh-v6-%d", i+1),
+			Description: "fj-bellows: tcp/22 from allow_inbound (v6)",
+			Protocol:    linodego.TCP,
+			Ports:       "22",
+			Addresses:   linodego.NetworkAddresses{IPv4: &empty, IPv6: &c},
+		})
 	}
 	return linodego.FirewallRuleSet{
-		Inbound:        []linodego.FirewallRule{rule},
+		Inbound:        rules,
 		InboundPolicy:  fwInboundDrop,
 		Outbound:       []linodego.FirewallRule{},
 		OutboundPolicy: fwOutboundAccept,
+	}, nil
+}
+
+// chunkAddrs splits xs into slices of at most n each. Returns nil for an
+// empty input so callers can distinguish "no v6 at all" from "one empty
+// chunk of v6".
+func chunkAddrs(xs []string, n int) [][]string {
+	if len(xs) == 0 {
+		return nil
 	}
+	out := make([][]string, 0, (len(xs)+n-1)/n)
+	for i := 0; i < len(xs); i += n {
+		end := min(i+n, len(xs))
+		out = append(out, xs[i:end])
+	}
+	return out
 }
 
 // bucketCIDRs partitions a sorted CIDR slice into v4 and v6 buckets.
@@ -374,19 +454,20 @@ func firewallLabel(tag string) string {
 }
 
 // ruleSetAddrsEqual reports whether two rulesets have the same inbound v4/v6
-// allow lists. We accept that an Outbound difference, InboundPolicy change,
-// etc. would not be picked up — but we never change those fields, so this is
-// the right granularity for drift detection.
+// allow lists, treating the rule-chunking as an implementation detail
+// (collapses all v4 across all inbound rules into one sorted set, same for
+// v6, then compares). We accept that an Outbound or InboundPolicy difference
+// would not be picked up — but we never change those, so this is the right
+// granularity for drift detection.
 func ruleSetAddrsEqual(a, b linodego.FirewallRuleSet) bool {
 	addrs := func(rs linodego.FirewallRuleSet) (v4, v6 []string) {
-		if len(rs.Inbound) == 0 {
-			return nil, nil
-		}
-		if rs.Inbound[0].Addresses.IPv4 != nil {
-			v4 = append([]string(nil), *rs.Inbound[0].Addresses.IPv4...)
-		}
-		if rs.Inbound[0].Addresses.IPv6 != nil {
-			v6 = append([]string(nil), *rs.Inbound[0].Addresses.IPv6...)
+		for _, r := range rs.Inbound {
+			if r.Addresses.IPv4 != nil {
+				v4 = append(v4, *r.Addresses.IPv4...)
+			}
+			if r.Addresses.IPv6 != nil {
+				v6 = append(v6, *r.Addresses.IPv6...)
+			}
 		}
 		sort.Strings(v4)
 		sort.Strings(v6)

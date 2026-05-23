@@ -84,7 +84,7 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   Provision, refreshed on a goroutine, and reaped on last Destroy** — no
   Provider-level shutdown hook. The `firewall:` block is mutually exclusive
   with the simpler `firewall_id:` (attach-to-existing) mode. `allow_inbound`
-  accepts CIDRs plus the `auto` and `github-actions` sentinels; sentinel
+  accepts CIDRs plus the `auto` sentinel; sentinel
   failure or empty resolution is FATAL at Configure (avoid silent wedge),
   but runtime refresh failure keeps the previous-known-good rules in place
   (don't punish a working deployment for a transient network blip).
