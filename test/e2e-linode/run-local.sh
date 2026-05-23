@@ -192,12 +192,9 @@ if [ "$complete" -ne 1 ]; then
   exit 1
 fi
 
-log "waiting for idle teardown"
-for i in $(seq 1 60); do
-  remaining=$(linode_api GET '/linode/instances?page_size=200' \
-              | jq -r --arg t "$TAG" '[.data[]? | select(.tags|index($t))] | length')
-  [ "$remaining" = "0" ] && { log "teardown done after ${i}*2s"; break; }
-  sleep 2
-done
+# Linode's hourly-rounded billing means the warm-hold deliberately keeps the
+# worker until :55 of the paid hour, so we do NOT wait for idle teardown here —
+# asserting fast teardown would contradict the design. The trap cleanup below
+# (and fj-bellows' `-destroy-on-exit`) reclaims the VM on exit.
 
 log "ALL OK"

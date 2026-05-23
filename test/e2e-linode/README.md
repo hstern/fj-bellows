@@ -43,9 +43,27 @@ test/e2e-linode/run-local.sh
 
 ## CI: `e2e-linode` job
 
-The CI version lives in `.github/workflows/ci.yml`. It is **gated solely on the
-`LINODE_E2E_TOKEN` secret** — runs on every push/PR/tag (and manual
-`workflow_dispatch`) when the secret is set, skips entirely when it isn't, so
-it costs nothing until you configure it. It is **never** added to
-branch-protection required checks (PRs should not be blocked on a real-money
-spend).
+The CI version lives in `.github/workflows/ci.yml` as the `e2e-linode` job.
+
+- **Trigger**: every push, PR, tag, and manual `workflow_dispatch`.
+- **Gate**: the `LINODE_E2E_TOKEN` secret existing. Without it the job skips
+  with no spend — so the workflow can be merged before the secret is
+  configured.
+- **Not required**: it is intentionally **never** added to branch-protection
+  required checks. A real-money job must not block PR merges; PRs will show
+  the `e2e-linode` result for visibility but cannot be blocked by it.
+- **Cost per real run**: ~1¢ (one paid hour on `g6-nanode-1`). PRs that push
+  multiple commits cost ~1¢ each.
+- **Cleanup**: an `if: always()` step lists Linodes by the run's tag and
+  destroys any survivor, complementing fj-bellows' own `-destroy-on-exit`.
+
+### What it does NOT assert
+
+It does NOT wait for idle teardown to fire. Linode bills whole hours rounded
+up, so the orchestrator deliberately keeps the warm worker until `:55` of the
+paid hour — asserting fast teardown would contradict the design. The teardown
+policy is covered by the orchestrator unit tests (`internal/orchestrator/
+teardown_test.go`). The E2E asserts the live behavior that's hardest to mock:
+that a real Linode is provisioned, that the ephemeral REST registration works
+against a v15 Forgejo, and that `forgejo-runner one-job --handle` runs to
+completion.

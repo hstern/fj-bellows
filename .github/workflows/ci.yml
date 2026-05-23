@@ -237,11 +237,10 @@ jobs:
           fi
 
   e2e-linode:
-    # Runs whenever LINODE_E2E_TOKEN is configured (on push, PR, tag, or manual
-    # dispatch). Without the secret the job skips and spends nothing. Never
-    # added to branch-protection required checks — PRs should not be blocked
-    # on a real-money spend. Cost per real run: ~1¢ (one paid hour on a
-    # g6-nanode-1, destroyed at exit).
+    # Runs on every trigger (push, PR, tag, manual) whenever LINODE_E2E_TOKEN is
+    # configured; without the secret the job skips entirely. **Never** added to
+    # branch-protection required checks — a real-money job must not block PR
+    # merges. Cost per real run: ~1¢ (one paid hour on a g6-nanode-1).
     needs: check-linode-secret
     if: needs.check-linode-secret.outputs.enabled == 'true'
     runs-on: ubuntu-latest
@@ -426,21 +425,12 @@ jobs:
           tail -50 fj-bellows.log
           exit 1
 
-      - name: Wait for idle teardown
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 60); do
-            count=$(curl -sS -H "Authorization: Bearer $LINODE_TOKEN" \
-                      'https://api.linode.com/v4/linode/instances?page_size=200' \
-                    | jq -r --arg t "$TAG" '[.data[]? | select(.tags|index($t))] | length')
-            if [ "$count" = "0" ]; then
-              echo "teardown done after ${i}*2s"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "ERROR: idle teardown did not occur within 2 min"
-          exit 1
+      # No "wait for idle teardown" step: Linode bills hourly-rounded-up, so the
+      # warm-hold deliberately keeps the worker until :55 of the paid hour.
+      # Asserting fast teardown contradicts the design. The unit tests already
+      # validate the teardown policy; the E2E asserts provisioning + ephemeral
+      # job execution. The cleanup step (`if: always()`) plus `-destroy-on-exit`
+      # ensure no Linode is leaked when the job ends.
 
       - name: Cleanup (always runs)
         if: always()
