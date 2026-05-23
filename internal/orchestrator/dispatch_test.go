@@ -172,6 +172,42 @@ func TestHostsOverrideCommand(t *testing.T) {
 	}
 }
 
+func TestRunnerConfigYAML(t *testing.T) {
+	cases := []struct {
+		name string
+		in   forgejoTarget
+		want string
+	}{
+		{
+			name: "hostname renders network=host + add-host override",
+			in:   forgejoTarget{host: hostInternal, port: 443},
+			want: "container:\n  network: host\n  options: \"--add-host=" + hostInternal + ":127.0.0.1\"\n",
+		},
+		{
+			name: "localhost still gets config (containers need host networking to reach worker loopback)",
+			in:   forgejoTarget{host: "localhost", port: 3000},
+			want: "container:\n  network: host\n  options: \"--add-host=localhost:127.0.0.1\"\n",
+		},
+		{
+			name: "IPv4 literal -> empty (hosts files cannot redirect IPs; documented limitation)",
+			in:   forgejoTarget{host: "192.0.2.10", port: 8080, isIPLit: true},
+			want: "",
+		},
+		{
+			name: "IPv6 literal -> empty",
+			in:   forgejoTarget{host: "2001:db8::1", port: 8443, isIPLit: true},
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := runnerConfigYAML(c.in); got != c.want {
+				t.Errorf("runnerConfigYAML(%+v)\n  got:\n%s\n  want:\n%s", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 func TestPinHostKeyRequiresSeededKeyOnFirstContact(t *testing.T) {
 	keyA := newTestHostKey(t)
 	keyB := newTestHostKey(t)

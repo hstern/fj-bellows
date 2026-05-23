@@ -62,12 +62,18 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   `id`. The composition root (`cmd/fj-bellows`) injects it. SSH host keys are
   verified via a per-VM key injected through cloud-init and pre-pinned (with TOFU
   fallback) — don't regress to ignoring host keys.
-- **Workers reach Forgejo through the dispatch SSH session.** The SSH dispatcher
-  opens a reverse port-forward on the same connection it uses for `one-job`, and
-  injects a `/etc/hosts` override so the runner's lookup of the Forgejo hostname
-  resolves to `127.0.0.1` on the worker. This lets a LAN-internal Forgejo serve
-  workers in a public cloud out of the box; don't reintroduce an out-of-process
-  side-car tunnel.
+- **Workers reach Forgejo through the dispatch SSH session — *and so do the
+  containers the runner spawns for each step*.** The SSH dispatcher opens a
+  reverse port-forward on the dispatch connection and injects a `/etc/hosts`
+  override on the worker so the runner process resolves the Forgejo hostname
+  to `127.0.0.1`. The dispatcher also writes a forgejo-runner config with
+  `container.network: host` and `container.options: --add-host=<host>:127.0.0.1`
+  so every job container shares the worker's network namespace (reaching the
+  tunnel listener via loopback) and gets the same hosts override. Without the
+  runner config, `actions/checkout` and any other step that touches Forgejo
+  from inside a containerized step NXDOMAINs even though the runner process
+  is happily on the tunnel. Don't drop the runner config; don't reintroduce
+  an out-of-process side-car tunnel.
 - **Scale-to-N architecture; do not hardcode the single-VM assumption.**
   `scale.max` bounds it (default 1).
 - **A deployment owns instances solely by `cfg.Tag`.** `provider.List(tag)` is

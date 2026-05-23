@@ -92,8 +92,27 @@ so the runner's lookup of the Forgejo hostname inside the worker lands on the
 tunnel. TLS SNI sees the original hostname unchanged, so a public-CA cert
 (e.g. via DNS-01) continues to validate end-to-end. This lets workers on a
 public cloud reach a LAN-internal Forgejo whose hostname does not resolve from
-the public internet — with no worker-side network configuration. The override
-is skipped for IP literals and for `localhost`. See #33.
+the public internet — with no worker-side network configuration. The worker-side
+hosts override is skipped for IP literals and for `localhost`. See #33.
+
+The runner process is only half the story: each workflow step runs in a
+spawned docker job container with its own network namespace and `/etc/hosts`.
+To carry the tunnel into those containers `RunJob` also writes a forgejo-runner
+config (`runnerConfigYAML`) and passes it via `--config /tmp/runner-cfg.yml`:
+
+```yaml
+container:
+  network: host
+  options: "--add-host=<forgejo-host>:127.0.0.1"
+```
+
+`network: host` makes the container's loopback the worker's loopback (where
+the tunnel listener sits); `--add-host` injects the hosts entry into every
+spawned container so the Forgejo hostname resolves to `127.0.0.1` there too.
+Without this, `actions/checkout` and any other step that talks back to Forgejo
+from inside a containerized step NXDOMAINs even when the runner process is
+on the tunnel. The runner config is skipped for IP-literal Forgejo URLs —
+hosts files can't redirect IPs to IPs; prefer a hostname. See #37.
 
 Dependencies are interfaces (`JobSource`, `Dispatcher`, `provider.Provider`);
 see [`mock`](mock) for the test doubles.

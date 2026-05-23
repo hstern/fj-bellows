@@ -122,6 +122,17 @@ func (d *SSHDispatcher) WaitReady(ctx context.Context, _, addr string) error {
 // not resolve from the public internet, without any worker-side network
 // configuration. TLS SNI is the original hostname, so a public-CA certificate
 // for the Forgejo continues to validate end-to-end. See #33.
+//
+// The runner process is only half the story: each workflow step runs in a
+// spawned docker job container with its own network namespace and /etc/hosts.
+// To carry the tunnel into those containers we render a forgejo-runner config
+// that sets `container.network: host` (so a container's loopback IS the
+// worker's loopback, where the tunnel listener sits) and
+// `container.options: --add-host=<host>:127.0.0.1` (so the container's DNS
+// answer for the Forgejo hostname is 127.0.0.1). Without this every workflow
+// using actions/checkout (or any other step that talks back to Forgejo) would
+// NXDOMAIN inside its container even though the runner process itself was
+// happily on the tunnel. See #37.
 func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.Registration, job forgejo.WaitingJob) error {
 	target, err := parseForgejoURL(d.ForgejoURL)
 	if err != nil {
@@ -146,6 +157,18 @@ func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.
 		return fmt.Errorf("write token: %w", err)
 	}
 
+	// Write the runner config that propagates the tunnel into spawned job
+	// containers (empty for IP-literal Forgejo URLs — see runnerConfigYAML).
+	runnerCfg := runnerConfigYAML(target)
+	if runnerCfg != "" {
+		if err := runRemote(ctx, client,
+			"cat > /tmp/runner-cfg.yml && chmod 600 /tmp/runner-cfg.yml",
+			strings.NewReader(runnerCfg),
+		); err != nil {
+			return fmt.Errorf("write runner config: %w", err)
+		}
+	}
+
 	cmd := fmt.Sprintf(
 		"forgejo-runner one-job --url %s --uuid %s --token-url file:/tmp/tok --label %s --handle %s --wait",
 		shellQuote(d.ForgejoURL),
@@ -153,6 +176,9 @@ func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.
 		shellQuote(strings.Join(d.Labels, ",")),
 		shellQuote(job.Handle),
 	)
+	if runnerCfg != "" {
+		cmd += " --config /tmp/runner-cfg.yml"
+	}
 	if prep := hostsOverrideCommand(target); prep != "" {
 		cmd = prep + " && " + cmd
 	}
@@ -160,6 +186,31 @@ func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.
 		return fmt.Errorf("one-job: %w", err)
 	}
 	return nil
+}
+
+// runnerConfigYAML returns a forgejo-runner config snippet that propagates the
+// dispatcher-managed Forgejo tunnel into the docker containers the runner
+// spawns for each workflow step. Returns "" when no propagation is needed:
+// an IP-literal Forgejo URL can't be redirected via /etc/hosts (which maps
+// names, not IPs) and stays a documented limitation — prefer a hostname.
+//
+// `container.network: host` makes the container's loopback the worker's
+// loopback (where the tunnel listener sits). `container.options` adds a hosts
+// entry into every spawned container so the Forgejo hostname resolves to
+// 127.0.0.1 → the tunnel. The `localhost` case still gets the config because
+// host networking is also what lets containers reach the worker's loopback;
+// the duplicate `--add-host=localhost:127.0.0.1` is benign (first match wins).
+func runnerConfigYAML(t forgejoTarget) string {
+	if t.isIPLit {
+		return ""
+	}
+	// Quoting the value as a YAML double-quoted scalar so a future hostname
+	// containing colons / special chars (unlikely but cheap to defend) parses
+	// safely. forgejo-runner reads this as YAML.
+	return fmt.Sprintf(`container:
+  network: host
+  options: "--add-host=%s:127.0.0.1"
+`, t.host)
 }
 
 // forgejoTarget is the parsed Forgejo URL: the hostname or IP literal the
