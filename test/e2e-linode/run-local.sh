@@ -161,7 +161,7 @@ provider_config:
   vpc:
     subnets:
       cache:
-        ipv4: 100.64.0.0/24
+        ipv4: 10.0.0.0/24
 ssh:
   private_key_file: $KEY
   user: root

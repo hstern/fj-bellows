@@ -222,12 +222,15 @@ provider_config:
   region: us-ord
   # ...
   vpc:
-    # At least one subnet required. CIDRs must be RFC1918 (or CGNAT
-    # 100.64.0.0/10) and not overlap each other or anything you peer with.
-    # They don't escape the VPC, so any vacant private range is fine.
+    # At least one subnet required. CIDRs must be RFC1918 (10/8,
+    # 172.16/12, 192.168/16) — Linode rejects CGNAT (100.64.0.0/10)
+    # and public ranges with `400 [subnets[N].ipv4] The subnet ... is
+    # not in the allowed VPC ranges`. CIDRs don't escape the VPC, so
+    # any vacant RFC1918 range works — pick one that doesn't overlap
+    # your LAN if you ever VPN/peer.
     subnets:
       cache:
-        ipv4: 100.64.0.0/24
+        ipv4: 10.0.0.0/24
     # Optional. Defaults to the alphabetically-first subnet key.
     # worker_subnet: cache
 ```

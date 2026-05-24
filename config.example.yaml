@@ -85,12 +85,13 @@ provider_config:
   # second subnet on this same VPC and binds its registry to the VPC IP.
   # Reaped on last Destroy. Adds VPCs: R/W to the PAT scope.
   # vpc:
-  #   # Subnet CIDRs must be RFC1918 (or CGNAT 100.64.0.0/10) and not
-  #   # overlap each other or anything you peer with. They don't escape the
-  #   # VPC, so any vacant private range is fine.
+  #   # Subnet CIDRs must be RFC1918 (10/8, 172.16/12, 192.168/16); Linode
+  #   # rejects CGNAT and public ranges. CIDRs don't escape the VPC, so any
+  #   # vacant RFC1918 range is fine — pick one that doesn't overlap your
+  #   # LAN if you ever VPN/peer.
   #   subnets:
   #     cache:
-  #       ipv4: 100.64.0.0/24
+  #       ipv4: 10.0.0.0/24
   #   # Optional: pick which subnet workers attach to. Defaults to the
   #   # alphabetically-first key in subnets (so single-subnet configs need
   #   # no override).

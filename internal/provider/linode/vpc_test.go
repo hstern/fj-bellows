@@ -16,8 +16,11 @@ import (
 const (
 	testSubnetCache   = "cache"
 	testSubnetWorkers = "workers"
-	testCIDRCache     = "100.64.0.0/24"
-	testCIDRWorkers   = "100.64.1.0/24"
+	// RFC1918 only — Linode rejects CGNAT for VPC subnets. Tests don't
+	// touch the real API, but matching what the example config uses keeps
+	// a developer from cargo-culting a rejected CIDR into a real config.
+	testCIDRCache   = "10.0.0.0/24"
+	testCIDRWorkers = "10.0.1.0/24"
 )
 
 // fakeVPCClient is a hand-rolled vpcClient (per repo conventions — no
