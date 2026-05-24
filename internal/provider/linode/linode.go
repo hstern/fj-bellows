@@ -339,7 +339,21 @@ func (l *Linode) setupManagedCache(ctx context.Context, tag string) error {
 }
 
 // Provision creates a tagged Linode with the rendered cloud-init as user-data.
+//
+// Before constructing the create payload, every managed resource the
+// orchestrator owns gets a lazy ensure(): firewall, placement group,
+// VPC, cache. Each is a no-op when its cached ID is still valid;
+// after a last-Destroy cascade (when the reaper has cleared the IDs)
+// the ensure() calls re-create the missing resources so the next
+// CreateInstance sees valid attach-refs instead of zero. Without
+// this, the orchestrator wedges in a 10s retry loop sending
+// PlacementGroup.ID=0 to Linode and getting a 400 every time —
+// FJB-10. The order matches Configure: fw → pg → vpc → cache (cache
+// reads vpc.workerSubnetID).
 func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.Instance, error) {
+	if err := l.ensureManagedResources(ctx); err != nil {
+		return provider.Instance{}, err
+	}
 	rootPass, err := randomPassword(32)
 	if err != nil {
 		return provider.Instance{}, err
@@ -378,6 +392,23 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	if key := strings.TrimSpace(spec.AuthorizedKey); key != "" {
 		opts.AuthorizedKeys = []string{key}
 	}
+	l.applyManagedResourceAttachments(&opts)
+	inst, err := l.client.CreateInstance(ctx, opts)
+	if err != nil {
+		return provider.Instance{}, fmt.Errorf("linode: create instance: %w", err)
+	}
+	return toInstance(*inst), nil
+}
+
+// applyManagedResourceAttachments stamps the firewall + placement
+// group + VPC attach-refs onto the create options. Extracted from
+// Provision to keep its cyclomatic complexity under the linter
+// budget once ensureManagedResources joined the chain. The VPC
+// branch keeps its defensive workerSubnetID()!=0 guard: even with
+// the FJB-10 ensure() in place, a Configure-time synthesis bug
+// could still leave it zero, and a worker without a VPC NIC is
+// better than a Provision that errors.
+func (l *Linode) applyManagedResourceAttachments(opts *linodego.InstanceCreateOptions) {
 	switch {
 	case l.fw != nil:
 		opts.FirewallID = l.fw.id
@@ -390,12 +421,6 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	case l.cfg.PlacementGroupID != 0:
 		opts.PlacementGroup = &linodego.InstanceCreatePlacementGroupOptions{ID: l.cfg.PlacementGroupID}
 	}
-	// VPC: workers keep their public NIC (they need public egress for
-	// registries, package mirrors, etc.) and gain a VPC NIC on the
-	// resolved worker subnet. Explicit Interfaces requires us to declare
-	// the public NIC too — Linode doesn't auto-add it once we set the
-	// field. Skip the VPC NIC if the subnet ID isn't populated; ensureAt-
-	// Configure should have set it, so this is defensive.
 	if l.vpc != nil {
 		if subID := l.vpc.workerSubnetID(); subID != 0 {
 			opts.Interfaces = []linodego.InstanceConfigInterfaceCreateOptions{
@@ -404,11 +429,36 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 			}
 		}
 	}
-	inst, err := l.client.CreateInstance(ctx, opts)
-	if err != nil {
-		return provider.Instance{}, fmt.Errorf("linode: create instance: %w", err)
+}
+
+// ensureManagedResources is the FJB-10 self-heal hook: on each
+// Provision call, walk the managed-resource chain and let each
+// resource re-create itself if its reaper has cleared the ID. No-op
+// in the common case (steady-state, ids non-zero); load-bearing
+// after a last-Destroy cascade has fired and a fresh job has just
+// arrived. Order matches Configure.
+func (l *Linode) ensureManagedResources(ctx context.Context) error {
+	if l.fw != nil {
+		if err := l.fw.ensure(ctx); err != nil {
+			return fmt.Errorf("linode: re-create firewall: %w", err)
+		}
 	}
-	return toInstance(*inst), nil
+	if l.pg != nil {
+		if err := l.pg.ensure(ctx); err != nil {
+			return fmt.Errorf("linode: re-create placement group: %w", err)
+		}
+	}
+	if l.vpc != nil {
+		if err := l.vpc.ensure(ctx); err != nil {
+			return fmt.Errorf("linode: re-create vpc: %w", err)
+		}
+	}
+	if l.cache != nil {
+		if err := l.cache.ensure(ctx); err != nil {
+			return fmt.Errorf("linode: re-create cache: %w", err)
+		}
+	}
+	return nil
 }
 
 // Destroy deletes the instance with the given ID.

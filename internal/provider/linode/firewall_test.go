@@ -548,6 +548,68 @@ func TestMaybeCleanupFirewallSkipsWhenDevicesAttached(t *testing.T) {
 	}
 }
 
+// TestFirewallEnsureRecreatesAfterReap is the FJB-10 sibling for the
+// firewall — same shape as the PG test: after the cascade reaper has
+// cleared m.id, ensure() must re-create instead of letting Provision
+// send FirewallID=0 to Linode (which rejects "Firewall ID: 0 not
+// found"). The PG bug fires first in the live cascade ordering, but
+// the FW path has the same shape and is fixed symmetrically here.
+func TestFirewallEnsureRecreatesAfterReap(t *testing.T) {
+	fake := newFakeFirewallClient()
+	m := &managedFirewall{
+		tag:         testTag,
+		client:      fake,
+		log:         slog.Default(),
+		lastApplied: []string{testCIDR1}, // primeResolved-equivalent
+	}
+	if err := m.ensureAtConfigure(context.Background()); err != nil {
+		t.Fatalf("initial ensureAtConfigure: %v", err)
+	}
+	firstID := m.id
+	if firstID == 0 {
+		t.Fatal("initial ensureAtConfigure left m.id = 0")
+	}
+	// Simulate the reaper running and the cascade clearing the ID.
+	m.maybeCleanupFirewall(context.Background())
+	if m.id != 0 {
+		t.Fatalf("post-reap m.id = %d, want 0", m.id)
+	}
+
+	beforeCreate := fake.createCalls
+	if err := m.ensure(context.Background()); err != nil {
+		t.Fatalf("ensure() after reap: %v", err)
+	}
+	if m.id == 0 {
+		t.Error("ensure() left m.id = 0; would re-send FirewallID: 0 not found to Linode (FJB-10)")
+	}
+	if fake.createCalls != beforeCreate+1 {
+		t.Errorf("createCalls = %d, want %d", fake.createCalls, beforeCreate+1)
+	}
+}
+
+// TestFirewallEnsureNoOpWhenIDStillValid — steady-state no-op.
+func TestFirewallEnsureNoOpWhenIDStillValid(t *testing.T) {
+	fake := newFakeFirewallClient()
+	m := &managedFirewall{
+		tag:         testTag,
+		client:      fake,
+		log:         slog.Default(),
+		lastApplied: []string{testCIDR1},
+	}
+	if err := m.ensureAtConfigure(context.Background()); err != nil {
+		t.Fatalf("ensureAtConfigure: %v", err)
+	}
+	beforeList := fake.listCalls
+	beforeCreate := fake.createCalls
+	if err := m.ensure(context.Background()); err != nil {
+		t.Fatalf("ensure(): %v", err)
+	}
+	if fake.listCalls != beforeList || fake.createCalls != beforeCreate {
+		t.Errorf("ensure() with valid m.id should be no-op; listCalls %d→%d, createCalls %d→%d",
+			beforeList, fake.listCalls, beforeCreate, fake.createCalls)
+	}
+}
+
 func TestMaybeCleanupFirewallNoOpWhenNotFound(t *testing.T) {
 	fake := newFakeFirewallClient()
 	m := &managedFirewall{tag: testTag, client: fake, log: slog.Default()}

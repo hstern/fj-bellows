@@ -236,6 +236,22 @@ func (m *managedFirewall) primeResolved(ctx context.Context) error {
 	return nil
 }
 
+// ensure brings the firewall into existence on demand. No-op when the
+// cached ID is still valid; otherwise re-runs ensureAtConfigure to
+// recreate the firewall. The reaper sets m.id to 0 when it deletes the
+// firewall on last-Destroy, so a subsequent Provision call needs this
+// hook to self-heal instead of sending FirewallID=0 to Linode (which
+// rejects it as "Firewall ID: 0 not found" — same shape as the
+// placement-group bug in FJB-10). The PG check fires first in the
+// cascade, but the FW path has the same shape.
+func (m *managedFirewall) ensure(ctx context.Context) error {
+	if m.id != 0 {
+		return nil
+	}
+	m.log.Info("managed firewall: re-creating after teardown")
+	return m.ensureAtConfigure(ctx)
+}
+
 // ensureAtConfigure creates/updates the firewall using the CIDRs already
 // cached on m (resolved either at Configure time or by an earlier refresh).
 // Failures here are returned to the caller; for the FIRST Provision the

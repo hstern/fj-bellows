@@ -524,6 +524,65 @@ func TestCacheClientInterfaceCompiles(_ *testing.T) {
 	var _ cacheClient = (*linodego.Client)(nil)
 }
 
+// TestCacheEnsureRecreatesAfterReap is the FJB-10 cache sibling.
+// maybeCleanupCache resets linodeID to 0; the next workerExtras call
+// would error "cache linode not provisioned yet". ensure() lazily
+// recreates so the next Provision sees a fresh cache VM. The
+// persisted CA dir means the new VM is signed by the same anchor
+// workers already trust.
+func TestCacheEnsureRecreatesAfterReap(t *testing.T) {
+	ctx := context.Background()
+	fc := newFakeCacheClient()
+	fb := newFakeBucketClient()
+	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
+	cache := newTestManagedCache(t, fc, bucket)
+	cache.setHardwareContext(7777, 8888, "")
+	if err := cache.ensureAtConfigure(ctx); err != nil {
+		t.Fatalf("initial ensureAtConfigure: %v", err)
+	}
+	if cache.linodeID == 0 {
+		t.Fatal("initial ensure failed to set linodeID")
+	}
+	cache.maybeCleanupCache(ctx)
+	if cache.linodeID != 0 {
+		t.Fatalf("post-reap linodeID = %d, want 0", cache.linodeID)
+	}
+
+	beforeCreate := fc.createCalls
+	if err := cache.ensure(ctx); err != nil {
+		t.Fatalf("ensure() after reap: %v", err)
+	}
+	if cache.linodeID == 0 {
+		t.Error("ensure() left linodeID = 0; workerExtras would error 'cache linode not provisioned yet' (FJB-10)")
+	}
+	if fc.createCalls != beforeCreate+1 {
+		t.Errorf("createCalls = %d, want %d (ensure should have created a new cache VM)",
+			fc.createCalls, beforeCreate+1)
+	}
+}
+
+// TestCacheEnsureNoOpWhenIDStillValid — steady-state no-op.
+func TestCacheEnsureNoOpWhenIDStillValid(t *testing.T) {
+	ctx := context.Background()
+	fc := newFakeCacheClient()
+	fb := newFakeBucketClient()
+	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
+	cache := newTestManagedCache(t, fc, bucket)
+	cache.setHardwareContext(7777, 8888, "")
+	if err := cache.ensureAtConfigure(ctx); err != nil {
+		t.Fatalf("ensureAtConfigure: %v", err)
+	}
+	beforeList := fc.listCalls
+	beforeCreate := fc.createCalls
+	if err := cache.ensure(ctx); err != nil {
+		t.Fatalf("ensure(): %v", err)
+	}
+	if fc.listCalls != beforeList || fc.createCalls != beforeCreate {
+		t.Errorf("ensure() should be no-op with valid linodeID; listCalls %d→%d, createCalls %d→%d",
+			beforeList, fc.listCalls, beforeCreate, fc.createCalls)
+	}
+}
+
 func TestPreflightCacheRegionAcceptsSupportedRegion(t *testing.T) {
 	// Default fake advertises us-ord on both surfaces; pre-flight
 	// should succeed for it without error.
