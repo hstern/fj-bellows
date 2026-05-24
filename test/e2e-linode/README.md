@@ -31,14 +31,13 @@ provider in CI.
 ## Local: `run-local.sh`
 
 ```sh
-echo "$YOUR_LINODE_PAT" > ~/.linode.pat   # Linodes: R/W + Firewalls: R/W
+echo "$YOUR_LINODE_PAT" > ~/.linode.pat   # see PAT scope below
 chmod 600 ~/.linode.pat
 test/e2e-linode/run-local.sh
-
-# To exercise the managed-VPC path (FJB-6 PR 1) — adds VPCs: R/W to the
-# PAT scope. Workers gain a VPC NIC alongside the public NIC.
-FJB_E2E_VPC=1 test/e2e-linode/run-local.sh
 ```
+
+**PAT scope** (managed-firewall + managed-VPC, both exercised by every
+run): `Linodes: Read/Write`, `Firewalls: Read/Write`, `VPCs: Read/Write`.
 
 - Cost ceiling: one paid hour on `g6-nanode-1` (~$0.0075). VPCs don't add
   cost on Linode.

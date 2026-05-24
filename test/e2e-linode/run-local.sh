@@ -128,25 +128,6 @@ export FORGEJO_LABEL=linode-e2e
 export FORGEJO_WORKFLOW_CONTAINER_OPTS='--network host'
 FORGEJO_TOKEN=$(bash "$REPO_ROOT/test/e2e-docker/seed.sh")
 
-# FJB_E2E_VPC=1 → exercise the managed-VPC path (FJB-6 PR 1). Workers gain
-# a VPC NIC alongside the public NIC. The PAT in ~/.linode.pat additionally
-# needs VPCs: R/W. The label-prefix sweep in destroy_tagged reclaims the VPC
-# on cleanup so failures don't leak. Default off to keep the baseline run
-# representative of the simpler deployments most operators have.
-VPC_BLOCK=""
-if [ "${FJB_E2E_VPC:-0}" = "1" ]; then
-  VPC_BLOCK=$(cat <<'EOF'
-
-  # Managed VPC (FJB-6 PR 1). Workers attach to the `cache` subnet's NIC
-  # in addition to their public one.
-  vpc:
-    subnets:
-      cache:
-        ipv4: 100.64.0.0/24
-EOF
-)
-fi
-
 cat > "$CONFIG" <<YAML
 forgejo:
   url: http://localhost:3000
@@ -169,7 +150,16 @@ provider_config:
   # addition to Linodes: R/W.
   firewall:
     allow_inbound:
-      - auto${VPC_BLOCK}
+      - auto
+  # Managed VPC (FJB-6). Workers attach to the `cache` subnet's NIC in
+  # addition to their public one. The label-prefix sweep in
+  # destroy_tagged reclaims the VPC on cleanup so failures don't leak.
+  # The PAT in ~/.linode.pat needs VPCs: R/W on top of Linodes: R/W and
+  # Firewalls: R/W.
+  vpc:
+    subnets:
+      cache:
+        ipv4: 100.64.0.0/24
 ssh:
   private_key_file: $KEY
   user: root
