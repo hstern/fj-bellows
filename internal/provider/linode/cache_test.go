@@ -3,6 +3,7 @@ package linode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -19,6 +20,11 @@ const (
 	// — the renderer doesn't parse the content, it just substitutes
 	// it into the template.
 	testStubPEM = "STUB"
+	// Shared cloud-init renderer fixtures used across cache_test.go
+	// and cache_tunnel_test.go — extracted so goconst doesn't flag
+	// repeated literals.
+	testStubEndpoint   = "https://x"
+	testStubZotVersion = "1.0.0"
 )
 
 // fakeCacheClient is a hand-rolled cacheClient (per repo conventions —
@@ -101,6 +107,17 @@ func (f *fakeCacheClient) DeleteInstance(_ context.Context, id int) error {
 	f.deleteCalls++
 	delete(f.insts, id)
 	return nil
+}
+
+func (f *fakeCacheClient) GetInstance(_ context.Context, id int) (*linodego.Instance, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	in, ok := f.insts[id]
+	if !ok {
+		return nil, fmt.Errorf("fake: linode %d not found", id)
+	}
+	cp := *in
+	return &cp, nil
 }
 
 // newTestManagedCache injects a config that satisfies validate() — a
@@ -341,13 +358,14 @@ func TestRenderCacheCloudInitRequiresAllFields(t *testing.T) {
 	base := cacheCloudInitParams{
 		Bucket:        "b",
 		Region:        "r",
-		Endpoint:      "https://x",
+		Endpoint:      testStubEndpoint,
 		AccessKey:     "AK",
 		SecretKey:     "SK",
-		ZotVersion:    "1.0.0",
+		ZotVersion:    testStubZotVersion,
 		ServerCertPEM: testStubPEM,
 		ServerKeyPEM:  testStubPEM,
 		UpstreamURL:   "https://u",
+		UpstreamHost:  "u",
 	}
 	cases := []struct {
 		name string
@@ -362,6 +380,7 @@ func TestRenderCacheCloudInitRequiresAllFields(t *testing.T) {
 		{name: "missing server cert", wipe: func(p *cacheCloudInitParams) { p.ServerCertPEM = "" }},
 		{name: "missing server key", wipe: func(p *cacheCloudInitParams) { p.ServerKeyPEM = "" }},
 		{name: "missing upstream URL", wipe: func(p *cacheCloudInitParams) { p.UpstreamURL = "" }},
+		{name: "missing upstream host", wipe: func(p *cacheCloudInitParams) { p.UpstreamHost = "" }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -390,6 +409,7 @@ func TestRenderCacheCloudInitProducesValidCloudInit(t *testing.T) {
 		ServerCertPEM: stubCertPEM,
 		ServerKeyPEM:  stubKeyPEM,
 		UpstreamURL:   testUpstreamURL,
+		UpstreamHost:  "upstream.example",
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -420,13 +440,14 @@ func TestRenderCacheCloudInitReadyFileDefaults(t *testing.T) {
 	out, err := renderCacheCloudInit(cacheCloudInitParams{
 		Bucket:        "b",
 		Region:        "r",
-		Endpoint:      "https://x",
+		Endpoint:      testStubEndpoint,
 		AccessKey:     "AK",
 		SecretKey:     "SK",
-		ZotVersion:    "1.0.0",
+		ZotVersion:    testStubZotVersion,
 		ServerCertPEM: testStubPEM,
 		ServerKeyPEM:  testStubPEM,
 		UpstreamURL:   "https://u",
+		UpstreamHost:  "u",
 		// ReadyFile intentionally omitted
 	})
 	if err != nil {

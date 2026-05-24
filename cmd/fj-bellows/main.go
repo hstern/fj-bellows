@@ -25,7 +25,7 @@ import (
 
 	// Register in-tree providers.
 	dockerprov "github.com/hstern/fj-bellows/internal/provider/docker"
-	_ "github.com/hstern/fj-bellows/internal/provider/linode"
+	linodeprov "github.com/hstern/fj-bellows/internal/provider/linode"
 )
 
 func main() {
@@ -106,6 +106,15 @@ func run(opts runOpts, log *slog.Logger) error {
 	prov, err := provider.New(cfg.Provider)
 	if err != nil {
 		return err
+	}
+	// Hand the Linode provider the same SSH identity the dispatcher
+	// uses, so the managed cache VM can accept the orchestrator's
+	// persistent reverse-tunnel (FJB-7). The injection is a no-op for
+	// non-Linode providers; on Linode without managed cache the
+	// identity is just unused. Must run BEFORE Configure since
+	// setupManagedCache reads l.sshSigner.
+	if l, ok := prov.(*linodeprov.Linode); ok && signer != nil {
+		l.SetSSHIdentity(signer, cfg.SSH.User, cfg.SSH.Port)
 	}
 	// Bound the Configure-time network calls (provider sentinel fetches,
 	// firewall API, etc.) so a hung upstream can't wedge startup forever.

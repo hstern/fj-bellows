@@ -434,6 +434,56 @@ rejected with a clear error. The operator picks: restore the CA
 backup, or destroy the cache VM and let the next start recreate it
 under the fresh CA.
 
+### Upstream reachability — orchestrator reverse-tunnel (FJB-7)
+
+The cache VM lives on Linode and reaches the operator's upstream
+registry through a **persistent `ssh -R` tunnel from the
+orchestrator**, not directly. This is what makes a LAN-internal
+upstream (`https://git.stern.ca/v2/` on `192.168.x.x`, split-horizon
+DNS, etc.) usable without exposing it on the public internet.
+
+How it composes:
+
+1. The cache VM cloud-init pins `127.0.0.1 <upstream-host>` in
+   `/etc/hosts` and writes
+   `/etc/ssh/sshd_config.d/20-fj-bellows-tunnel.conf` to keep
+   `AllowTcpForwarding yes` (a hardened base image setting it to
+   `no` would silently break sync).
+2. After Configure creates the VM (or adopts an existing one), a
+   long-lived orchestrator goroutine dials the cache VM over SSH
+   (TOFU host-key pinning, same shape as the dispatcher's worker
+   pin), opens a remote port-forward listener on
+   `127.0.0.1:<upstream-port>` on the cache VM, and bridges each
+   accepted connection to `<upstream-host>:<upstream-port>` from the
+   orchestrator's own network namespace.
+3. zot's sync extension dials `https://<upstream-host>/...`, the
+   `/etc/hosts` override sends it to loopback, the listener forwards
+   it through SSH to the orchestrator, the orchestrator dials the
+   real upstream over its LAN/public route, and bytes flow.
+
+TLS SNI stays the original hostname, so a public-CA cert on the
+upstream continues to validate end-to-end on the cache VM.
+
+The goroutine reconnects with exponential backoff (1s → 30s) and
+shuts down cleanly on cache cleanup (last Destroy) so the loop
+doesn't churn against a destroyed VM. Lifecycle matches the
+managed-firewall refresh loop: `context.Background`-rooted, no
+Provider.Shutdown hook required.
+
+**IP-literal upstreams** (`https://10.0.0.5/v2/`): the `/etc/hosts`
+override is skipped — /etc/hosts maps names not IPs, so loopback
+redirection can't be done that way. The tunnel still starts but zot
+will dial the IP directly and fail for LAN-internal IP literals.
+Use a hostname upstream when the LAN-internal route matters.
+
+**Pre-conditions**: the SSH key the dispatcher uses
+(`cfg.ssh.private_key_file`) is plumbed into the linode provider via
+`SetSSHIdentity` from `cmd/fj-bellows`; its public half is injected
+into the cache VM's `authorized_keys` via cloud-init so the dial is
+accepted. Deployments without an SSH key (e.g. docker-only) never
+reach this path; deployments with cache disabled never start the
+tunnel.
+
 ### Operator-managed cache mode
 
 Not supported and not planned. Cache is a multi-resource bundle (VM +

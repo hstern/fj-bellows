@@ -80,6 +80,21 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   single-tenant ephemeral and treats its job as trusted (operator's own
   repos), matching every other CI runner stack — same security posture as
   GitHub Actions, GitLab Runner, Drone.
+- **The Linode managed-cache VM reaches upstream through a persistent
+  orchestrator-side `ssh -R`, not its own NIC.** The cache VM is
+  provisioned at Configure-time and never participates in a dispatch SSH
+  session, so it can't inherit the per-dispatch worker tunnel — instead
+  the linode provider starts a long-lived reconnect-loop goroutine that
+  opens a reverse-forward listener on `127.0.0.1:<upstream-port>` on the
+  cache VM and bridges each accepted connection to the upstream from the
+  orchestrator's own network namespace. The cache cloud-init pins
+  `127.0.0.1 <upstream-host>` in /etc/hosts so zot's sync extension
+  hits the loopback listener; TLS SNI is unchanged, so a public-CA cert
+  on the upstream still validates end-to-end. The orchestrator's SSH
+  identity is plumbed into the linode provider via `SetSSHIdentity` from
+  `cmd/fj-bellows` before `Configure` runs. Closes FJB-7. Don't drop the
+  /etc/hosts override; don't try to give the cache VM direct LAN access
+  via NAT (the tunnel is the answer).
 - **The Linode managed firewall is owned by `cfg.Tag`, eager-created at
   Configure, refreshed on a goroutine, and reaped on last Destroy** — no
   Provider-level shutdown hook. The `firewall:` block is mutually exclusive

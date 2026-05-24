@@ -111,6 +111,17 @@ provider_config:
   # Manager → Object Storage).
   # cache:
   #   upstream:
+  #     # Hostname upstreams (including LAN-internal split-horizon names)
+  #     # are reached over a persistent orchestrator-side ssh -R tunnel
+  #     # (FJB-7): the cache VM cloud-init pins 127.0.0.1 <host> in
+  #     # /etc/hosts and the orchestrator bridges loopback connections to
+  #     # the real upstream from its own (LAN-aware) network namespace,
+  #     # so a Forgejo at https://git.lan.example/v2/ on RFC1918 works
+  #     # without any cloud-side route. TLS SNI is unchanged, so a
+  #     # public-CA cert continues to validate end-to-end. IP-literal
+  #     # upstreams (https://10.0.0.5/...) can't use the /etc/hosts
+  #     # redirect — pick a hostname when LAN-internal reachability
+  #     # matters.
   #     url: https://forgejo.example.com/v2/
   #   # CA persistence path. Adopt-existing on daemon restart requires
   #   # the CA dir to survive between restarts. Default under

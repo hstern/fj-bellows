@@ -8,14 +8,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"text/template"
 
 	"github.com/linode/linodego"
+	"golang.org/x/crypto/ssh"
 )
 
 // cacheClient is the slice of *linodego.Client the managed-cache code
@@ -25,6 +28,7 @@ type cacheClient interface {
 	ListInstances(ctx context.Context, opts *linodego.ListOptions) ([]linodego.Instance, error)
 	CreateInstance(ctx context.Context, opts linodego.InstanceCreateOptions) (*linodego.Instance, error)
 	DeleteInstance(ctx context.Context, id int) error
+	GetInstance(ctx context.Context, id int) (*linodego.Instance, error)
 	ListInstanceConfigs(ctx context.Context, linodeID int, opts *linodego.ListOptions) ([]linodego.InstanceConfig, error)
 }
 
@@ -218,6 +222,22 @@ type managedCache struct {
 	// up lazily on first WorkerExtras call (so a fresh-create VM has
 	// time to settle on its IP) and cached. Empty until then.
 	cacheVPCIP string
+
+	// signer / sshUser / sshPort identify how the orchestrator SSHes
+	// into the cache VM for the persistent reverse-tunnel (FJB-7).
+	// Populated by setTunnelIdentity from the same SSH key the
+	// dispatcher uses; nil signer disables the tunnel (tests against
+	// the fake cache client, deployments where SSH wasn't configured).
+	signer  ssh.Signer
+	sshUser string
+	sshPort int
+
+	// tunnel runs the long-lived ssh -R bridging upstream connections
+	// from the cache VM back through the orchestrator's network
+	// namespace. Non-nil iff ensureAtConfigure successfully started
+	// it; maybeCleanupCache stops it before DeleteInstance so the
+	// loop doesn't churn against a deleted VM.
+	tunnel *cacheTunnel
 }
 
 func newManagedCache(cfg cacheConfig, tag, region string, client cacheClient, bucket *managedBucket, log *slog.Logger) *managedCache {
@@ -241,6 +261,21 @@ func (m *managedCache) setHardwareContext(firewallID, vpcSubnetID int, authorize
 	m.firewallID = firewallID
 	m.vpcSubnetID = vpcSubnetID
 	m.authorizedKey = authorizedKey
+}
+
+// setTunnelIdentity supplies the SSH identity the orchestrator will
+// use to dial the cache VM for the persistent reverse-tunnel
+// (FJB-7). signer is the orchestrator's SSH private key (same one
+// the dispatcher uses for workers); user / port match cfg.SSH.
+// Calling with a nil signer is fine — the tunnel just won't start,
+// which is the right behavior for tests against the fake client and
+// for deployments without an SSH key. authorizedKey on
+// setHardwareContext must be the public half of signer for the cache
+// VM to accept the orchestrator's dial.
+func (m *managedCache) setTunnelIdentity(signer ssh.Signer, user string, port int) {
+	m.signer = signer
+	m.sshUser = user
+	m.sshPort = port
 }
 
 // ensureAtConfigure adopts an existing cache VM if one is tagged for
@@ -281,14 +316,26 @@ func (m *managedCache) ensureAtConfigure(ctx context.Context) error {
 		m.linodeID = existing.ID
 		m.adoptedExisting = true
 		m.log.Info("managed cache: adopted existing Linode", "id", existing.ID, "label", existing.Label, "ca_dir", caDir)
+		m.startTunnel()
 		return nil
 	}
 
+	return m.createFreshCacheLinode(ctx, pair)
+}
+
+// createFreshCacheLinode mints the bucket + key, renders cloud-init,
+// creates the cache VM, and starts the tunnel. Extracted from
+// ensureAtConfigure to keep the cyclomatic complexity of the parent
+// under the linter's budget; the adopt branch returns early.
+func (m *managedCache) createFreshCacheLinode(ctx context.Context, pair cacheCertPair) error {
 	creds, err := m.bucket.ensureAtConfigure(ctx)
 	if err != nil {
 		return fmt.Errorf("bucket: %w", err)
 	}
-
+	upstreamHost, err := parseUpstreamHost(m.cfg.Upstream.URL)
+	if err != nil {
+		return fmt.Errorf("parse upstream URL: %w", err)
+	}
 	userData, err := renderCacheCloudInit(cacheCloudInitParams{
 		Bucket:        creds.Bucket,
 		Region:        creds.Region,
@@ -300,15 +347,31 @@ func (m *managedCache) ensureAtConfigure(ctx context.Context) error {
 		ServerCertPEM: string(pair.ServerCertPEM),
 		ServerKeyPEM:  string(pair.ServerKeyPEM),
 		UpstreamURL:   m.cfg.Upstream.URL,
+		UpstreamHost:  upstreamHost,
 	})
 	if err != nil {
 		return fmt.Errorf("render cloud-init: %w", err)
 	}
-
 	rootPass, err := randomPassword(32)
 	if err != nil {
 		return fmt.Errorf("cache: generate root password: %w", err)
 	}
+	opts := m.buildCreateOpts(userData, rootPass)
+	inst, err := m.client.CreateInstance(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("create cache linode: %w", err)
+	}
+	m.linodeID = inst.ID
+	m.log.Info("managed cache: created", "id", inst.ID, "label", inst.Label)
+	m.startTunnel()
+	return nil
+}
+
+// buildCreateOpts assembles the InstanceCreateOptions payload for the
+// cache VM. Public stays primary so outbound (upstream sync, package
+// mirrors, GitHub-zot download) takes the default route; the VPC NIC
+// carries worker→cache pulls.
+func (m *managedCache) buildCreateOpts(userData, rootPass string) linodego.InstanceCreateOptions {
 	booted := true
 	opts := linodego.InstanceCreateOptions{
 		Region:   m.region,
@@ -329,24 +392,92 @@ func (m *managedCache) ensureAtConfigure(ctx context.Context) error {
 		opts.FirewallID = m.firewallID
 	}
 	if m.vpcSubnetID != 0 {
-		// Explicit two-NIC: public + VPC. Public stays primary so
-		// outbound (upstream sync, package mirrors, GitHub-zot
-		// download) takes the default route; the VPC NIC carries
-		// worker→cache pulls in PR 2b.
 		subID := m.vpcSubnetID
 		opts.Interfaces = []linodego.InstanceConfigInterfaceCreateOptions{
 			{Purpose: linodego.InterfacePurposePublic, Primary: true},
 			{Purpose: linodego.InterfacePurposeVPC, SubnetID: &subID},
 		}
 	}
+	return opts
+}
 
-	inst, err := m.client.CreateInstance(ctx, opts)
-	if err != nil {
-		return fmt.Errorf("create cache linode: %w", err)
+// startTunnel kicks off the persistent ssh -R from the orchestrator
+// to the cache VM (FJB-7). Pre-conditions: m.linodeID is set, and
+// setTunnelIdentity was called with a non-nil signer. When either is
+// missing the tunnel is silently skipped — fine for unit tests
+// against the fake client and for deployments that haven't wired SSH
+// (those naturally have no LAN-internal reach to lose). The
+// goroutine handles the cache-VM-not-yet-reachable window via its own
+// reconnect loop; we don't block Configure on the first connect.
+func (m *managedCache) startTunnel() {
+	if m.signer == nil || m.linodeID == 0 {
+		return
 	}
-	m.linodeID = inst.ID
-	m.log.Info("managed cache: created", "id", inst.ID, "label", inst.Label)
-	return nil
+	if m.tunnel != nil {
+		// Defensive: idempotent against accidental double-call.
+		return
+	}
+	upstream, err := url.Parse(m.cfg.Upstream.URL)
+	if err != nil {
+		m.log.Warn("managed cache: parse upstream URL for tunnel, skipping", "err", err)
+		return
+	}
+	host := upstream.Hostname()
+	port := upstreamPort(upstream)
+	if host == "" || port == 0 {
+		m.log.Warn("managed cache: upstream URL has no host or port, skipping tunnel",
+			"url", m.cfg.Upstream.URL)
+		return
+	}
+	linodeID := m.linodeID
+	m.tunnel = &cacheTunnel{
+		signer:       m.signer,
+		sshUser:      m.sshUser,
+		sshPort:      m.sshPort,
+		upstreamHost: host,
+		upstreamPort: port,
+		lookupIP: func(ctx context.Context) (string, error) {
+			return m.lookupCachePublicIP(ctx, linodeID)
+		},
+		log: m.log.With("component", "cache_tunnel"),
+	}
+	m.tunnel.Start()
+}
+
+// upstreamPort returns the effective port for an upstream URL,
+// defaulting from scheme. Returns 0 only if the scheme is neither
+// http nor https (and no explicit port was given).
+func upstreamPort(u *url.URL) int {
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err == nil && n > 0 && n <= 65535 {
+			return n
+		}
+		return 0
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return 80
+	case "https":
+		return 443
+	}
+	return 0
+}
+
+// lookupCachePublicIP fetches the cache VM's first public IPv4. The
+// cache tunnel calls this on every reconnect attempt; on a fresh-
+// create VM the IP may not be assigned for the first few seconds,
+// which surfaces as an error here and the tunnel backs off and
+// retries.
+func (m *managedCache) lookupCachePublicIP(ctx context.Context, linodeID int) (string, error) {
+	inst, err := m.client.GetInstance(ctx, linodeID)
+	if err != nil {
+		return "", fmt.Errorf("get cache linode %d: %w", linodeID, err)
+	}
+	if len(inst.IPv4) == 0 || inst.IPv4[0] == nil {
+		return "", fmt.Errorf("cache linode %d has no public IPv4 assigned yet", linodeID)
+	}
+	return inst.IPv4[0].String(), nil
 }
 
 // findCacheLinode looks up the deployment's cache VM by tag. Cache VMs
@@ -372,6 +503,13 @@ func (m *managedCache) findCacheLinode(ctx context.Context) (*linodego.Instance,
 // cached layers are valuable across deployments; PR 2b adds the
 // retain_after_destroy knob for explicit destruction.
 func (m *managedCache) maybeCleanupCache(ctx context.Context) {
+	// Stop the tunnel before deleting the VM so the reconnect loop
+	// doesn't briefly churn against a host that's gone away. Stop is
+	// idempotent and a no-op when the tunnel never started.
+	if m.tunnel != nil {
+		m.tunnel.Stop()
+		m.tunnel = nil
+	}
 	if m.linodeID != 0 {
 		if err := m.client.DeleteInstance(ctx, m.linodeID); err != nil {
 			m.log.Warn("managed cache: delete linode during cleanup", "id", m.linodeID, "err", err)
@@ -435,6 +573,16 @@ type cacheCloudInitParams struct {
 	// PR 2b requires it via cacheConfig.validate so the template
 	// always sees a non-empty value here.
 	UpstreamURL string
+
+	// UpstreamHost is the hostname extracted from UpstreamURL. The
+	// template uses it to add a /etc/hosts entry pointing the
+	// upstream hostname at 127.0.0.1, where the orchestrator's
+	// persistent ssh -R reverse-tunnel listens (FJB-7). When the
+	// upstream URL uses an IP literal there is nothing to override —
+	// /etc/hosts maps names not IPs — so the template skips the
+	// override block in that case. Either way the value is required
+	// so the renderer is single-shape.
+	UpstreamHost string
 }
 
 // renderCacheCloudInit fills the embedded template. Defaults to the
@@ -457,6 +605,7 @@ func renderCacheCloudInit(p cacheCloudInitParams) (string, error) {
 			}
 			return strings.Join(lines, "\n")
 		},
+		"isIPLiteral": func(s string) bool { return net.ParseIP(s) != nil },
 	}).Parse(cacheCloudInitTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parse cache cloud-init template: %w", err)
@@ -499,6 +648,9 @@ func validateCloudInitParams(p cacheCloudInitParams) error {
 	}
 	if p.UpstreamURL == "" {
 		missing = append(missing, "UpstreamURL")
+	}
+	if p.UpstreamHost == "" {
+		missing = append(missing, "UpstreamHost")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("cache cloud-init: missing required field(s): %s", strings.Join(missing, ", "))
