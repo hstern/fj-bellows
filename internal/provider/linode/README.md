@@ -207,6 +207,79 @@ fj-bellows does nothing else. No extra PAT scope.
 The group's region must match `region:` above (Linode rejects the
 attach otherwise).
 
+## VPC
+
+Optional. Stands up a Linode VPC for the deployment and attaches every
+provisioned worker to a configured subnet (in addition to its public NIC).
+Useful on its own for worker-to-worker private comms; designed to also
+host the pull-through registry cache (FJB-6) so the cache binds to a VPC
+IP and is unreachable from the public internet.
+
+### `vpc:` — managed mode
+
+```yaml
+provider_config:
+  region: us-ord
+  # ...
+  vpc:
+    # At least one subnet required. CIDRs must be RFC1918 (or CGNAT
+    # 100.64.0.0/10) and not overlap each other or anything you peer with.
+    # They don't escape the VPC, so any vacant private range is fine.
+    subnets:
+      cache:
+        ipv4: 100.64.0.0/24
+    # Optional. Defaults to the alphabetically-first subnet key.
+    # worker_subnet: cache
+```
+
+When `vpc:` is set, fj-bellows creates **one VPC per deployment** (keyed
+by `cfg.Tag` via the VPC's label) with the configured subnets, attaches
+every worker's second NIC to the resolved `worker_subnet`, and reaps the
+VPC plus its subnets when the last worker is destroyed.
+
+**Worker attachment**: workers get an explicit two-NIC config —
+`{public, primary} + {vpc, subnet_id}`. The public NIC stays primary so
+default-route egress is unchanged (workers still pull from upstream
+registries and package mirrors over the public network). Removing the
+public NIC would require an out-of-VPC NAT, which is out of scope.
+
+**Subnet naming**: subnets are keyed by name in the YAML; the Linode
+label is `fj-bellows-<sanitize(cfg.Tag + "-" + name)>`. Two deployments
+using the same subnet name (e.g. both `cache`) don't collide because
+`cfg.Tag` is in the label.
+
+**PAT scope**: managed VPC adds `VPCs: Read/Write` on top of the existing
+`Linodes: Read/Write`. (`firewall:` adds `Firewalls: Read/Write`,
+`placement_group:` adds `Placement Groups: Read/Write` — they stack.)
+
+**Labels**: VPC labels are restricted to `[A-Za-z0-9-]` (no underscores
+or dots, unlike firewalls and PGs). The sanitizer replaces disallowed
+chars with `-` and truncates over-long labels with a SHA-256-derived
+suffix so two distinct long tags don't collide. Override the
+auto-derived label with `vpc.name: <label>` when running multiple
+deployments that need distinct human-readable VPC names.
+
+**Lifecycle**:
+
+- Eager create at Configure — same rationale as firewall + PG (PAT-scope
+  mistakes surface at startup, not on the first job arrival).
+- Adopt-existing on restart: if a VPC with the matching label already
+  exists in the region, fj-bellows reuses it and creates any subnets
+  declared in config that aren't yet present on it.
+- Last `Destroy` in a deployment triggers `maybeCleanupVPC` via the same
+  per-instance Destroy path that reaps the firewall + PG. The VPC and
+  all its subnets are deleted once every subnet's `Linodes` field is
+  empty — Linode reports per-subnet attachment counts on `GetVPC`, so
+  cleanup is graph-aware and won't race a still-attached worker.
+
+### Operator-managed VPC mode
+
+Not yet supported. The shape is non-trivial (operator has to supply both
+the VPC ID and the per-worker subnet ID, and there's no obvious "managed
+subnets within an operator-managed VPC" story to factor in). Would
+mirror `firewall_id:` / `placement_group_id:` as `vpc_id:` +
+`vpc_subnet_id:` if added later.
+
 - **Provision** — `CreateInstance` with the rendered cloud-init passed as
   base64 user-data via the Linode Metadata service, the orchestrator's public
   key injected, and the pool tag stamped. Returns the instance with the

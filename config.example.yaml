@@ -79,6 +79,23 @@ provider_config:
   # exclusive with `placement_group:` above. Only needs Linodes: R/W.
   # placement_group_id: 67890
 
+  # Managed VPC. Workers gain a VPC NIC on the worker subnet in addition to
+  # their public NIC. Useful by itself for worker-to-worker private comms;
+  # a future feature (pull-through cache, FJB-6) attaches the cache VM to a
+  # second subnet on this same VPC and binds its registry to the VPC IP.
+  # Reaped on last Destroy. Adds VPCs: R/W to the PAT scope.
+  # vpc:
+  #   # Subnet CIDRs must be RFC1918 (or CGNAT 100.64.0.0/10) and not
+  #   # overlap each other or anything you peer with. They don't escape the
+  #   # VPC, so any vacant private range is fine.
+  #   subnets:
+  #     cache:
+  #       ipv4: 100.64.0.0/24
+  #   # Optional: pick which subnet workers attach to. Defaults to the
+  #   # alphabetically-first key in subnets (so single-subnet configs need
+  #   # no override).
+  #   # worker_subnet: cache
+
 poll:
   # How often to reconcile the queue against runners and instances.
   interval: 10s

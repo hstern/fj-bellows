@@ -57,6 +57,26 @@ destroy_tagged() {
     log "destroying managed firewall $id"
     linode_api DELETE "/networking/firewalls/$id" >/dev/null 2>&1 || true
   done
+  # Managed VPCs (FJB-6). VPCs have no .tags field; ownership is by label
+  # prefix `fj-bellows-<tag>`. Subnets are inline under each VPC and must
+  # be deleted before the VPC. Linode auto-detaches Linode interfaces when
+  # the underlying instance is deleted, but the subnet DELETE still needs
+  # the subnet to have no live interfaces — instance deletes above handle
+  # that.
+  local vpcids
+  vpcids=$(linode_api GET '/vpcs?page_size=200' 2>/dev/null \
+           | jq -r --arg p "fj-bellows-$prefix" '.data[]? | select(.label|startswith($p)) | .id' 2>/dev/null || true)
+  for vid in $vpcids; do
+    local subids
+    subids=$(linode_api GET "/vpcs/$vid/subnets?page_size=200" 2>/dev/null \
+             | jq -r '.data[]?.id' 2>/dev/null || true)
+    for sid in $subids; do
+      log "destroying VPC subnet $vid/$sid"
+      linode_api DELETE "/vpcs/$vid/subnets/$sid" >/dev/null 2>&1 || true
+    done
+    log "destroying managed VPC $vid"
+    linode_api DELETE "/vpcs/$vid" >/dev/null 2>&1 || true
+  done
 }
 
 cleanup() {
@@ -108,6 +128,25 @@ export FORGEJO_LABEL=linode-e2e
 export FORGEJO_WORKFLOW_CONTAINER_OPTS='--network host'
 FORGEJO_TOKEN=$(bash "$REPO_ROOT/test/e2e-docker/seed.sh")
 
+# FJB_E2E_VPC=1 → exercise the managed-VPC path (FJB-6 PR 1). Workers gain
+# a VPC NIC alongside the public NIC. The PAT in ~/.linode.pat additionally
+# needs VPCs: R/W. The label-prefix sweep in destroy_tagged reclaims the VPC
+# on cleanup so failures don't leak. Default off to keep the baseline run
+# representative of the simpler deployments most operators have.
+VPC_BLOCK=""
+if [ "${FJB_E2E_VPC:-0}" = "1" ]; then
+  VPC_BLOCK=$(cat <<'EOF'
+
+  # Managed VPC (FJB-6 PR 1). Workers attach to the `cache` subnet's NIC
+  # in addition to their public one.
+  vpc:
+    subnets:
+      cache:
+        ipv4: 100.64.0.0/24
+EOF
+)
+fi
+
 cat > "$CONFIG" <<YAML
 forgejo:
   url: http://localhost:3000
@@ -130,7 +169,7 @@ provider_config:
   # addition to Linodes: R/W.
   firewall:
     allow_inbound:
-      - auto
+      - auto${VPC_BLOCK}
 ssh:
   private_key_file: $KEY
   user: root

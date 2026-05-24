@@ -34,10 +34,17 @@ provider in CI.
 echo "$YOUR_LINODE_PAT" > ~/.linode.pat   # Linodes: R/W + Firewalls: R/W
 chmod 600 ~/.linode.pat
 test/e2e-linode/run-local.sh
+
+# To exercise the managed-VPC path (FJB-6 PR 1) — adds VPCs: R/W to the
+# PAT scope. Workers gain a VPC NIC alongside the public NIC.
+FJB_E2E_VPC=1 test/e2e-linode/run-local.sh
 ```
 
-- Cost ceiling: one paid hour on `g6-nanode-1` (~$0.0075).
-- A pre-flight cleanup destroys any prior `fj-bellows-e2e-local-*` instances.
+- Cost ceiling: one paid hour on `g6-nanode-1` (~$0.0075). VPCs don't add
+  cost on Linode.
+- A pre-flight cleanup destroys any prior `fj-bellows-e2e-local-*`
+  instances, firewalls, and VPCs (the last via label-prefix match — VPCs
+  have no `tags` field).
 - Requires `docker`, `ssh`, `ssh-keygen`, `curl`, `jq`, `go` on PATH.
 - The token file path is `~/.linode.pat` by default; override with
   `LINODE_PAT_FILE=/path/to/pat`.
