@@ -309,7 +309,10 @@ cache: {}
 func TestConfigureCacheAutoSynthesizesVPC(t *testing.T) {
 	// cache: with upstream but no vpc: must auto-populate cfg.VPC so
 	// workers can reach the cache over a private NIC. The auto-
-	// synthesis runs at Configure-time after validateAll.
+	// synthesis runs at Configure-time after validateAll. The
+	// pre-flight + API calls beyond that point all fail under the
+	// fake token, but the auto-synthesis runs first so we can
+	// assert it ran by inspecting l.cfg.VPC even after the error.
 	l := &Linode{}
 	node := nodeFromYAML(t, `
 region: example-region
@@ -322,9 +325,9 @@ cache:
 `)
 	err := l.Configure(context.Background(), "testtag", node)
 	if err == nil {
-		t.Fatal("expected error from VPC create with fake token")
+		t.Fatal("expected error from cache setup with fake token")
 	}
-	// Even though the API call fails, the auto-synthesis should have
+	// Even though Configure errors, the auto-synthesis should have
 	// run and the VPC config should be populated on l.cfg.
 	if l.cfg.VPC == nil {
 		t.Fatal("cache: did not auto-synthesize cfg.VPC")

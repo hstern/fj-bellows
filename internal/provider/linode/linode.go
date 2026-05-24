@@ -99,6 +99,19 @@ func (l *Linode) Configure(ctx context.Context, tag string, node yaml.Node) erro
 	l.client = client
 	l.tag = tag
 
+	// Pre-flight Object Storage region availability. Runs BEFORE the
+	// setupManaged* sequence so a region that doesn't support OS
+	// (e.g. ca-tor today) fails Configure with a clear error and
+	// zero resources created — without this, firewall + VPC would
+	// already exist by the time setupManagedCache hits the OS API
+	// and errored with the same information. Must run AFTER l.client
+	// is initialised above.
+	if l.cfg.Cache != nil {
+		if err := preflightCacheRegion(ctx, &l.client, l.cfg.Region); err != nil {
+			return fmt.Errorf("linode: cache: %w", err)
+		}
+	}
+
 	if l.cfg.Firewall != nil {
 		if err := l.setupManagedFirewall(ctx, tag); err != nil {
 			return err

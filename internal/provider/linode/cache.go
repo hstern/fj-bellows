@@ -577,5 +577,26 @@ func (m *managedCache) lookupCacheVPCIP(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("cache linode %d has no VPC interface IPv4 assigned yet", m.linodeID)
 }
 
+// preflightCacheRegion checks Object Storage is available for region
+// before the linode provider creates any other deployment resources.
+// Linode Object Storage isn't in every region (ca-tor today is one
+// of the gaps); without this pre-flight the operator would discover
+// the unavailability only after firewall + VPC creates succeeded
+// and setupManagedCache errored with the same information. Fail
+// early, fail clearly.
+//
+// Uses the same endpoint-then-clusters fallback the bucket lifecycle
+// uses, since both surfaces are what advertise Object Storage's
+// per-region presence.
+func preflightCacheRegion(ctx context.Context, client bucketClient, region string) error {
+	probe := newManagedBucket("preflight", region, "preflight", client, slog.Default())
+	if _, err := probe.lookupEndpoint(ctx); err != nil {
+		return fmt.Errorf("object storage not available for region %q: %w "+
+			"(check https://www.linode.com/global-infrastructure/ for current availability "+
+			"or pick a region with OS support)", region, err)
+	}
+	return nil
+}
+
 // linodego.Client must satisfy our reduced interface; compile-time guard.
 var _ cacheClient = (*linodego.Client)(nil)

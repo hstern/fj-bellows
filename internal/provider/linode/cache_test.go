@@ -503,6 +503,34 @@ func TestCacheClientInterfaceCompiles(_ *testing.T) {
 	var _ cacheClient = (*linodego.Client)(nil)
 }
 
+func TestPreflightCacheRegionAcceptsSupportedRegion(t *testing.T) {
+	// Default fake advertises us-ord on both surfaces; pre-flight
+	// should succeed for it without error.
+	fake := newFakeBucketClient()
+	if err := preflightCacheRegion(context.Background(), fake, testBucketRegion); err != nil {
+		t.Errorf("preflight: %v", err)
+	}
+}
+
+func TestPreflightCacheRegionRejectsUnsupportedRegion(t *testing.T) {
+	// Mimics ca-tor today: not in /endpoints, not in /clusters.
+	// Pre-flight must surface this clearly so an operator picks a
+	// supported region — without firewall + VPC getting created
+	// first.
+	fake := newFakeBucketClient()
+	fake.endpoints = nil
+	fake.clusters = nil
+	err := preflightCacheRegion(context.Background(), fake, "ca-tor")
+	if err == nil {
+		t.Fatal("expected error for unsupported region")
+	}
+	for _, want := range []string{"ca-tor", "object storage", "not available"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing substring %q", err.Error(), want)
+		}
+	}
+}
+
 func TestWorkerExtrasLooksUpAndCachesVPCIP(t *testing.T) {
 	ctx := context.Background()
 	fc := newFakeCacheClient()
