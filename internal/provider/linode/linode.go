@@ -299,6 +299,24 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	if err != nil {
 		return provider.Instance{}, err
 	}
+	// If the managed cache is enabled, wrap the orchestrator-rendered
+	// cloud-init in a multipart MIME message that adds a second
+	// cloud-config part with the cache CA trust, /etc/hosts entry, and
+	// containerd pull-only mirror config. cloud-init merges the two
+	// parts natively. Provider-side wrap keeps the orchestrator and
+	// the `bootstrap` package free of provider-specific concerns.
+	userData := spec.UserData
+	if l.cache != nil {
+		extras, xerr := l.cache.workerExtras(ctx)
+		if xerr != nil {
+			return provider.Instance{}, fmt.Errorf("linode: cache worker extras: %w", xerr)
+		}
+		wrapped, werr := wrapWorkerUserDataForCache(spec.UserData, extras)
+		if werr != nil {
+			return provider.Instance{}, fmt.Errorf("linode: wrap worker user-data: %w", werr)
+		}
+		userData = wrapped
+	}
 	booted := true
 	opts := linodego.InstanceCreateOptions{
 		Region:   l.cfg.Region,
@@ -309,7 +327,7 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 		RootPass: rootPass,
 		Booted:   &booted,
 		Metadata: &linodego.InstanceMetadataOptions{
-			UserData: base64.StdEncoding.EncodeToString([]byte(spec.UserData)),
+			UserData: base64.StdEncoding.EncodeToString([]byte(userData)),
 		},
 	}
 	if key := strings.TrimSpace(spec.AuthorizedKey); key != "" {

@@ -97,20 +97,30 @@ provider_config:
   #   # no override).
   #   # worker_subnet: cache
 
-  # Managed pull-through registry cache (FJB-6 PR 2a). ABSENT = no cache:
-  # workers pull direct from upstream. PRESENT = one zot VM + one Object
-  # Storage bucket per deployment. Auto-synthesizes the `vpc:` block above
-  # if you didn't declare one (cache binds to the VPC NIC). Adds
-  # `Object Storage: R/W` to the PAT scope and requires Object Storage to
-  # be enabled on the Linode account ($5/mo flat, one-click at Cloud
-  # Manager → Object Storage). Worker integration (so workers actually
-  # pull through the cache) lands in PR 2b — until then the cache exists
-  # as infrastructure but workers ignore it.
-  # cache: {}
+  # Managed pull-through registry cache (FJB-6 PR 2a + PR 2b). ABSENT =
+  # no cache: workers pull direct from upstream. PRESENT = one zot VM +
+  # one Object Storage bucket per deployment, plus a multipart-MIME wrap
+  # on each worker's cloud-init that adds CA trust, a /etc/hosts entry
+  # for the cache hostname, and a containerd hosts.toml that redirects
+  # PULLS of `upstream.url`'s host through the cache. Pushes to that
+  # hostname still go direct to upstream (pull-only mirror capabilities
+  # — the boundary that makes "no push replication" safe). Auto-
+  # synthesizes the `vpc:` block above if not declared. Adds
+  # `Object Storage: R/W` to the PAT scope and requires Object Storage
+  # to be enabled on the Linode account ($5/mo flat, one-click at Cloud
+  # Manager → Object Storage).
   # cache:
-  #   type: g6-nanode-1            # bump to g6-standard-1 under burst pulls
-  #   image: linode/debian12
-  #   zot_version: 2.1.7           # pinned; bump deliberately
+  #   upstream:
+  #     url: https://forgejo.example.com/v2/
+  #   # CA persistence path. Adopt-existing on daemon restart requires
+  #   # the CA dir to survive between restarts. Default under
+  #   # os.UserConfigDir(); set to a stable path when running fjb as a
+  #   # system service.
+  #   # tls:
+  #   #   ca_dir: /var/lib/fj-bellows/example/cache-ca
+  #   # type: g6-nanode-1          # bump to g6-standard-1 under burst
+  #   # image: linode/debian12
+  #   # zot_version: 2.1.7         # pinned; bump deliberately
 
 poll:
   # How often to reconcile the queue against runners and instances.

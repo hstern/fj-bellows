@@ -283,14 +283,11 @@ subnets within an operator-managed VPC" story to factor in). Would
 mirror `firewall_id:` / `placement_group_id:` as `vpc_id:` +
 `vpc_subnet_id:` if added later.
 
-## Cache (FJB-6 PR 2a)
+## Cache (FJB-6 PR 2a + PR 2b)
 
 Optional. Stands up a [zot](https://zotregistry.dev/) registry as a
-pull-through cache backed by Linode Object Storage. **PR 2a lands the
-infrastructure** (cache VM + bucket + scoped access key + auto-VPC);
-**PR 2b will wire the workers** to actually pull through the cache (CA
-trust + `/etc/hosts` + containerd mirror config). Until 2b lands the
-cache exists but workers ignore it.
+pull-through cache backed by Linode Object Storage, with workers
+wired to pull through it.
 
 ### `cache:` — managed mode
 
@@ -298,12 +295,21 @@ cache exists but workers ignore it.
 provider_config:
   region: us-ord
   # ... firewall: / placement_group: as before ...
-  cache: {}
-# Or, with overrides (all optional):
   cache:
-    type: g6-nanode-1            # bump to g6-standard-1 under burst pulls
-    image: linode/debian12
-    zot_version: 2.1.7           # pinned; bump deliberately
+    # Required. Workers' containerd mirror config keys on the host of
+    # this URL; zot's sync extension pull-throughs from this URL.
+    upstream:
+      url: https://forgejo.example.com/v2/
+    # Optional. CA persistence path (load-or-generate) — daemon
+    # restart with the same CA dir lets fj-bellows adopt the existing
+    # cache VM instead of recreating it. Default: under
+    # os.UserConfigDir() namespaced by the deployment tag.
+    # tls:
+    #   ca_dir: /var/lib/fj-bellows/<tag>/cache-ca
+    # Optional VM tuning (all default):
+    # type: g6-nanode-1            # bump to g6-standard-1 under burst pulls
+    # image: linode/debian12
+    # zot_version: 2.1.7           # pinned; bump deliberately
 ```
 
 When `cache:` is set, fj-bellows:
@@ -372,17 +378,61 @@ clearer error message lands in PR 2b.
   `secret_key` only once at create, so any prior-lifetime key is
   unusable to the new daemon).
 
-### Worker integration (deferred to PR 2b)
+### Worker integration (PR 2b)
 
-PR 2a leaves the worker cloud-init unchanged — workers still pull
-images direct from upstream over the public NIC. Operator-visible
-behavior is the cache infrastructure existing but unused. PR 2b adds:
-- CA distribution via worker cloud-init (so workers trust the cache's
-  cert)
-- `/etc/hosts` entry: `cache.<tag>.fjb.internal → <cache VPC IP>`
-- containerd `hosts.toml` with **pull-only capabilities** (so
-  `docker push <upstream>` continues to reach upstream direct, not the
-  cache — the boundary that makes "no push replication" safe)
+When `cache:` is set, the linode provider wraps each worker's
+cloud-init in a multipart-MIME message whose second part is a
+deployment-specific fragment that:
+
+- Trusts the **fjb-managed CA** — written to
+  `/usr/local/share/ca-certificates/fjb-cache.crt` and registered via
+  `update-ca-certificates`. The CA is generated once and persisted to
+  `cache.tls.ca_dir` so daemon restarts adopt the existing cache VM
+  (signed by the same CA).
+- Adds an `/etc/hosts` entry: `<cache VPC IP> cache.fjb.internal`.
+  No DNS dependency — the hosts lookup wins. The VPC IP is looked up
+  from the cache linode's config interfaces on first Provision after
+  Configure and cached for the daemon's lifetime.
+- Installs a containerd `hosts.toml` for the configured upstream host
+  with **pull-only capabilities** (`["pull", "resolve"]`, NOT
+  `"push"`). This is the boundary that keeps
+  `docker push <upstream-host>/foo` going direct to upstream over the
+  public NIC — the cache is a target only for explicit pushes to the
+  cache hostname. Without this, push traffic would be silently
+  captured by the cache and never reach the upstream registry.
+
+The provider-side multipart wrap keeps the `bootstrap` package and
+the orchestrator unaware of provider-specific cache concerns — they
+render the standard worker cloud-init, the linode provider's
+Provision adds the cache fragment on top. cloud-init merges the two
+parts (write_files and runcmd entries from both are concatenated).
+
+When `cache:` is unset the wrap is skipped entirely and worker
+cloud-init is byte-identical to a no-cache deployment.
+
+### TLS and CA persistence
+
+The fjb-managed CA persists to `cache.tls.ca_dir` across daemon
+restarts. Operators running fjb as a system service should set this
+to a stable path (e.g. `/var/lib/fj-bellows/<tag>/cache-ca/`); the
+default falls back to `os.UserConfigDir()` which is `~/.config/...`
+on Linux when running under a user account.
+
+Three outcomes at Configure-time:
+
+1. **CA dir empty, no cache VM**: generate fresh CA, persist it,
+   create cache VM signed by it. Workers trust the new CA.
+2. **CA dir populated, no cache VM**: reuse persisted CA, create
+   cache VM signed by it. (Typical "daemon restart after manual
+   cache VM teardown".)
+3. **CA dir populated, cache VM exists**: adopt the cache VM. CA on
+   disk matches the one that signed the VM's baked-in cert; workers
+   keep trusting it. (Typical "daemon restart with intact state".)
+
+A fourth case — **CA dir empty, cache VM exists** — is detected and
+rejected with a clear error. The operator picks: restore the CA
+backup, or destroy the cache VM and let the next start recreate it
+under the fresh CA.
 
 ### Operator-managed cache mode
 
