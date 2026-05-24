@@ -151,11 +151,13 @@ provider_config:
   firewall:
     allow_inbound:
       - auto
-  # Managed VPC (FJB-6). Workers attach to the `cache` subnet's NIC in
+  # Managed VPC (FJB-6). Workers attach to the cache subnet's NIC in
   # addition to their public one. The label-prefix sweep in
   # destroy_tagged reclaims the VPC on cleanup so failures don't leak.
-  # The PAT in ~/.linode.pat needs VPCs: R/W on top of Linodes: R/W and
-  # Firewalls: R/W.
+  # The PAT in ~/.linode.pat needs VPCs R/W on top of Linodes R/W and
+  # Firewalls R/W. (No backticks/colons in heredoc comments: this is
+  # an unquoted heredoc so backticks would trigger command substitution
+  # and a YAML colon outside a key:value would confuse the parser.)
   vpc:
     subnets:
       cache:
