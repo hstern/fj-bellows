@@ -77,6 +77,33 @@ destroy_tagged() {
     log "destroying managed VPC $vid"
     linode_api DELETE "/vpcs/$vid" >/dev/null 2>&1 || true
   done
+  # Object Storage scoped access keys (FJB-6 PR 2a). Label is
+  # `fj-bellows-cache-<tag>...`; reap any key whose label contains the
+  # run's tag prefix so failed runs don't leak keys to the operator's
+  # account. Order doesn't matter relative to buckets — keys can be
+  # deleted while the bucket is still present.
+  local keyids
+  keyids=$(linode_api GET '/object-storage/keys?page_size=200' 2>/dev/null \
+           | jq -r --arg p "$prefix" '.data[]? | select(.label|contains($p)) | .id' 2>/dev/null || true)
+  for kid in $keyids; do
+    log "destroying object storage key $kid"
+    linode_api DELETE "/object-storage/keys/$kid" >/dev/null 2>&1 || true
+  done
+  # Object Storage buckets (FJB-6 PR 2a). Label is `fjb-cache-<tag>`.
+  # DELETE on a non-empty bucket returns 400; this sweep accepts that
+  # (e.g. zot pulled an image during the run and the bucket has data).
+  # The bucket then survives until the operator manually empties it —
+  # acceptable for tests but flag it so the test author can hand-clean.
+  local bktrows
+  bktrows=$(linode_api GET '/object-storage/buckets?page_size=200' 2>/dev/null \
+            | jq -r --arg p "$prefix" '.data[]? | select(.label|contains($p)) | "\(.region)\t\(.label)"' 2>/dev/null || true)
+  while IFS=$'\t' read -r region label; do
+    [ -z "$region" ] && continue
+    log "destroying object storage bucket $region/$label"
+    if ! linode_api DELETE "/object-storage/buckets/$region/$label" >/dev/null 2>&1; then
+      log "  (bucket non-empty; manual cleanup may be needed)"
+    fi
+  done <<< "$bktrows"
 }
 
 cleanup() {
@@ -151,17 +178,23 @@ provider_config:
   firewall:
     allow_inbound:
       - auto
-  # Managed VPC (FJB-6). Workers attach to the cache subnet's NIC in
+  # Managed VPC (FJB-6). Workers attach to the cache subnet NIC in
   # addition to their public one. The label-prefix sweep in
-  # destroy_tagged reclaims the VPC on cleanup so failures don't leak.
+  # destroy_tagged reclaims the VPC on cleanup so failures do not leak.
   # The PAT in ~/.linode.pat needs VPCs R/W on top of Linodes R/W and
-  # Firewalls R/W. (No backticks/colons in heredoc comments: this is
+  # Firewalls R/W. (No backticks or colons in heredoc comments: this is
   # an unquoted heredoc so backticks would trigger command substitution
-  # and a YAML colon outside a key:value would confuse the parser.)
+  # and a YAML colon outside a key+value would confuse the parser.)
   vpc:
     subnets:
       cache:
         ipv4: 10.0.0.0/24
+  # Managed pull-through cache (FJB-6 PR 2a). Adds Object Storage R/W to
+  # the PAT scope and requires Object Storage to be enabled on the Linode
+  # account (one-click in the Cloud Manager, flat \$5/mo). Cache VM tag is
+  # \$TAG-cache so the worker prefix sweep above also reaps it; bucket
+  # and key sweeps live in destroy_tagged.
+  cache: {}
 ssh:
   private_key_file: $KEY
   user: root

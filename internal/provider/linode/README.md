@@ -283,6 +283,114 @@ subnets within an operator-managed VPC" story to factor in). Would
 mirror `firewall_id:` / `placement_group_id:` as `vpc_id:` +
 `vpc_subnet_id:` if added later.
 
+## Cache (FJB-6 PR 2a)
+
+Optional. Stands up a [zot](https://zotregistry.dev/) registry as a
+pull-through cache backed by Linode Object Storage. **PR 2a lands the
+infrastructure** (cache VM + bucket + scoped access key + auto-VPC);
+**PR 2b will wire the workers** to actually pull through the cache (CA
+trust + `/etc/hosts` + containerd mirror config). Until 2b lands the
+cache exists but workers ignore it.
+
+### `cache:` — managed mode
+
+```yaml
+provider_config:
+  region: us-ord
+  # ... firewall: / placement_group: as before ...
+  cache: {}
+# Or, with overrides (all optional):
+  cache:
+    type: g6-nanode-1            # bump to g6-standard-1 under burst pulls
+    image: linode/debian12
+    zot_version: 2.1.7           # pinned; bump deliberately
+```
+
+When `cache:` is set, fj-bellows:
+
+1. **Auto-synthesizes the `vpc:` block** with a single `cache` subnet at
+   `10.0.0.0/24` if you didn't declare one. Workers gain a VPC NIC on
+   the same subnet (see VPC section above). Declare `vpc:` explicitly
+   to override the CIDR or add more subnets.
+2. **Mints an Object Storage bucket** named `fjb-cache-<tag>` in the
+   provider region.
+3. **Creates a scoped Object Storage access key** limited to that bucket
+   (read_write). The secret is exposed by Linode exactly once at create
+   time and lives in the cache VM's user-data; the orchestrator never
+   persists it.
+4. **Provisions a separate Linode** (default Nanode) tagged
+   `<deployment-tag>-cache` (NOT the deployment tag — the worker
+   `List(tag)` lookup is exact-match, so the cache never surfaces as a
+   worker the reconciler tries to dispatch to). Its cloud-init downloads
+   the pinned zot binary, generates a self-signed TLS cert with openssl,
+   writes `/etc/zot/config.json` pointing at the bucket, and starts the
+   `zot.service` systemd unit on port 5000.
+5. **Attaches the cache to the deployment firewall and VPC** — the
+   firewall's default `allow_inbound: [auto]` covers SSH; tcp/5000 is
+   reachable only over the VPC NIC (the public NIC's firewall drops
+   non-SSH inbound).
+
+The cache VM uses the SAME deployment firewall as workers — no separate
+firewall block. Operators get SSH break-glass via the operator's IP
+(per the `auto` sentinel); registry traffic stays off the public NIC.
+
+### PAT scope
+
+`cache:` adds **Object Storage: R/W** on top of:
+- `Linodes: R/W` (always required)
+- `Firewalls: R/W` (when `firewall:` is set)
+- `Placement Groups: R/W` (when `placement_group:` is set)
+- `VPCs: R/W` (when `vpc:` is set OR auto-synthesized via `cache:`)
+
+### Linode account prerequisites
+
+Object Storage must be **enabled on the account** ($5/mo flat,
+one-click at Cloud Manager → Object Storage → "Enable Object Storage").
+Without it, `cache:` Configure fails at the first `CreateObjectStorage*`
+call with a Linode 403 — the error surfaces immediately at startup
+(eager-create), not on first job. A dedicated pre-probe with a
+clearer error message lands in PR 2b.
+
+### Lifecycle
+
+- **Eager create at Configure** — same rationale as firewall + VPC.
+  Order: firewall → PG → VPC (auto or explicit) → cache.
+- **Adopt-existing on restart**: if a cache VM with the matching
+  `<tag>-cache` tag already exists, fj-bellows adopts it and skips
+  bucket + key creation entirely. The existing VM keeps its baked-in
+  credentials and stays serving. Daemon restarts therefore don't churn
+  the cache.
+- **Reap on last Destroy**: the cache VM gets `DeleteInstance` on the
+  last worker teardown. The Object Storage key follows. The bucket
+  itself is **not** deleted — cached layers are typically valuable
+  across deployments, and Linode's `DeleteObjectStorageBucket` rejects
+  non-empty buckets with a 400 anyway. A `retain_after_destroy` knob
+  with explicit force-empty semantics lands in PR 2b.
+- **Stale-key reaping**: at Configure, fj-bellows lists Object Storage
+  keys whose label matches the deployment pattern and reaps any
+  left-over keys from prior daemon lifetimes (rationale: Linode reveals
+  `secret_key` only once at create, so any prior-lifetime key is
+  unusable to the new daemon).
+
+### Worker integration (deferred to PR 2b)
+
+PR 2a leaves the worker cloud-init unchanged — workers still pull
+images direct from upstream over the public NIC. Operator-visible
+behavior is the cache infrastructure existing but unused. PR 2b adds:
+- CA distribution via worker cloud-init (so workers trust the cache's
+  cert)
+- `/etc/hosts` entry: `cache.<tag>.fjb.internal → <cache VPC IP>`
+- containerd `hosts.toml` with **pull-only capabilities** (so
+  `docker push <upstream>` continues to reach upstream direct, not the
+  cache — the boundary that makes "no push replication" safe)
+
+### Operator-managed cache mode
+
+Not supported and not planned. Cache is a multi-resource bundle (VM +
+bucket + key + cloud-init); the operator-managed shape would have to
+own all three and the lifecycle coordination is non-trivial. Use the
+fully-managed mode or none.
+
 - **Provision** — `CreateInstance` with the rendered cloud-init passed as
   base64 user-data via the Linode Metadata service, the orchestrator's public
   key injected, and the pool tag stamped. Returns the instance with the

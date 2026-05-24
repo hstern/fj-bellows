@@ -284,6 +284,85 @@ vpc:
 	}
 }
 
+func TestConfigureCacheAutoSynthesizesVPC(t *testing.T) {
+	// `cache: {}` without `vpc:` must auto-populate cfg.VPC so workers
+	// can reach the cache over a private NIC. The auto-synthesis runs
+	// at Configure-time after validateAll, before setupManagedVPC.
+	l := &Linode{}
+	node := nodeFromYAML(t, `
+region: example-region
+type: example-type
+image: example/image
+token: abc123
+cache: {}
+`)
+	err := l.Configure(context.Background(), "testtag", node)
+	if err == nil {
+		t.Fatal("expected error from VPC create with fake token")
+	}
+	// Even though the API call fails, the auto-synthesis should have
+	// run and the VPC config should be populated on l.cfg.
+	if l.cfg.VPC == nil {
+		t.Fatal("cache: {} did not auto-synthesize cfg.VPC")
+	}
+	sub, ok := l.cfg.VPC.Subnets[defaultCacheSubnetName]
+	if !ok {
+		t.Fatalf("auto-synthesized VPC missing %q subnet: %+v", defaultCacheSubnetName, l.cfg.VPC.Subnets)
+	}
+	if sub.IPv4 != defaultCacheSubnetCIDR {
+		t.Errorf("synthesized subnet IPv4 = %q, want %q", sub.IPv4, defaultCacheSubnetCIDR)
+	}
+}
+
+func TestConfigureCachePreservesExplicitVPC(t *testing.T) {
+	// When an operator provides both cache: and vpc:, the explicit
+	// vpc: must win — auto-synthesis must not silently overwrite the
+	// operator's CIDR choice.
+	l := &Linode{}
+	node := nodeFromYAML(t, `
+region: example-region
+type: example-type
+image: example/image
+token: abc123
+vpc:
+  subnets:
+    cache:
+      ipv4: 192.168.55.0/24
+cache: {}
+`)
+	_ = l.Configure(context.Background(), "testtag", node) // API failure is expected
+	if l.cfg.VPC == nil {
+		t.Fatal("explicit vpc: lost during decode")
+	}
+	sub := l.cfg.VPC.Subnets["cache"]
+	if sub.IPv4 != "192.168.55.0/24" {
+		t.Errorf("explicit subnet IPv4 = %q, want %q (auto-synthesis must not clobber operator choice)",
+			sub.IPv4, "192.168.55.0/24")
+	}
+}
+
+func TestConfigureCacheReachesAPI(t *testing.T) {
+	// Valid cache config → Configure tries to call the Linode VPC API
+	// (synthesized) and fails with the fake token. We just want to
+	// see Configure got past validate() + auto-synthesis into the
+	// API layer, proving the cache path is wired.
+	l := &Linode{}
+	node := nodeFromYAML(t, `
+region: example-region
+type: example-type
+image: example/image
+token: abc123
+cache: {}
+`)
+	err := l.Configure(context.Background(), "testtag", node)
+	if err == nil {
+		t.Fatal("expected error: fake token can't authenticate")
+	}
+	if l.cfg.Cache == nil {
+		t.Fatal("cache block should decode onto cfg even on API error")
+	}
+}
+
 func TestConfigureMissingFields(t *testing.T) {
 	l := &Linode{}
 	node := nodeFromYAML(t, `region: example-region`)

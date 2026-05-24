@@ -36,8 +36,11 @@ chmod 600 ~/.linode.pat
 test/e2e-linode/run-local.sh
 ```
 
-**PAT scope** (managed-firewall + managed-VPC, both exercised by every
-run): `Linodes: Read/Write`, `Firewalls: Read/Write`, `VPCs: Read/Write`.
+**PAT scope** (managed firewall + VPC + cache, all exercised by every
+run): `Linodes: Read/Write`, `Firewalls: Read/Write`, `VPCs: Read/Write`,
+`Object Storage: Read/Write`. Object Storage must also be **enabled on
+the Linode account** (one-click + flat $5/mo at Cloud Manager → Object
+Storage); the Configure-time cache create will 403 otherwise.
 
 - Cost ceiling: one paid hour on `g6-nanode-1` (~$0.0075). VPCs don't add
   cost on Linode.
