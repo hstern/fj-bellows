@@ -31,13 +31,19 @@ provider in CI.
 ## Local: `run-local.sh`
 
 ```sh
-echo "$YOUR_LINODE_PAT" > ~/.linode.pat   # Linodes: R/W + Firewalls: R/W
+echo "$YOUR_LINODE_PAT" > ~/.linode.pat   # see PAT scope below
 chmod 600 ~/.linode.pat
 test/e2e-linode/run-local.sh
 ```
 
-- Cost ceiling: one paid hour on `g6-nanode-1` (~$0.0075).
-- A pre-flight cleanup destroys any prior `fj-bellows-e2e-local-*` instances.
+**PAT scope** (managed-firewall + managed-VPC, both exercised by every
+run): `Linodes: Read/Write`, `Firewalls: Read/Write`, `VPCs: Read/Write`.
+
+- Cost ceiling: one paid hour on `g6-nanode-1` (~$0.0075). VPCs don't add
+  cost on Linode.
+- A pre-flight cleanup destroys any prior `fj-bellows-e2e-local-*`
+  instances, firewalls, and VPCs (the last via label-prefix match — VPCs
+  have no `tags` field).
 - Requires `docker`, `ssh`, `ssh-keygen`, `curl`, `jq`, `go` on PATH.
 - The token file path is `~/.linode.pat` by default; override with
   `LINODE_PAT_FILE=/path/to/pat`.

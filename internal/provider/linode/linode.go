@@ -35,6 +35,7 @@ type config struct {
 	Firewall         *firewallConfig       `yaml:"firewall"`
 	PlacementGroupID int                   `yaml:"placement_group_id"`
 	PlacementGroup   *placementGroupConfig `yaml:"placement_group"`
+	VPC              *vpcConfig            `yaml:"vpc"`
 }
 
 // Linode is the provider implementation.
@@ -50,6 +51,11 @@ type Linode struct {
 	// pg is non-nil when managed-placement-group mode is enabled. Same
 	// lifecycle shape: Configure-time create, last-Destroy reaps. See #51.
 	pg *managedPlacementGroup
+
+	// vpc is non-nil when the managed `vpc:` block is set. Workers gain a
+	// VPC interface in addition to their public NIC; eager Configure-time
+	// create, reap on last Destroy — same shape as fw and pg.
+	vpc *managedVPC
 }
 
 func init() {
@@ -91,6 +97,11 @@ func (l *Linode) Configure(ctx context.Context, tag string, node yaml.Node) erro
 			return err
 		}
 	}
+	if l.cfg.VPC != nil {
+		if err := l.setupManagedVPC(ctx, tag); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -116,6 +127,11 @@ func (c config) validateAll() error {
 	if c.PlacementGroup != nil {
 		if err := c.PlacementGroup.validate(); err != nil {
 			return fmt.Errorf("linode: placement_group: %w", err)
+		}
+	}
+	if c.VPC != nil {
+		if err := c.VPC.validate(); err != nil {
+			return fmt.Errorf("linode: vpc: %w", err)
 		}
 	}
 	return nil
@@ -172,6 +188,19 @@ func (l *Linode) setupManagedPlacementGroup(ctx context.Context, tag string) err
 	return nil
 }
 
+// setupManagedVPC constructs the managedVPC and creates the Linode VPC +
+// declared subnets at Configure time. Same eager-create rationale as the
+// firewall / PG: PAT-scope mistakes (e.g. PAT missing VPCs: R/W) surface
+// at startup, not at the first job arrival.
+func (l *Linode) setupManagedVPC(ctx context.Context, tag string) error {
+	v := newManagedVPC(*l.cfg.VPC, tag, l.cfg.Region, &l.client, slog.Default())
+	if err := v.ensureAtConfigure(ctx); err != nil {
+		return fmt.Errorf("linode: vpc: %w", err)
+	}
+	l.vpc = v
+	return nil
+}
+
 // Provision creates a tagged Linode with the rendered cloud-init as user-data.
 func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.Instance, error) {
 	rootPass, err := randomPassword(32)
@@ -206,6 +235,20 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	case l.cfg.PlacementGroupID != 0:
 		opts.PlacementGroup = &linodego.InstanceCreatePlacementGroupOptions{ID: l.cfg.PlacementGroupID}
 	}
+	// VPC: workers keep their public NIC (they need public egress for
+	// registries, package mirrors, etc.) and gain a VPC NIC on the
+	// resolved worker subnet. Explicit Interfaces requires us to declare
+	// the public NIC too — Linode doesn't auto-add it once we set the
+	// field. Skip the VPC NIC if the subnet ID isn't populated; ensureAt-
+	// Configure should have set it, so this is defensive.
+	if l.vpc != nil {
+		if subID := l.vpc.workerSubnetID(); subID != 0 {
+			opts.Interfaces = []linodego.InstanceConfigInterfaceCreateOptions{
+				{Purpose: linodego.InterfacePurposePublic, Primary: true},
+				{Purpose: linodego.InterfacePurposeVPC, SubnetID: &subID},
+			}
+		}
+	}
 	inst, err := l.client.CreateInstance(ctx, opts)
 	if err != nil {
 		return provider.Instance{}, fmt.Errorf("linode: create instance: %w", err)
@@ -233,6 +276,9 @@ func (l *Linode) Destroy(ctx context.Context, id string) error {
 	}
 	if l.pg != nil {
 		l.pg.maybeCleanupPlacementGroup(ctx)
+	}
+	if l.vpc != nil {
+		l.vpc.maybeCleanupVPC(ctx)
 	}
 	return nil
 }

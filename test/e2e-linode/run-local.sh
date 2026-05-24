@@ -57,6 +57,26 @@ destroy_tagged() {
     log "destroying managed firewall $id"
     linode_api DELETE "/networking/firewalls/$id" >/dev/null 2>&1 || true
   done
+  # Managed VPCs (FJB-6). VPCs have no .tags field; ownership is by label
+  # prefix `fj-bellows-<tag>`. Subnets are inline under each VPC and must
+  # be deleted before the VPC. Linode auto-detaches Linode interfaces when
+  # the underlying instance is deleted, but the subnet DELETE still needs
+  # the subnet to have no live interfaces — instance deletes above handle
+  # that.
+  local vpcids
+  vpcids=$(linode_api GET '/vpcs?page_size=200' 2>/dev/null \
+           | jq -r --arg p "fj-bellows-$prefix" '.data[]? | select(.label|startswith($p)) | .id' 2>/dev/null || true)
+  for vid in $vpcids; do
+    local subids
+    subids=$(linode_api GET "/vpcs/$vid/subnets?page_size=200" 2>/dev/null \
+             | jq -r '.data[]?.id' 2>/dev/null || true)
+    for sid in $subids; do
+      log "destroying VPC subnet $vid/$sid"
+      linode_api DELETE "/vpcs/$vid/subnets/$sid" >/dev/null 2>&1 || true
+    done
+    log "destroying managed VPC $vid"
+    linode_api DELETE "/vpcs/$vid" >/dev/null 2>&1 || true
+  done
 }
 
 cleanup() {
@@ -131,6 +151,17 @@ provider_config:
   firewall:
     allow_inbound:
       - auto
+  # Managed VPC (FJB-6). Workers attach to the cache subnet's NIC in
+  # addition to their public one. The label-prefix sweep in
+  # destroy_tagged reclaims the VPC on cleanup so failures don't leak.
+  # The PAT in ~/.linode.pat needs VPCs R/W on top of Linodes R/W and
+  # Firewalls R/W. (No backticks/colons in heredoc comments: this is
+  # an unquoted heredoc so backticks would trigger command substitution
+  # and a YAML colon outside a key:value would confuse the parser.)
+  vpc:
+    subnets:
+      cache:
+        ipv4: 10.0.0.0/24
 ssh:
   private_key_file: $KEY
   user: root
