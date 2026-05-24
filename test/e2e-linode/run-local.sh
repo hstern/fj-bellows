@@ -57,6 +57,53 @@ destroy_tagged() {
     log "destroying managed firewall $id"
     linode_api DELETE "/networking/firewalls/$id" >/dev/null 2>&1 || true
   done
+  # Managed VPCs (FJB-6). VPCs have no .tags field; ownership is by label
+  # prefix `fj-bellows-<tag>`. Subnets are inline under each VPC and must
+  # be deleted before the VPC. Linode auto-detaches Linode interfaces when
+  # the underlying instance is deleted, but the subnet DELETE still needs
+  # the subnet to have no live interfaces — instance deletes above handle
+  # that.
+  local vpcids
+  vpcids=$(linode_api GET '/vpcs?page_size=200' 2>/dev/null \
+           | jq -r --arg p "fj-bellows-$prefix" '.data[]? | select(.label|startswith($p)) | .id' 2>/dev/null || true)
+  for vid in $vpcids; do
+    local subids
+    subids=$(linode_api GET "/vpcs/$vid/subnets?page_size=200" 2>/dev/null \
+             | jq -r '.data[]?.id' 2>/dev/null || true)
+    for sid in $subids; do
+      log "destroying VPC subnet $vid/$sid"
+      linode_api DELETE "/vpcs/$vid/subnets/$sid" >/dev/null 2>&1 || true
+    done
+    log "destroying managed VPC $vid"
+    linode_api DELETE "/vpcs/$vid" >/dev/null 2>&1 || true
+  done
+  # Object Storage scoped access keys (FJB-6 PR 2a). Label is
+  # `fj-bellows-cache-<tag>...`; reap any key whose label contains the
+  # run's tag prefix so failed runs don't leak keys to the operator's
+  # account. Order doesn't matter relative to buckets — keys can be
+  # deleted while the bucket is still present.
+  local keyids
+  keyids=$(linode_api GET '/object-storage/keys?page_size=200' 2>/dev/null \
+           | jq -r --arg p "$prefix" '.data[]? | select(.label|contains($p)) | .id' 2>/dev/null || true)
+  for kid in $keyids; do
+    log "destroying object storage key $kid"
+    linode_api DELETE "/object-storage/keys/$kid" >/dev/null 2>&1 || true
+  done
+  # Object Storage buckets (FJB-6 PR 2a). Label is `fjb-cache-<tag>`.
+  # DELETE on a non-empty bucket returns 400; this sweep accepts that
+  # (e.g. zot pulled an image during the run and the bucket has data).
+  # The bucket then survives until the operator manually empties it —
+  # acceptable for tests but flag it so the test author can hand-clean.
+  local bktrows
+  bktrows=$(linode_api GET '/object-storage/buckets?page_size=200' 2>/dev/null \
+            | jq -r --arg p "$prefix" '.data[]? | select(.label|contains($p)) | "\(.region)\t\(.label)"' 2>/dev/null || true)
+  while IFS=$'\t' read -r region label; do
+    [ -z "$region" ] && continue
+    log "destroying object storage bucket $region/$label"
+    if ! linode_api DELETE "/object-storage/buckets/$region/$label" >/dev/null 2>&1; then
+      log "  (bucket non-empty; manual cleanup may be needed)"
+    fi
+  done <<< "$bktrows"
 }
 
 cleanup() {
@@ -131,6 +178,31 @@ provider_config:
   firewall:
     allow_inbound:
       - auto
+  # Managed VPC (FJB-6). Workers attach to the cache subnet NIC in
+  # addition to their public one. The label-prefix sweep in
+  # destroy_tagged reclaims the VPC on cleanup so failures do not leak.
+  # The PAT in ~/.linode.pat needs VPCs R/W on top of Linodes R/W and
+  # Firewalls R/W. (No backticks or colons in heredoc comments: this is
+  # an unquoted heredoc so backticks would trigger command substitution
+  # and a YAML colon outside a key+value would confuse the parser.)
+  vpc:
+    subnets:
+      cache:
+        ipv4: 10.0.0.0/24
+  # Managed pull-through cache (FJB-6 PR 2a + PR 2b). Adds Object
+  # Storage R/W to the PAT scope and requires Object Storage to be
+  # enabled on the Linode account (one-click in the Cloud Manager,
+  # flat 5 USD/mo). Cache VM tag is \$TAG-cache so the worker prefix
+  # sweep above also reaps it; bucket and key sweeps live in
+  # destroy_tagged. The PR 2b worker integration wraps each worker
+  # cloud-init with the cache CA, /etc/hosts entry, and a containerd
+  # mirror config for upstream.example.com (a placeholder that does
+  # not conflict with the docker pulls workers make for the e2e job).
+  cache:
+    upstream:
+      url: https://upstream.example.com/v2/
+    tls:
+      ca_dir: $WORKDIR/cache-ca
 ssh:
   private_key_file: $KEY
   user: root
@@ -189,6 +261,167 @@ done
 # (internal/orchestrator/dispatch.go), so workers reach Forgejo via the
 # orchestrator's view of it. No side-car tunnel needed; see #33.
 
+# Wait for the worker's cloud-init to signal readiness (the dispatcher
+# pins on this — "worker ready" appears in the orchestrator log once
+# the readyFile is touched). The cache assertions below probe the same
+# state the dispatcher just verified.
+log "waiting for 'worker ready' in orchestrator log (up to ~6 min)"
+ready=0
+for i in $(seq 1 180); do
+  if grep -q 'worker ready' "$LOG" 2>/dev/null; then
+    log "'worker ready' after ${i}*2s"
+    ready=1
+    break
+  fi
+  sleep 2
+done
+if [ "$ready" -ne 1 ]; then
+  err "worker did not become ready; last 30 lines:"
+  tail -30 "$LOG" >&2 || true
+  exit 1
+fi
+
+# FJB-6 PR 3: worker-side cache assertions. Read-only — verifies that
+# the PR 2b multipart wrap actually landed the cache plumbing on the
+# worker. Runs BEFORE we wait for job-complete so the worker can't be
+# idle-reaped mid-probe (the e2e uses billing_hour=60s for fast
+# teardown observation, which leaves a tight window post-job-complete).
+# One SSH invocation does both the probe and the CA byte-dump (cloud-
+# init can still be reconfiguring sshd in the background — a second
+# SSH call mid-flight sometimes hits a transient host-key change as
+# another sshd reload fires, so we keep this as one round-trip).
+# Host-key verification is disabled here (UserKnownHostsFile=/dev/null
+# + StrictHostKeyChecking=no) — the orchestrator's real dispatcher
+# pins via cloud-init and THAT's the actual security boundary; this
+# is just a read probe.
+log "worker-side cache assertions"
+worker_dump=$(ssh -i "$KEY" -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+  -o ConnectTimeout=5 \
+  root@"$LIP" 'bash -s' <<'PROBE' 2>/dev/null || true
+# Heartbeat first — if the harness sees this but not PROBE:OK/FAIL
+# the worker disconnected mid-probe.
+echo "PROBE:STARTED"
+errs=""
+
+# /etc/hosts maps cache.fjb.internal → an RFC1918 IP (fjb default is
+# 10.0.0.0/24 so we expect 10.*).
+host_line=$(grep cache.fjb.internal /etc/hosts || true)
+if [ -z "$host_line" ]; then
+  errs="$errs hosts-entry-missing"
+elif ! echo "$host_line" | grep -qE '10\.'; then
+  errs="$errs hosts-entry-non-rfc1918:$host_line"
+fi
+
+# fjb CA installed and registered in the system trust store.
+if [ ! -s /usr/local/share/ca-certificates/fjb-cache.crt ]; then
+  errs="$errs ca-cert-missing"
+fi
+if ! ls /etc/ssl/certs/ 2>/dev/null | grep -q fjb-cache; then
+  errs="$errs ca-cert-not-in-trust-store"
+fi
+
+# containerd hosts.toml — PULL-ONLY mirror is the load-bearing
+# safety boundary. Assert explicitly so a refactor that adds "push"
+# can't sneak past.
+toml=$(find /etc/containerd/certs.d -name hosts.toml 2>/dev/null | head -1)
+if [ -z "$toml" ]; then
+  errs="$errs hosts-toml-missing"
+else
+  if ! grep -q '"pull"' "$toml" || ! grep -q '"resolve"' "$toml"; then
+    errs="$errs hosts-toml-missing-pull-or-resolve"
+  fi
+  if grep -q '"push"' "$toml"; then
+    errs="$errs hosts-toml-has-push-BOUNDARY-BROKEN"
+  fi
+  if ! grep -q 'cache.fjb.internal' "$toml"; then
+    errs="$errs hosts-toml-missing-cache-host"
+  fi
+fi
+
+# PROBE:OK / PROBE:FAIL covers ONLY the worker-side plumbing
+# assertions above (hosts, CA, hosts.toml). These are the load-
+# bearing pieces — they prove the multipart wrap landed and the
+# pull-only safety boundary is intact.
+if [ -n "$errs" ]; then
+  echo "PROBE:FAIL:$errs"
+else
+  echo "PROBE:OK"
+fi
+
+# Soft check: cache /v2/ reachable from the worker over the VPC NIC,
+# with the cert verifying against the installed CA. Logged as
+# PROBE:V2: but NOT folded into the fatal PROBE:OK/FAIL — the cache
+# cloud-init (apt + download zot + start) can take 3-5 min and the
+# e2e's short billing cycle reaps the worker ~30s after job-complete,
+# so a slow-cache run would flake here even though the worker
+# plumbing is correct. A future PR can add a fjb-side "wait for
+# cache ready" signal and turn this back into a fatal check.
+v2_ok=0
+for i in 1 2 3 4 5; do
+  if curl -fsS --max-time 3 https://cache.fjb.internal:5000/v2/ >/dev/null 2>&1; then
+    v2_ok=1
+    break
+  fi
+  sleep 2
+done
+if [ "$v2_ok" -eq 1 ]; then
+  echo "PROBE:V2:OK"
+else
+  echo "PROBE:V2:WARN cache /v2/ not yet reachable (cache cloud-init likely still finishing)"
+fi
+# Emit the CA PEM with a sentinel so the harness can extract it.
+echo "---FJB-CA-BEGIN---"
+cat /usr/local/share/ca-certificates/fjb-cache.crt 2>/dev/null || true
+echo "---FJB-CA-END---"
+PROBE
+)
+# Filter for the result line — STARTED appears immediately, OK/FAIL at
+# the end. `|| true` so a missing match (e.g. SSH died early)
+# doesn't blow up under `set -o pipefail`.
+probe_line=$(printf '%s\n' "$worker_dump" | grep -E '^PROBE:(OK|FAIL)' | head -1 || true)
+if [ "$probe_line" != "PROBE:OK" ]; then
+  err "worker-side cache assertions failed: ${probe_line:-<no PROBE result; full dump below>}"
+  if printf '%s\n' "$worker_dump" | grep -q '^PROBE:STARTED'; then
+    err "(probe started but did not complete — likely SSH dropped mid-run)"
+  fi
+  err "SSH dump (first 40 lines):"
+  printf '%s\n' "$worker_dump" | head -40 >&2
+  exit 1
+fi
+log "  ✓ /etc/hosts entry, CA trust, pull-only mirror"
+v2_line=$(printf '%s\n' "$worker_dump" | grep '^PROBE:V2:' | head -1 || true)
+case "$v2_line" in
+  PROBE:V2:OK)
+    log "  ✓ cache /v2/ reachable from worker (TLS verified)"
+    ;;
+  PROBE:V2:WARN*)
+    log "  ⚠ ${v2_line#PROBE:V2:WARN }"
+    log "    (non-fatal — cache reachability is a soft check until fjb signals cache-ready)"
+    ;;
+  *)
+    log "  ⚠ no PROBE:V2: line in dump (probe may have been truncated)"
+    ;;
+esac
+
+# CA byte-equality: extract the PEM between the sentinels and compare
+# to the orchestrator's persisted CA.
+worker_ca=$(printf '%s\n' "$worker_dump" \
+  | awk '/^---FJB-CA-BEGIN---$/{f=1;next} /^---FJB-CA-END---$/{f=0} f')
+orch_ca=$(cat "$WORKDIR/cache-ca/ca-cert.pem" 2>/dev/null || true)
+if [ -z "$worker_ca" ] || [ -z "$orch_ca" ]; then
+  err "CA byte-equality check skipped: worker_ca=${#worker_ca}b orch_ca=${#orch_ca}b"
+  exit 1
+fi
+if [ "$(printf '%s' "$worker_ca")" != "$(printf '%s' "$orch_ca")" ]; then
+  err "CA byte mismatch: worker's installed CA differs from orchestrator's persisted CA"
+  exit 1
+fi
+log "  ✓ worker CA byte-identical to orchestrator's persisted CA"
+
+# With assertions green, wait for the runner to finish its job. The
+# probe ran while the runner was still processing, so this should
+# complete shortly after.
 log "waiting for 'job complete' in orchestrator log (up to ~6 min)"
 complete=0
 for i in $(seq 1 180); do

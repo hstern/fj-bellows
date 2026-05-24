@@ -1,0 +1,108 @@
+#cloud-config
+# Cache VM bootstrap for fj-bellows (FJB-6). Installs zot, writes the
+# fjb-managed TLS cert (signed by the persisted CA so workers trust it),
+# configures zot's S3 storage driver + sync extension, and starts the
+# systemd unit.
+#
+# Bound to 0.0.0.0:5000: the deployment firewall drops public-inbound
+# tcp/5000 (only tcp/22 is open per the auto sentinel), and the VPC NIC
+# stays reachable from workers within the cache subnet. Operators can
+# break-glass via SSH + a local port-forward.
+package_update: true
+packages:
+  - curl
+  - ca-certificates
+write_files:
+  - path: /etc/zot/config.json
+    permissions: '0640'
+    content: |
+      {
+        "distSpecVersion": "1.1.0",
+        "storage": {
+          "rootDirectory": "/var/lib/zot",
+          "storageDriver": {
+            "name": "s3",
+            "region": "{{.Region}}",
+            "regionendpoint": "{{.Endpoint}}",
+            "bucket": "{{.Bucket}}",
+            "accesskey": "{{.AccessKey}}",
+            "secretkey": "{{.SecretKey}}",
+            "secure": true,
+            "forcepathstyle": true
+          },
+          "gc": true
+        },
+        "http": {
+          "address": "0.0.0.0",
+          "port": "5000",
+          "tls": {
+            "cert": "/etc/zot/tls/cert.pem",
+            "key": "/etc/zot/tls/key.pem"
+          }
+        },
+        "log": {
+          "level": "info"
+        },
+        "extensions": {
+          "sync": {
+            "enable": true,
+            "registries": [{
+              "urls": ["{{.UpstreamURL}}"],
+              "onDemand": true,
+              "tlsVerify": true,
+              "content": [{"prefix": "**"}]
+            }]
+          }
+        }
+      }
+  - path: /etc/zot/tls/cert.pem
+    permissions: '0644'
+    content: |
+{{.ServerCertPEM | indent 6}}
+  - path: /etc/zot/tls/key.pem
+    permissions: '0600'
+    content: |
+{{.ServerKeyPEM | indent 6}}
+  - path: /etc/systemd/system/zot.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=zot OCI-native container registry
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/zot serve /etc/zot/config.json
+      Restart=on-failure
+      RestartSec=5s
+      User=root
+      [Install]
+      WantedBy=multi-user.target
+runcmd:
+{{- if .HostPrivateKey}}
+  - |
+    set -eu
+    install -m 0600 /dev/null /etc/ssh/ssh_host_ed25519_key
+    printf '%s' '{{.HostPrivateKey | b64enc}}' | base64 -d > /etc/ssh/ssh_host_ed25519_key
+    chmod 0600 /etc/ssh/ssh_host_ed25519_key
+    ssh-keygen -y -f /etc/ssh/ssh_host_ed25519_key > /etc/ssh/ssh_host_ed25519_key.pub
+    chmod 0644 /etc/ssh/ssh_host_ed25519_key.pub
+    mkdir -p /etc/ssh/sshd_config.d
+    printf 'HostKey /etc/ssh/ssh_host_ed25519_key\n' > /etc/ssh/sshd_config.d/10-fj-bellows-hostkey.conf
+    systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || systemctl restart ssh
+{{- end}}
+  - |
+    set -eu
+    arch="$(uname -m)"
+    case "$arch" in
+      x86_64) zarch=amd64 ;;
+      aarch64|arm64) zarch=arm64 ;;
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+    esac
+    url="https://github.com/project-zot/zot/releases/download/v{{.ZotVersion}}/zot-linux-${zarch}"
+    curl -fsSL -o /usr/local/bin/zot "$url"
+    chmod +x /usr/local/bin/zot
+  - mkdir -p /var/lib/zot
+  - systemctl daemon-reload
+  - systemctl enable --now zot.service
+  - touch {{.ReadyFile}}

@@ -35,6 +35,8 @@ type config struct {
 	Firewall         *firewallConfig       `yaml:"firewall"`
 	PlacementGroupID int                   `yaml:"placement_group_id"`
 	PlacementGroup   *placementGroupConfig `yaml:"placement_group"`
+	VPC              *vpcConfig            `yaml:"vpc"`
+	Cache            *cacheConfig          `yaml:"cache"`
 }
 
 // Linode is the provider implementation.
@@ -50,6 +52,18 @@ type Linode struct {
 	// pg is non-nil when managed-placement-group mode is enabled. Same
 	// lifecycle shape: Configure-time create, last-Destroy reaps. See #51.
 	pg *managedPlacementGroup
+
+	// vpc is non-nil when the managed `vpc:` block is set. Workers gain a
+	// VPC interface in addition to their public NIC; eager Configure-time
+	// create, reap on last Destroy — same shape as fw and pg.
+	vpc *managedVPC
+
+	// cache is non-nil when the managed `cache:` block is set. Cache lives
+	// outside the worker pool: a separate Linode tagged `<tag>-cache` (so
+	// List(tag) never sees it), an Object Storage bucket, and a scoped
+	// access key wired into the cache VM's cloud-init. Setting `cache:`
+	// without `vpc:` auto-synthesizes the VPC (FJB-6 design).
+	cache *managedCache
 }
 
 func init() {
@@ -76,10 +90,27 @@ func (l *Linode) Configure(ctx context.Context, tag string, node yaml.Node) erro
 	if err := l.cfg.validateAll(); err != nil {
 		return err
 	}
+	// Auto-synthesize VPC when cache: is set and vpc: is absent. Done
+	// AFTER validateAll so an operator-supplied vpc: block is checked
+	// for typos before we silently substitute it.
+	l.cfg.autoSynthesizeVPCForCache()
 	client := linodego.NewClient(nil)
 	client.SetToken(l.cfg.Token)
 	l.client = client
 	l.tag = tag
+
+	// Pre-flight Object Storage region availability. Runs BEFORE the
+	// setupManaged* sequence so a region that doesn't support OS
+	// (e.g. ca-tor today) fails Configure with a clear error and
+	// zero resources created — without this, firewall + VPC would
+	// already exist by the time setupManagedCache hits the OS API
+	// and errored with the same information. Must run AFTER l.client
+	// is initialised above.
+	if l.cfg.Cache != nil {
+		if err := preflightCacheRegion(ctx, &l.client, l.cfg.Region); err != nil {
+			return fmt.Errorf("linode: cache: %w", err)
+		}
+	}
 
 	if l.cfg.Firewall != nil {
 		if err := l.setupManagedFirewall(ctx, tag); err != nil {
@@ -88,6 +119,19 @@ func (l *Linode) Configure(ctx context.Context, tag string, node yaml.Node) erro
 	}
 	if l.cfg.PlacementGroup != nil {
 		if err := l.setupManagedPlacementGroup(ctx, tag); err != nil {
+			return err
+		}
+	}
+	if l.cfg.VPC != nil {
+		if err := l.setupManagedVPC(ctx, tag); err != nil {
+			return err
+		}
+	}
+	// Cache last — it depends on VPC (for subnet ID) and firewall (for
+	// the deployment-shared firewall attach). autoSynthesizeVPCForCache
+	// above guarantees l.vpc is non-nil here when l.cfg.Cache is set.
+	if l.cfg.Cache != nil {
+		if err := l.setupManagedCache(ctx, tag); err != nil {
 			return err
 		}
 	}
@@ -102,12 +146,27 @@ func (c config) validateAll() error {
 	if err := c.validateRequiredFields(); err != nil {
 		return err
 	}
+	if err := c.validateMutexes(); err != nil {
+		return err
+	}
+	return c.validateSubBlocks()
+}
+
+// validateMutexes rejects configs that set both the managed-block and
+// the attach-by-id field for any resource type.
+func (c config) validateMutexes() error {
 	if c.Firewall != nil && c.FirewallID != 0 {
 		return errors.New("linode: provider_config: `firewall` and `firewall_id` are mutually exclusive")
 	}
 	if c.PlacementGroup != nil && c.PlacementGroupID != 0 {
 		return errors.New("linode: provider_config: `placement_group` and `placement_group_id` are mutually exclusive")
 	}
+	return nil
+}
+
+// validateSubBlocks delegates to each non-nil sub-block's validator
+// and wraps the error with the YAML field name for operator clarity.
+func (c config) validateSubBlocks() error {
 	if c.Firewall != nil {
 		if err := c.Firewall.validate(); err != nil {
 			return fmt.Errorf("linode: firewall: %w", err)
@@ -118,7 +177,34 @@ func (c config) validateAll() error {
 			return fmt.Errorf("linode: placement_group: %w", err)
 		}
 	}
+	if c.VPC != nil {
+		if err := c.VPC.validate(); err != nil {
+			return fmt.Errorf("linode: vpc: %w", err)
+		}
+	}
+	if c.Cache != nil {
+		if err := c.Cache.validate(); err != nil {
+			return fmt.Errorf("linode: cache: %w", err)
+		}
+	}
 	return nil
+}
+
+// autoSynthesizeVPCForCache populates cfg.VPC with a sensible default
+// when cache: is set and vpc: was left empty. The cache VM binds to a
+// VPC NIC and workers will reach it over that NIC (PR 2b), so a VPC is
+// load-bearing for the cache — synthesizing a default keeps `cache: {}`
+// a one-line opt-in instead of forcing the operator to type out both
+// blocks just to get the documented default behavior.
+func (c *config) autoSynthesizeVPCForCache() {
+	if c.Cache == nil || c.VPC != nil {
+		return
+	}
+	c.VPC = &vpcConfig{
+		Subnets: map[string]subnetConfig{
+			defaultCacheSubnetName: {IPv4: defaultCacheSubnetCIDR},
+		},
+	}
 }
 
 // validateRequiredFields collects all missing required Linode provider_config
@@ -172,11 +258,77 @@ func (l *Linode) setupManagedPlacementGroup(ctx context.Context, tag string) err
 	return nil
 }
 
+// setupManagedVPC constructs the managedVPC and creates the Linode VPC +
+// declared subnets at Configure time. Same eager-create rationale as the
+// firewall / PG: PAT-scope mistakes (e.g. PAT missing VPCs: R/W) surface
+// at startup, not at the first job arrival.
+func (l *Linode) setupManagedVPC(ctx context.Context, tag string) error {
+	v := newManagedVPC(*l.cfg.VPC, tag, l.cfg.Region, &l.client, slog.Default())
+	if err := v.ensureAtConfigure(ctx); err != nil {
+		return fmt.Errorf("linode: vpc: %w", err)
+	}
+	l.vpc = v
+	return nil
+}
+
+// setupManagedCache constructs the managedBucket + managedCache and
+// stands up the cache VM + Object Storage bucket + scoped access key at
+// Configure time. Order matters: this runs AFTER setupManagedFirewall +
+// setupManagedVPC so the cache VM can attach to both. PAT-scope
+// mistakes (Object Storage: R/W, account not enabled for Object
+// Storage) surface here at startup.
+func (l *Linode) setupManagedCache(ctx context.Context, tag string) error {
+	bucket := newManagedBucket(tag, l.cfg.Region, bucketLabelFor(tag), &l.client, slog.Default())
+	cache := newManagedCache(*l.cfg.Cache, tag, l.cfg.Region, &l.client, bucket, slog.Default())
+	var fwID int
+	switch {
+	case l.fw != nil:
+		fwID = l.fw.id
+	case l.cfg.FirewallID != 0:
+		fwID = l.cfg.FirewallID
+	}
+	// VPC is guaranteed non-nil here by autoSynthesizeVPCForCache; a
+	// missing worker subnet would be a synthesis bug, so a zero subnet
+	// ID degrades gracefully (cache VM gets a public NIC only) rather
+	// than crashing.
+	var subID int
+	if l.vpc != nil {
+		subID = l.vpc.workerSubnetID()
+	}
+	// authorized_keys is left empty in PR 2a — the cache VM has no SSH
+	// key wired in by fjb; operators use Linode Lish for break-glass.
+	// PR 2b will pass the orchestrator's public key here.
+	cache.setHardwareContext(fwID, subID, "")
+	if err := cache.ensureAtConfigure(ctx); err != nil {
+		return fmt.Errorf("linode: cache: %w", err)
+	}
+	l.cache = cache
+	return nil
+}
+
 // Provision creates a tagged Linode with the rendered cloud-init as user-data.
 func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.Instance, error) {
 	rootPass, err := randomPassword(32)
 	if err != nil {
 		return provider.Instance{}, err
+	}
+	// If the managed cache is enabled, wrap the orchestrator-rendered
+	// cloud-init in a multipart MIME message that adds a second
+	// cloud-config part with the cache CA trust, /etc/hosts entry, and
+	// containerd pull-only mirror config. cloud-init merges the two
+	// parts natively. Provider-side wrap keeps the orchestrator and
+	// the `bootstrap` package free of provider-specific concerns.
+	userData := spec.UserData
+	if l.cache != nil {
+		extras, xerr := l.cache.workerExtras(ctx)
+		if xerr != nil {
+			return provider.Instance{}, fmt.Errorf("linode: cache worker extras: %w", xerr)
+		}
+		wrapped, werr := wrapWorkerUserDataForCache(spec.UserData, extras)
+		if werr != nil {
+			return provider.Instance{}, fmt.Errorf("linode: wrap worker user-data: %w", werr)
+		}
+		userData = wrapped
 	}
 	booted := true
 	opts := linodego.InstanceCreateOptions{
@@ -188,7 +340,7 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 		RootPass: rootPass,
 		Booted:   &booted,
 		Metadata: &linodego.InstanceMetadataOptions{
-			UserData: base64.StdEncoding.EncodeToString([]byte(spec.UserData)),
+			UserData: base64.StdEncoding.EncodeToString([]byte(userData)),
 		},
 	}
 	if key := strings.TrimSpace(spec.AuthorizedKey); key != "" {
@@ -205,6 +357,20 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 		opts.PlacementGroup = &linodego.InstanceCreatePlacementGroupOptions{ID: l.pg.id}
 	case l.cfg.PlacementGroupID != 0:
 		opts.PlacementGroup = &linodego.InstanceCreatePlacementGroupOptions{ID: l.cfg.PlacementGroupID}
+	}
+	// VPC: workers keep their public NIC (they need public egress for
+	// registries, package mirrors, etc.) and gain a VPC NIC on the
+	// resolved worker subnet. Explicit Interfaces requires us to declare
+	// the public NIC too — Linode doesn't auto-add it once we set the
+	// field. Skip the VPC NIC if the subnet ID isn't populated; ensureAt-
+	// Configure should have set it, so this is defensive.
+	if l.vpc != nil {
+		if subID := l.vpc.workerSubnetID(); subID != 0 {
+			opts.Interfaces = []linodego.InstanceConfigInterfaceCreateOptions{
+				{Purpose: linodego.InterfacePurposePublic, Primary: true},
+				{Purpose: linodego.InterfacePurposeVPC, SubnetID: &subID},
+			}
+		}
 	}
 	inst, err := l.client.CreateInstance(ctx, opts)
 	if err != nil {
@@ -228,11 +394,22 @@ func (l *Linode) Destroy(ctx context.Context, id string) error {
 	if err := l.client.DeleteInstance(ctx, n); err != nil {
 		return fmt.Errorf("linode: delete instance %d: %w", n, err)
 	}
+	// Cache first: it owns its own Linode + bucket + scoped key, all of
+	// which can be torn down without any dependency on the worker
+	// firewall / VPC reap below. Doing cache first also avoids a window
+	// where the cache VM is still attached to a VPC subnet we're about
+	// to delete.
+	if l.cache != nil {
+		l.cache.maybeCleanupCache(ctx)
+	}
 	if l.fw != nil {
 		l.fw.maybeCleanupFirewall(ctx)
 	}
 	if l.pg != nil {
 		l.pg.maybeCleanupPlacementGroup(ctx)
+	}
+	if l.vpc != nil {
+		l.vpc.maybeCleanupVPC(ctx)
 	}
 	return nil
 }

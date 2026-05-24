@@ -24,20 +24,41 @@ provider in CI.
    `poll.billing_hour: 60s, poll.hour_margin: 10s`, so the orchestrator's
    hourly-cycle teardown fires within ~50s of the next cycle boundary and the
    Linode is destroyed.
-5. Cleanup destroys any leaked instance carrying the run's tag, stops
+5. Between worker `job complete` and the idle teardown wait, the script
+   SSHes to the worker and runs read-only **cache-scenario assertions**
+   (FJB-6 PR 3): `/etc/hosts` maps `cache.fjb.internal` to an RFC1918
+   IP; the fjb CA is installed in the system trust store; the
+   containerd `hosts.toml` for the upstream is **PULL-ONLY** (no
+   `"push"` in capabilities — the load-bearing safety boundary that
+   keeps push traffic going direct to upstream); zot's `/v2/` endpoint
+   is reachable from the worker over the VPC NIC with the cert
+   verifying against the installed CA; the CA the worker trusts is
+   byte-identical to the one in the orchestrator's `cache.tls.ca_dir`.
+   Any failure aborts the run before teardown so the workdir survives
+   for inspection.
+6. Cleanup destroys any leaked instance carrying the run's tag, stops
    fj-bellows, and removes the Forgejo container — on **every** exit path
    including failure and SIGINT.
 
 ## Local: `run-local.sh`
 
 ```sh
-echo "$YOUR_LINODE_PAT" > ~/.linode.pat   # Linodes: R/W + Firewalls: R/W
+echo "$YOUR_LINODE_PAT" > ~/.linode.pat   # see PAT scope below
 chmod 600 ~/.linode.pat
 test/e2e-linode/run-local.sh
 ```
 
-- Cost ceiling: one paid hour on `g6-nanode-1` (~$0.0075).
-- A pre-flight cleanup destroys any prior `fj-bellows-e2e-local-*` instances.
+**PAT scope** (managed firewall + VPC + cache, all exercised by every
+run): `Linodes: Read/Write`, `Firewalls: Read/Write`, `VPCs: Read/Write`,
+`Object Storage: Read/Write`. Object Storage must also be **enabled on
+the Linode account** (one-click + flat $5/mo at Cloud Manager → Object
+Storage); the Configure-time cache create will 403 otherwise.
+
+- Cost ceiling: one paid hour on `g6-nanode-1` (~$0.0075). VPCs don't add
+  cost on Linode.
+- A pre-flight cleanup destroys any prior `fj-bellows-e2e-local-*`
+  instances, firewalls, and VPCs (the last via label-prefix match — VPCs
+  have no `tags` field).
 - Requires `docker`, `ssh`, `ssh-keygen`, `curl`, `jq`, `go` on PATH.
 - The token file path is `~/.linode.pat` by default; override with
   `LINODE_PAT_FILE=/path/to/pat`.

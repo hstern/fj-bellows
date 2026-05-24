@@ -79,6 +79,49 @@ provider_config:
   # exclusive with `placement_group:` above. Only needs Linodes: R/W.
   # placement_group_id: 67890
 
+  # Managed VPC. Workers gain a VPC NIC on the worker subnet in addition to
+  # their public NIC. Useful by itself for worker-to-worker private comms;
+  # a future feature (pull-through cache, FJB-6) attaches the cache VM to a
+  # second subnet on this same VPC and binds its registry to the VPC IP.
+  # Reaped on last Destroy. Adds VPCs: R/W to the PAT scope.
+  # vpc:
+  #   # Subnet CIDRs must be RFC1918 (10/8, 172.16/12, 192.168/16); Linode
+  #   # rejects CGNAT and public ranges. CIDRs don't escape the VPC, so any
+  #   # vacant RFC1918 range is fine — pick one that doesn't overlap your
+  #   # LAN if you ever VPN/peer.
+  #   subnets:
+  #     cache:
+  #       ipv4: 10.0.0.0/24
+  #   # Optional: pick which subnet workers attach to. Defaults to the
+  #   # alphabetically-first key in subnets (so single-subnet configs need
+  #   # no override).
+  #   # worker_subnet: cache
+
+  # Managed pull-through registry cache (FJB-6 PR 2a + PR 2b). ABSENT =
+  # no cache: workers pull direct from upstream. PRESENT = one zot VM +
+  # one Object Storage bucket per deployment, plus a multipart-MIME wrap
+  # on each worker's cloud-init that adds CA trust, a /etc/hosts entry
+  # for the cache hostname, and a containerd hosts.toml that redirects
+  # PULLS of `upstream.url`'s host through the cache. Pushes to that
+  # hostname still go direct to upstream (pull-only mirror capabilities
+  # — the boundary that makes "no push replication" safe). Auto-
+  # synthesizes the `vpc:` block above if not declared. Adds
+  # `Object Storage: R/W` to the PAT scope and requires Object Storage
+  # to be enabled on the Linode account ($5/mo flat, one-click at Cloud
+  # Manager → Object Storage).
+  # cache:
+  #   upstream:
+  #     url: https://forgejo.example.com/v2/
+  #   # CA persistence path. Adopt-existing on daemon restart requires
+  #   # the CA dir to survive between restarts. Default under
+  #   # os.UserConfigDir(); set to a stable path when running fjb as a
+  #   # system service.
+  #   # tls:
+  #   #   ca_dir: /var/lib/fj-bellows/example/cache-ca
+  #   # type: g6-nanode-1          # bump to g6-standard-1 under burst
+  #   # image: linode/debian12
+  #   # zot_version: 2.1.7         # pinned; bump deliberately
+
 poll:
   # How often to reconcile the queue against runners and instances.
   interval: 10s
