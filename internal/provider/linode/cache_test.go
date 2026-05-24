@@ -12,6 +12,15 @@ import (
 	"github.com/linode/linodego"
 )
 
+const (
+	testUpstreamURL = "https://upstream.example/v2/"
+	// Placeholder PEM body used by tests that exercise the cloud-init
+	// renderer with non-empty server cert / key fields. Not a real PEM
+	// — the renderer doesn't parse the content, it just substitutes
+	// it into the template.
+	testStubPEM = "STUB"
+)
+
 // fakeCacheClient is a hand-rolled cacheClient (per repo conventions —
 // no codegen). Stores Linode instances by ID. Tests pre-seed instances
 // to exercise the adopt-existing path.
@@ -20,16 +29,36 @@ type fakeCacheClient struct {
 	insts  map[int]*linodego.Instance
 	nextID int
 
-	createErr error
+	// configs map linodeID → instance configs (with the inline VPC
+	// interface that carries the assigned VPC IPv4). Tests pre-seed
+	// when exercising the workerExtras / VPC-IP-lookup path.
+	configs map[int][]linodego.InstanceConfig
 
-	listCalls   int
-	createCalls int
-	deleteCalls int
-	lastCreate  *linodego.InstanceCreateOptions
+	createErr      error
+	listConfigsErr error
+
+	listCalls        int
+	createCalls      int
+	deleteCalls      int
+	listConfigsCalls int
+	lastCreate       *linodego.InstanceCreateOptions
 }
 
 func newFakeCacheClient() *fakeCacheClient {
-	return &fakeCacheClient{insts: map[int]*linodego.Instance{}}
+	return &fakeCacheClient{
+		insts:   map[int]*linodego.Instance{},
+		configs: map[int][]linodego.InstanceConfig{},
+	}
+}
+
+func (f *fakeCacheClient) ListInstanceConfigs(_ context.Context, linodeID int, _ *linodego.ListOptions) ([]linodego.InstanceConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listConfigsCalls++
+	if f.listConfigsErr != nil {
+		return nil, f.listConfigsErr
+	}
+	return append([]linodego.InstanceConfig(nil), f.configs[linodeID]...), nil
 }
 
 func (f *fakeCacheClient) ListInstances(_ context.Context, _ *linodego.ListOptions) ([]linodego.Instance, error) {
@@ -74,8 +103,38 @@ func (f *fakeCacheClient) DeleteInstance(_ context.Context, id int) error {
 	return nil
 }
 
-func newTestManagedCache(client cacheClient, bucket *managedBucket) *managedCache {
-	return newManagedCache(cacheConfig{}, "test-tag", testBucketRegion, client, bucket, slog.Default())
+// newTestManagedCache injects a config that satisfies validate() — a
+// stub upstream URL and a temp-dir CA path — so each test doesn't
+// have to repeat the boilerplate. Tests that want to exercise
+// alternate configs can call newManagedCache directly.
+func newTestManagedCache(t *testing.T, client cacheClient, bucket *managedBucket) *managedCache {
+	t.Helper()
+	cfg := cacheConfig{
+		Upstream: &cacheUpstreamConfig{URL: testUpstreamURL},
+		TLS:      &cacheTLSConfig{CADir: t.TempDir()},
+	}
+	return newManagedCache(cfg, "test-tag", testBucketRegion, client, bucket, slog.Default())
+}
+
+// newAdoptableTestManagedCache returns a managedCache whose CA dir is
+// pre-seeded with a valid CA pair, simulating the "daemon restart
+// with persistent CA" scenario. Use this when the test wants ensure-
+// AtConfigure to take the adopt-existing path on an existing cache
+// VM — without pre-seeded CA, ensureAtConfigure rejects adoption with
+// the "fresh CA but existing VM" mismatch error.
+func newAdoptableTestManagedCache(t *testing.T, client cacheClient, bucket *managedBucket) *managedCache {
+	t.Helper()
+	caDir := t.TempDir()
+	// Generate + persist a CA so the next loadOrGenerateCertPair call
+	// finds it on disk and reports freshCA=false.
+	if _, _, _, err := generateAndPersistCA(caDir); err != nil {
+		t.Fatalf("seed CA dir: %v", err)
+	}
+	cfg := cacheConfig{
+		Upstream: &cacheUpstreamConfig{URL: testUpstreamURL},
+		TLS:      &cacheTLSConfig{CADir: caDir},
+	}
+	return newManagedCache(cfg, "test-tag", testBucketRegion, client, bucket, slog.Default())
 }
 
 func TestCacheConfigDefaults(t *testing.T) {
@@ -102,7 +161,7 @@ func TestCacheEnsureAtConfigureCreatesFresh(t *testing.T) {
 	fc := newFakeCacheClient()
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
-	cache := newTestManagedCache(fc, bucket)
+	cache := newTestManagedCache(t, fc, bucket)
 	cache.setHardwareContext(7777, 8888, "")
 
 	if err := cache.ensureAtConfigure(ctx); err != nil {
@@ -173,7 +232,7 @@ func TestCacheEnsureAtConfigureAdoptsExistingLinode(t *testing.T) {
 	}
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
-	cache := newTestManagedCache(fc, bucket)
+	cache := newAdoptableTestManagedCache(t, fc, bucket)
 
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		t.Fatalf("ensureAtConfigure: %v", err)
@@ -200,7 +259,7 @@ func TestCacheMaybeCleanupFreshCreatePath(t *testing.T) {
 	fc := newFakeCacheClient()
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
-	cache := newTestManagedCache(fc, bucket)
+	cache := newTestManagedCache(t, fc, bucket)
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		t.Fatalf("ensureAtConfigure: %v", err)
 	}
@@ -235,7 +294,7 @@ func TestCacheMaybeCleanupAdoptedPathSkipsBucket(t *testing.T) {
 	}
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
-	cache := newTestManagedCache(fc, bucket)
+	cache := newAdoptableTestManagedCache(t, fc, bucket)
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		t.Fatalf("ensureAtConfigure: %v", err)
 	}
@@ -276,20 +335,39 @@ func TestCacheLinodeLabelSanitizesForLinode(t *testing.T) {
 }
 
 func TestRenderCacheCloudInitRequiresAllFields(t *testing.T) {
+	// Common base — fully-populated params. Each case wipes ONE
+	// required field and asserts render rejects it. Using a base +
+	// clone keeps the table compact as the param set grows.
+	base := cacheCloudInitParams{
+		Bucket:        "b",
+		Region:        "r",
+		Endpoint:      "https://x",
+		AccessKey:     "AK",
+		SecretKey:     "SK",
+		ZotVersion:    "1.0.0",
+		ServerCertPEM: testStubPEM,
+		ServerKeyPEM:  testStubPEM,
+		UpstreamURL:   "https://u",
+	}
 	cases := []struct {
 		name string
-		p    cacheCloudInitParams
+		wipe func(*cacheCloudInitParams)
 	}{
-		{name: "missing bucket", p: cacheCloudInitParams{Region: "r", Endpoint: "e", AccessKey: "a", SecretKey: "s", ZotVersion: "1"}},
-		{name: "missing region", p: cacheCloudInitParams{Bucket: "b", Endpoint: "e", AccessKey: "a", SecretKey: "s", ZotVersion: "1"}},
-		{name: "missing endpoint", p: cacheCloudInitParams{Bucket: "b", Region: "r", AccessKey: "a", SecretKey: "s", ZotVersion: "1"}},
-		{name: "missing access key", p: cacheCloudInitParams{Bucket: "b", Region: "r", Endpoint: "e", SecretKey: "s", ZotVersion: "1"}},
-		{name: "missing secret key", p: cacheCloudInitParams{Bucket: "b", Region: "r", Endpoint: "e", AccessKey: "a", ZotVersion: "1"}},
-		{name: "missing zot version", p: cacheCloudInitParams{Bucket: "b", Region: "r", Endpoint: "e", AccessKey: "a", SecretKey: "s"}},
+		{name: "missing bucket", wipe: func(p *cacheCloudInitParams) { p.Bucket = "" }},
+		{name: "missing region", wipe: func(p *cacheCloudInitParams) { p.Region = "" }},
+		{name: "missing endpoint", wipe: func(p *cacheCloudInitParams) { p.Endpoint = "" }},
+		{name: "missing access key", wipe: func(p *cacheCloudInitParams) { p.AccessKey = "" }},
+		{name: "missing secret key", wipe: func(p *cacheCloudInitParams) { p.SecretKey = "" }},
+		{name: "missing zot version", wipe: func(p *cacheCloudInitParams) { p.ZotVersion = "" }},
+		{name: "missing server cert", wipe: func(p *cacheCloudInitParams) { p.ServerCertPEM = "" }},
+		{name: "missing server key", wipe: func(p *cacheCloudInitParams) { p.ServerKeyPEM = "" }},
+		{name: "missing upstream URL", wipe: func(p *cacheCloudInitParams) { p.UpstreamURL = "" }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, err := renderCacheCloudInit(c.p); err == nil {
+			p := base
+			c.wipe(&p)
+			if _, err := renderCacheCloudInit(p); err == nil {
 				t.Errorf("expected error for %q", c.name)
 			}
 		})
@@ -297,13 +375,21 @@ func TestRenderCacheCloudInitRequiresAllFields(t *testing.T) {
 }
 
 func TestRenderCacheCloudInitProducesValidCloudInit(t *testing.T) {
+	// Stub PEM strings deliberately look like real PEM headers so the
+	// rendered output asserts can grep for them. They are NOT
+	// credentials — the renderer is a string-substitution template.
+	const stubCertPEM = "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n"
+	const stubKeyPEM = "-----BEGIN EC PRIVATE KEY-----\nMOCK\n-----END EC PRIVATE KEY-----\n" //nolint:gosec // G101: test fixture, not a real key
 	out, err := renderCacheCloudInit(cacheCloudInitParams{
-		Bucket:     "fjb-cache-test",
-		Region:     testBucketRegion,
-		Endpoint:   testBucketEndpoint,
-		AccessKey:  "AK",
-		SecretKey:  "SK",
-		ZotVersion: "2.1.7",
+		Bucket:        "fjb-cache-test",
+		Region:        testBucketRegion,
+		Endpoint:      testBucketEndpoint,
+		AccessKey:     "AK",
+		SecretKey:     "SK",
+		ZotVersion:    "2.1.7",
+		ServerCertPEM: stubCertPEM,
+		ServerKeyPEM:  stubKeyPEM,
+		UpstreamURL:   testUpstreamURL,
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -318,6 +404,11 @@ func TestRenderCacheCloudInitProducesValidCloudInit(t *testing.T) {
 		"zot.service",
 		"systemctl enable --now zot.service",
 		defaultCacheReadyFile,
+		testUpstreamURL,               // sync extension
+		"-----BEGIN CERTIFICATE-----", // baked-in server cert
+		"-----BEGIN EC PRIVATE KEY-----",
+		"/etc/zot/tls/cert.pem",
+		"/etc/zot/tls/key.pem",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered cloud-init missing substring %q\n---\n%s", want, out)
@@ -327,12 +418,15 @@ func TestRenderCacheCloudInitProducesValidCloudInit(t *testing.T) {
 
 func TestRenderCacheCloudInitReadyFileDefaults(t *testing.T) {
 	out, err := renderCacheCloudInit(cacheCloudInitParams{
-		Bucket:     "b",
-		Region:     "r",
-		Endpoint:   "https://x",
-		AccessKey:  "AK",
-		SecretKey:  "SK",
-		ZotVersion: "1.0.0",
+		Bucket:        "b",
+		Region:        "r",
+		Endpoint:      "https://x",
+		AccessKey:     "AK",
+		SecretKey:     "SK",
+		ZotVersion:    "1.0.0",
+		ServerCertPEM: testStubPEM,
+		ServerKeyPEM:  testStubPEM,
+		UpstreamURL:   "https://u",
 		// ReadyFile intentionally omitted
 	})
 	if err != nil {
@@ -359,7 +453,7 @@ func TestFindCacheLinodeIgnoresOtherDeployments(t *testing.T) {
 	fc.insts[1] = &linodego.Instance{ID: 1, Label: "other", Tags: []string{cacheLinodeTag("other-tag")}}
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
-	cache := newTestManagedCache(fc, bucket)
+	cache := newTestManagedCache(t, fc, bucket)
 
 	got, err := cache.findCacheLinode(ctx)
 	if err != nil {
@@ -375,7 +469,7 @@ func TestCacheMaybeCleanupNoOpWhenNothingProvisioned(t *testing.T) {
 	fc := newFakeCacheClient()
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
-	cache := newTestManagedCache(fc, bucket)
+	cache := newTestManagedCache(t, fc, bucket)
 
 	cache.maybeCleanupCache(ctx)
 
@@ -397,7 +491,7 @@ func TestCacheEnsureAtConfigureSurfacesCreateError(t *testing.T) {
 	fc.createErr = errors.New("simulated 403")
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
-	cache := newTestManagedCache(fc, bucket)
+	cache := newTestManagedCache(t, fc, bucket)
 
 	err := cache.ensureAtConfigure(ctx)
 	if err == nil || !strings.Contains(err.Error(), "create cache linode") {
@@ -407,4 +501,114 @@ func TestCacheEnsureAtConfigureSurfacesCreateError(t *testing.T) {
 
 func TestCacheClientInterfaceCompiles(_ *testing.T) {
 	var _ cacheClient = (*linodego.Client)(nil)
+}
+
+func TestPreflightCacheRegionAcceptsSupportedRegion(t *testing.T) {
+	// Default fake advertises us-ord on both surfaces; pre-flight
+	// should succeed for it without error.
+	fake := newFakeBucketClient()
+	if err := preflightCacheRegion(context.Background(), fake, testBucketRegion); err != nil {
+		t.Errorf("preflight: %v", err)
+	}
+}
+
+func TestPreflightCacheRegionRejectsUnsupportedRegion(t *testing.T) {
+	// Mimics ca-tor today: not in /endpoints, not in /clusters.
+	// Pre-flight must surface this clearly so an operator picks a
+	// supported region — without firewall + VPC getting created
+	// first.
+	fake := newFakeBucketClient()
+	fake.endpoints = nil
+	fake.clusters = nil
+	err := preflightCacheRegion(context.Background(), fake, "ca-tor")
+	if err == nil {
+		t.Fatal("expected error for unsupported region")
+	}
+	for _, want := range []string{"ca-tor", "object storage", "not available"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing substring %q", err.Error(), want)
+		}
+	}
+}
+
+func TestWorkerExtrasLooksUpAndCachesVPCIP(t *testing.T) {
+	ctx := context.Background()
+	fc := newFakeCacheClient()
+	fb := newFakeBucketClient()
+	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
+	cache := newTestManagedCache(t, fc, bucket)
+	cache.setHardwareContext(7777, 8888, "")
+
+	if err := cache.ensureAtConfigure(ctx); err != nil {
+		t.Fatalf("ensureAtConfigure: %v", err)
+	}
+	// Seed the cache linode's VPC interface IP — production reads
+	// this from Linode after the VM settles on its VPC IP.
+	wantIP := "10.0.0.42"
+	subnetID := 8888
+	fc.configs[cache.linodeID] = []linodego.InstanceConfig{{
+		ID: 1,
+		Interfaces: []linodego.InstanceConfigInterface{
+			{Purpose: linodego.InterfacePurposePublic, Primary: true},
+			{
+				Purpose:  linodego.InterfacePurposeVPC,
+				SubnetID: &subnetID,
+				IPv4:     &linodego.VPCIPv4{VPC: wantIP},
+			},
+		},
+	}}
+
+	x, err := cache.workerExtras(ctx)
+	if err != nil {
+		t.Fatalf("workerExtras: %v", err)
+	}
+	if x.CacheIP != wantIP {
+		t.Errorf("CacheIP = %q, want %q", x.CacheIP, wantIP)
+	}
+	if x.CacheHost != defaultCacheHostname {
+		t.Errorf("CacheHost = %q, want %q", x.CacheHost, defaultCacheHostname)
+	}
+	if x.CachePort != defaultCachePort {
+		t.Errorf("CachePort = %d, want %d", x.CachePort, defaultCachePort)
+	}
+	if x.UpstreamHost != "upstream.example" {
+		t.Errorf("UpstreamHost = %q, want %q (parsed from %q)", x.UpstreamHost, "upstream.example", testUpstreamURL)
+	}
+	if x.CACertPEM == "" {
+		t.Error("CACertPEM empty")
+	}
+	// Second call should NOT re-list configs (cached).
+	beforeCalls := fc.listConfigsCalls
+	if _, err := cache.workerExtras(ctx); err != nil {
+		t.Fatalf("second workerExtras: %v", err)
+	}
+	if fc.listConfigsCalls != beforeCalls {
+		t.Errorf("workerExtras should cache VPC IP; ListInstanceConfigs called %d extra times",
+			fc.listConfigsCalls-beforeCalls)
+	}
+}
+
+func TestWorkerExtrasErrorsWhenVPCIPNotAssigned(t *testing.T) {
+	// Cache VM exists but its VPC interface hasn't been assigned an
+	// IP yet (e.g. still booting). workerExtras should surface this
+	// so the orchestrator's tick-driven Provision retries next round
+	// rather than provisioning a worker with an empty CacheIP.
+	ctx := context.Background()
+	fc := newFakeCacheClient()
+	fb := newFakeBucketClient()
+	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
+	cache := newTestManagedCache(t, fc, bucket)
+	cache.setHardwareContext(7777, 8888, "")
+
+	if err := cache.ensureAtConfigure(ctx); err != nil {
+		t.Fatalf("ensureAtConfigure: %v", err)
+	}
+	// No configs seeded → no VPC IP returned.
+	_, err := cache.workerExtras(ctx)
+	if err == nil {
+		t.Fatal("expected error when VPC IP not yet assigned")
+	}
+	if !strings.Contains(err.Error(), "VPC") {
+		t.Errorf("error should mention VPC IP, got: %v", err)
+	}
 }

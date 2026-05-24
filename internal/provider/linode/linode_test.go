@@ -284,10 +284,11 @@ vpc:
 	}
 }
 
-func TestConfigureCacheAutoSynthesizesVPC(t *testing.T) {
-	// `cache: {}` without `vpc:` must auto-populate cfg.VPC so workers
-	// can reach the cache over a private NIC. The auto-synthesis runs
-	// at Configure-time after validateAll, before setupManagedVPC.
+func TestConfigureCacheRequiresUpstreamURL(t *testing.T) {
+	// PR 2b — cache: {} (no upstream) must fail validation. Workers'
+	// containerd mirror needs an upstream host; zot's sync extension
+	// needs an upstream URL. A future PR may default this from
+	// forgejo.url, but for now operators must declare it.
 	l := &Linode{}
 	node := nodeFromYAML(t, `
 region: example-region
@@ -298,12 +299,38 @@ cache: {}
 `)
 	err := l.Configure(context.Background(), "testtag", node)
 	if err == nil {
-		t.Fatal("expected error from VPC create with fake token")
+		t.Fatal("expected validation error: cache.upstream.url is required")
 	}
-	// Even though the API call fails, the auto-synthesis should have
+	if !strings.Contains(err.Error(), "upstream") {
+		t.Errorf("error should mention upstream, got: %v", err)
+	}
+}
+
+func TestConfigureCacheAutoSynthesizesVPC(t *testing.T) {
+	// cache: with upstream but no vpc: must auto-populate cfg.VPC so
+	// workers can reach the cache over a private NIC. The auto-
+	// synthesis runs at Configure-time after validateAll. The
+	// pre-flight + API calls beyond that point all fail under the
+	// fake token, but the auto-synthesis runs first so we can
+	// assert it ran by inspecting l.cfg.VPC even after the error.
+	l := &Linode{}
+	node := nodeFromYAML(t, `
+region: example-region
+type: example-type
+image: example/image
+token: abc123
+cache:
+  upstream:
+    url: https://upstream.example/v2/
+`)
+	err := l.Configure(context.Background(), "testtag", node)
+	if err == nil {
+		t.Fatal("expected error from cache setup with fake token")
+	}
+	// Even though Configure errors, the auto-synthesis should have
 	// run and the VPC config should be populated on l.cfg.
 	if l.cfg.VPC == nil {
-		t.Fatal("cache: {} did not auto-synthesize cfg.VPC")
+		t.Fatal("cache: did not auto-synthesize cfg.VPC")
 	}
 	sub, ok := l.cfg.VPC.Subnets[defaultCacheSubnetName]
 	if !ok {
@@ -328,7 +355,9 @@ vpc:
   subnets:
     cache:
       ipv4: 192.168.55.0/24
-cache: {}
+cache:
+  upstream:
+    url: https://upstream.example/v2/
 `)
 	_ = l.Configure(context.Background(), "testtag", node) // API failure is expected
 	if l.cfg.VPC == nil {
@@ -352,7 +381,9 @@ region: example-region
 type: example-type
 image: example/image
 token: abc123
-cache: {}
+cache:
+  upstream:
+    url: https://upstream.example/v2/
 `)
 	err := l.Configure(context.Background(), "testtag", node)
 	if err == nil {

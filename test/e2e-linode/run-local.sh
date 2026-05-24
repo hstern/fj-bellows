@@ -189,12 +189,20 @@ provider_config:
     subnets:
       cache:
         ipv4: 10.0.0.0/24
-  # Managed pull-through cache (FJB-6 PR 2a). Adds Object Storage R/W to
-  # the PAT scope and requires Object Storage to be enabled on the Linode
-  # account (one-click in the Cloud Manager, flat \$5/mo). Cache VM tag is
-  # \$TAG-cache so the worker prefix sweep above also reaps it; bucket
-  # and key sweeps live in destroy_tagged.
-  cache: {}
+  # Managed pull-through cache (FJB-6 PR 2a + PR 2b). Adds Object
+  # Storage R/W to the PAT scope and requires Object Storage to be
+  # enabled on the Linode account (one-click in the Cloud Manager,
+  # flat 5 USD/mo). Cache VM tag is \$TAG-cache so the worker prefix
+  # sweep above also reaps it; bucket and key sweeps live in
+  # destroy_tagged. The PR 2b worker integration wraps each worker
+  # cloud-init with the cache CA, /etc/hosts entry, and a containerd
+  # mirror config for upstream.example.com (a placeholder that does
+  # not conflict with the docker pulls workers make for the e2e job).
+  cache:
+    upstream:
+      url: https://upstream.example.com/v2/
+    tls:
+      ca_dir: $WORKDIR/cache-ca
 ssh:
   private_key_file: $KEY
   user: root

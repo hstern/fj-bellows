@@ -99,6 +99,19 @@ func (l *Linode) Configure(ctx context.Context, tag string, node yaml.Node) erro
 	l.client = client
 	l.tag = tag
 
+	// Pre-flight Object Storage region availability. Runs BEFORE the
+	// setupManaged* sequence so a region that doesn't support OS
+	// (e.g. ca-tor today) fails Configure with a clear error and
+	// zero resources created — without this, firewall + VPC would
+	// already exist by the time setupManagedCache hits the OS API
+	// and errored with the same information. Must run AFTER l.client
+	// is initialised above.
+	if l.cfg.Cache != nil {
+		if err := preflightCacheRegion(ctx, &l.client, l.cfg.Region); err != nil {
+			return fmt.Errorf("linode: cache: %w", err)
+		}
+	}
+
 	if l.cfg.Firewall != nil {
 		if err := l.setupManagedFirewall(ctx, tag); err != nil {
 			return err
@@ -299,6 +312,24 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	if err != nil {
 		return provider.Instance{}, err
 	}
+	// If the managed cache is enabled, wrap the orchestrator-rendered
+	// cloud-init in a multipart MIME message that adds a second
+	// cloud-config part with the cache CA trust, /etc/hosts entry, and
+	// containerd pull-only mirror config. cloud-init merges the two
+	// parts natively. Provider-side wrap keeps the orchestrator and
+	// the `bootstrap` package free of provider-specific concerns.
+	userData := spec.UserData
+	if l.cache != nil {
+		extras, xerr := l.cache.workerExtras(ctx)
+		if xerr != nil {
+			return provider.Instance{}, fmt.Errorf("linode: cache worker extras: %w", xerr)
+		}
+		wrapped, werr := wrapWorkerUserDataForCache(spec.UserData, extras)
+		if werr != nil {
+			return provider.Instance{}, fmt.Errorf("linode: wrap worker user-data: %w", werr)
+		}
+		userData = wrapped
+	}
 	booted := true
 	opts := linodego.InstanceCreateOptions{
 		Region:   l.cfg.Region,
@@ -309,7 +340,7 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 		RootPass: rootPass,
 		Booted:   &booted,
 		Metadata: &linodego.InstanceMetadataOptions{
-			UserData: base64.StdEncoding.EncodeToString([]byte(spec.UserData)),
+			UserData: base64.StdEncoding.EncodeToString([]byte(userData)),
 		},
 	}
 	if key := strings.TrimSpace(spec.AuthorizedKey); key != "" {

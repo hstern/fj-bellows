@@ -1,0 +1,46 @@
+#cloud-config
+# Worker cache-extras fragment (FJB-6 PR 2b). cloud-init merges this
+# with the base worker user-data the orchestrator rendered.
+#
+# merge_how is required because cloud-init's default merge strategy
+# REPLACES lists across multipart parts — without this directive
+# write_files and runcmd from this fragment would clobber the base
+# bootstrap's lists (notably its SSH host-key install, which the
+# orchestrator's dispatcher pins against). The settings below
+# explicitly append both lists; dicts are recursive-no-replace so
+# string scalars don't get accidentally overwritten either.
+merge_how:
+  - name: list
+    settings: [append]
+  - name: dict
+    settings: [no_replace, recurse_list]
+  - name: str
+    settings: [append]
+# Three things are added:
+#  1. The fjb-managed CA, so workers trust the cache's TLS cert.
+#  2. An /etc/hosts entry mapping the cache hostname to its VPC IP
+#     (no DNS dependency — workers reach the cache by IP via the
+#     hosts file lookup).
+#  3. A containerd hosts.toml that redirects PULLS from the upstream
+#     registry through the cache. Capabilities are deliberately
+#     PULL-ONLY — pushes to the upstream hostname continue to take
+#     the public NIC direct to upstream, which is the boundary that
+#     makes "no push replication" safe.
+write_files:
+  - path: /usr/local/share/ca-certificates/fjb-cache.crt
+    permissions: '0644'
+    content: |
+{{.CACertPEM | indent 6}}
+  - path: /etc/hosts
+    append: true
+    content: |
+      {{.CacheIP}} {{.CacheHost}}
+  - path: /etc/containerd/certs.d/{{.UpstreamHost}}/hosts.toml
+    permissions: '0644'
+    content: |
+      server = "https://{{.UpstreamHost}}"
+
+      [host."https://{{.CacheHost}}:{{.CachePort}}"]
+        capabilities = ["pull", "resolve"]
+runcmd:
+  - update-ca-certificates

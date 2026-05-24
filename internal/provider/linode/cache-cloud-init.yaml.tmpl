@@ -1,8 +1,8 @@
 #cloud-config
-# Cache VM bootstrap for fj-bellows (FJB-6). Installs zot, generates a
-# self-signed TLS cert (PR 2b will switch to an fjb-managed CA so workers
-# can verify), writes the zot config that points at the deployment's
-# Object Storage bucket, and starts the systemd unit.
+# Cache VM bootstrap for fj-bellows (FJB-6). Installs zot, writes the
+# fjb-managed TLS cert (signed by the persisted CA so workers trust it),
+# configures zot's S3 storage driver + sync extension, and starts the
+# systemd unit.
 #
 # Bound to 0.0.0.0:5000: the deployment firewall drops public-inbound
 # tcp/5000 (only tcp/22 is open per the auto sentinel), and the VPC NIC
@@ -12,7 +12,6 @@ package_update: true
 packages:
   - curl
   - ca-certificates
-  - openssl
 write_files:
   - path: /etc/zot/config.json
     permissions: '0640'
@@ -43,8 +42,27 @@ write_files:
         },
         "log": {
           "level": "info"
+        },
+        "extensions": {
+          "sync": {
+            "enable": true,
+            "registries": [{
+              "urls": ["{{.UpstreamURL}}"],
+              "onDemand": true,
+              "tlsVerify": true,
+              "content": [{"prefix": "**"}]
+            }]
+          }
         }
       }
+  - path: /etc/zot/tls/cert.pem
+    permissions: '0644'
+    content: |
+{{.ServerCertPEM | indent 6}}
+  - path: /etc/zot/tls/key.pem
+    permissions: '0600'
+    content: |
+{{.ServerKeyPEM | indent 6}}
   - path: /etc/systemd/system/zot.service
     permissions: '0644'
     content: |
@@ -62,10 +80,6 @@ write_files:
       WantedBy=multi-user.target
 runcmd:
 {{- if .HostPrivateKey}}
-  # Pre-pinned ed25519 host key (matches the worker pattern in
-  # internal/bootstrap/cloud-init.yaml.tmpl). Lets a future operator
-  # script TOFU-verify the cache host key the same way the dispatcher
-  # does for workers.
   - |
     set -eu
     install -m 0600 /dev/null /etc/ssh/ssh_host_ed25519_key
@@ -88,14 +102,7 @@ runcmd:
     url="https://github.com/project-zot/zot/releases/download/v{{.ZotVersion}}/zot-linux-${zarch}"
     curl -fsSL -o /usr/local/bin/zot "$url"
     chmod +x /usr/local/bin/zot
-  - |
-    set -eu
-    mkdir -p /etc/zot/tls /var/lib/zot
-    openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-      -keyout /etc/zot/tls/key.pem -out /etc/zot/tls/cert.pem \
-      -subj "/CN=cache.fjb.internal" \
-      -addext "subjectAltName=DNS:cache.fjb.internal,DNS:localhost,IP:127.0.0.1"
-    chmod 0640 /etc/zot/tls/cert.pem /etc/zot/tls/key.pem
+  - mkdir -p /var/lib/zot
   - systemctl daemon-reload
   - systemctl enable --now zot.service
   - touch {{.ReadyFile}}
