@@ -436,7 +436,7 @@ jobs:
           provider_config:
             region: us-ord
             type: g6-nanode-1
-            image: linode/debian12
+            image: linode/debian13
             token: ${LINODE_TOKEN}
             # Managed firewall: SSH only from this CI runner's external IP.
             # `auto` resolves to the GH-hosted runner's egress, which is the

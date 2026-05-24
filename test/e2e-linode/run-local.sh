@@ -168,7 +168,7 @@ provider: linode
 provider_config:
   region: us-ord
   type: g6-nanode-1
-  image: linode/debian12
+  image: linode/debian13
   token: $TOKEN
   # Managed firewall: SSH only from this host's external IP. github-actions
   # is intentionally NOT exercised here — its CIDR list (5000+ v4 today)

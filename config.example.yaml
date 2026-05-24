@@ -54,7 +54,11 @@ provider: linode
 provider_config:
   region: us-ord
   type: g6-nanode-1
-  image: linode/debian12
+  # Workers need Docker >= 23 for the pull-through cache to actually work
+  # (containerd-snapshotter feature; FJB-9). Bookworm's packaged docker.io is
+  # 20.10 and silently ignores the daemon.json snapshotter flag, leaving the
+  # cache empty. Trixie ships docker.io 26.1.5 which has it native.
+  image: linode/debian13
   token: <linode-pat>
 
   # Managed Cloud Firewall: one per deployment, default-deny inbound except
@@ -130,7 +134,7 @@ provider_config:
   #   # tls:
   #   #   ca_dir: /var/lib/fj-bellows/example/cache-ca
   #   # type: g6-nanode-1          # bump to g6-standard-1 under burst
-  #   # image: linode/debian12
+  #   # image: linode/debian13
   #   # zot_version: 2.1.7         # pinned; bump deliberately
 
 poll:

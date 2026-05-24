@@ -87,7 +87,7 @@ type cacheTLSConfig struct {
 // Defaults applied when fields are left empty.
 const (
 	defaultCacheType       = "g6-nanode-1"
-	defaultCacheImage      = "linode/debian12"
+	defaultCacheImage      = "linode/debian13"
 	defaultZotVersion      = "2.1.7"
 	defaultCacheReadyFile  = "/var/lib/cloud/fj-bellows-cache.ready"
 	defaultCacheSubnetName = "cache"

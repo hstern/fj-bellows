@@ -67,6 +67,9 @@ func TestWrapWorkerUserDataForCachePropagatesBaseAndExtras(t *testing.T) {
 		"upstream.example.com",               // upstream host
 		"update-ca-certificates",             // runcmd from extras
 		`capabilities = ["pull", "resolve"]`, // pull-only mirror
+		"/etc/docker/daemon.json",            // FJB-9: dockerd snapshotter config path
+		`{"features": {"containerd-snapshotter": true}}`, // FJB-9: feature payload
+		"systemctl restart docker",                       // FJB-9: pick up daemon.json
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("wrapped output missing %q\n---\n%s", want, out)
@@ -82,6 +85,31 @@ func TestWrapWorkerUserDataForCachePropagatesBaseAndExtras(t *testing.T) {
 func TestWrapWorkerUserDataForCacheRejectsEmptyBase(t *testing.T) {
 	if _, err := wrapWorkerUserDataForCache("", testValidWorkerExtras()); err == nil {
 		t.Error("expected error on empty base user-data")
+	}
+}
+
+// TestWrapWorkerUserDataForCacheRoutesDockerThroughContainerd is the
+// FJB-9 regression: without the containerd-snapshotter daemon.json,
+// dockerd ignores /etc/containerd/certs.d/ and every job-container
+// pull bypasses the cache (zero objects in the cache S3 bucket).
+// Three load-bearing facts on the wire:
+//  1. The daemon.json path is correct (dockerd reads exactly this path).
+//  2. The feature payload is exactly the keys/values dockerd expects.
+//  3. A docker restart fires so daemon.json is picked up even when
+//     dockerd was running before /etc/docker/daemon.json existed.
+func TestWrapWorkerUserDataForCacheRoutesDockerThroughContainerd(t *testing.T) {
+	out, err := wrapWorkerUserDataForCache("#cloud-config\n", testValidWorkerExtras())
+	if err != nil {
+		t.Fatalf("wrap: %v", err)
+	}
+	if !strings.Contains(out, "path: /etc/docker/daemon.json") {
+		t.Errorf("daemon.json write_files entry missing — dockerd will keep its own image store:\n%s", out)
+	}
+	if !strings.Contains(out, `{"features": {"containerd-snapshotter": true}}`) {
+		t.Errorf("daemon.json feature payload missing or wrong:\n%s", out)
+	}
+	if !strings.Contains(out, "systemctl restart docker") {
+		t.Errorf("docker restart missing — daemon.json isn't hot-reloaded so the running dockerd won't pick it up:\n%s", out)
 	}
 }
 

@@ -308,7 +308,7 @@ provider_config:
     #   ca_dir: /var/lib/fj-bellows/<tag>/cache-ca
     # Optional VM tuning (all default):
     # type: g6-nanode-1            # bump to g6-standard-1 under burst pulls
-    # image: linode/debian12
+    # image: linode/debian13
     # zot_version: 2.1.7           # pinned; bump deliberately
 ```
 
@@ -339,6 +339,20 @@ When `cache:` is set, fj-bellows:
 The cache VM uses the SAME deployment firewall as workers — no separate
 firewall block. Operators get SSH break-glass via the operator's IP
 (per the `auto` sentinel); registry traffic stays off the public NIC.
+
+### Worker image requirement (Docker >= 23)
+
+The worker `image:` must ship a Docker version that supports the
+**containerd image store** (`{"features": {"containerd-snapshotter":
+true}}` in `daemon.json`) — Docker 23+. Without it, dockerd uses its
+own image store and silently ignores `/etc/containerd/certs.d/`, so
+every job-container pull bypasses the cache and goes direct to
+upstream (zero objects in the cache bucket — FJB-9). `linode/debian13`
+(trixie, docker.io 26.1.5) is the practical floor; `linode/debian12`
+(bookworm, docker.io 20.10) is too old. The cache-extras cloud-init
+writes `/etc/docker/daemon.json` and restarts docker, so the operator
+doesn't manage the daemon config — but the binary has to be new
+enough to understand the feature.
 
 ### PAT scope
 

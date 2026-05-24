@@ -16,7 +16,7 @@ merge_how:
     settings: [no_replace, recurse_list]
   - name: str
     settings: [append]
-# Three things are added:
+# Four things are added:
 #  1. The fjb-managed CA, so workers trust the cache's TLS cert.
 #  2. An /etc/hosts entry mapping the cache hostname to its VPC IP
 #     (no DNS dependency — workers reach the cache by IP via the
@@ -26,6 +26,15 @@ merge_how:
 #     PULL-ONLY — pushes to the upstream hostname continue to take
 #     the public NIC direct to upstream, which is the boundary that
 #     makes "no push replication" safe.
+#  4. /etc/docker/daemon.json that enables Docker's containerd image
+#     store (FJB-9). Without it, dockerd uses its own image store
+#     and ignores /etc/containerd/certs.d/ entirely — every job-
+#     container pull bypasses the cache and goes direct to upstream.
+#     Requires Docker >= 23; the worker image must be linode/debian13
+#     (trixie, docker.io 26) or newer. cloud-init writes files in the
+#     init stage (before package install), so dockerd starts with
+#     this config in place; the systemctl restart in runcmd is belt-
+#     and-suspenders for the case where docker was already running.
 write_files:
   - path: /usr/local/share/ca-certificates/fjb-cache.crt
     permissions: '0644'
@@ -42,5 +51,10 @@ write_files:
 
       [host."https://{{.CacheHost}}:{{.CachePort}}"]
         capabilities = ["pull", "resolve"]
+  - path: /etc/docker/daemon.json
+    permissions: '0644'
+    content: |
+      {"features": {"containerd-snapshotter": true}}
 runcmd:
   - update-ca-certificates
+  - systemctl restart docker
