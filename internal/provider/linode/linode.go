@@ -519,6 +519,25 @@ func (l *Linode) ensureManagedResources(ctx context.Context) error {
 // removed once no devices/members remain attached). -destroy-on-exit
 // naturally flows through here per instance, so we get cleanup for free
 // without a Provider.Shutdown hook.
+//
+// FJB-12: the managed cache VM is intentionally NOT reaped here.
+// Worker count goes to zero on idle teardown but the operator's
+// intent — declared by setting `cache:` in config — is for the cache
+// to outlive the worker fleet. Reaping it on every idle-to-empty
+// transition (a) burned 3-5 min of cache boot on the next job after
+// any idle period and (b) created the FJB-12 deadlock window where
+// Provision needed the cache VPC IP from a VM that had just been
+// reaped. With the cache kept warm, neither happens. Bucket + scoped
+// key stay alive alongside it (they're owned by `maybeCleanupCache`
+// and only get reaped when it does). The cache VM is still
+// re-createable on demand via cache.ensure() (FJB-10), so it self-
+// heals if it vanishes for any other reason (Linode incident, manual
+// delete). Operators wanting an explicit teardown delete it via the
+// Linode console; a future fjb flag could automate that if it
+// becomes a common operation. Firewall and VPC reapers still fire
+// correctly even though the cache VM remains: both gate on "no
+// devices/linodes attached", and the cache VM keeps them in use, so
+// they stay too.
 func (l *Linode) Destroy(ctx context.Context, id string) error {
 	n, err := strconv.Atoi(id)
 	if err != nil {
@@ -526,14 +545,6 @@ func (l *Linode) Destroy(ctx context.Context, id string) error {
 	}
 	if err := l.client.DeleteInstance(ctx, n); err != nil {
 		return fmt.Errorf("linode: delete instance %d: %w", n, err)
-	}
-	// Cache first: it owns its own Linode + bucket + scoped key, all of
-	// which can be torn down without any dependency on the worker
-	// firewall / VPC reap below. Doing cache first also avoids a window
-	// where the cache VM is still attached to a VPC subnet we're about
-	// to delete.
-	if l.cache != nil {
-		l.cache.maybeCleanupCache(ctx)
 	}
 	if l.fw != nil {
 		l.fw.maybeCleanupFirewall(ctx)
