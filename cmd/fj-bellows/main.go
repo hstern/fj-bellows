@@ -19,6 +19,7 @@ import (
 
 	"github.com/hstern/fj-bellows/internal/bootstrap"
 	"github.com/hstern/fj-bellows/internal/config"
+	"github.com/hstern/fj-bellows/internal/control"
 	"github.com/hstern/fj-bellows/internal/forgejo"
 	"github.com/hstern/fj-bellows/internal/orchestrator"
 	"github.com/hstern/fj-bellows/internal/provider"
@@ -35,6 +36,7 @@ func main() {
 	drain := flag.Bool("drain", true, "on shutdown, let in-flight jobs finish instead of interrupting them")
 	drainTimeout := flag.Duration("drain-timeout", 0, "max time to wait for in-flight jobs when draining (0 = wait indefinitely)")
 	destroyOnExit := flag.Bool("destroy-on-exit", false, "destroy all owned VMs on shutdown (for a permanent stop)")
+	controlListen := flag.String("control-listen", "127.0.0.1:9876", "control plane listen address (TCP); empty disables")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -46,6 +48,7 @@ func main() {
 		drain:         *drain,
 		drainTimeout:  *drainTimeout,
 		destroyOnExit: *destroyOnExit,
+		controlListen: *controlListen,
 	}
 	if err := run(opts, log); err != nil {
 		log.Error("fatal", "err", err)
@@ -60,6 +63,7 @@ type runOpts struct {
 	drain         bool
 	drainTimeout  time.Duration
 	destroyOnExit bool
+	controlListen string
 }
 
 func run(opts runOpts, log *slog.Logger) error {
@@ -159,6 +163,8 @@ func run(opts runOpts, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	startControlPlane(ctx, opts.controlListen, orch, log)
+
 	log.Info(
 		"fj-bellows starting",
 		"provider", cfg.Provider,
@@ -167,6 +173,34 @@ func run(opts runOpts, log *slog.Logger) error {
 		"poll", cfg.Poll.Interval.D().String(),
 	)
 	return orch.Run(ctx)
+}
+
+// startControlPlane spins up the operator-facing HTTP/RPC server on a side
+// goroutine. Empty listen disables it (e.g. for tests or restricted deploys).
+func startControlPlane(ctx context.Context, listen string, orch *orchestrator.Orchestrator, log *slog.Logger) {
+	if listen == "" {
+		return
+	}
+	srv := control.NewServer(listen, controlBackend{orch}, log)
+	go func() {
+		if err := srv.Run(ctx); err != nil {
+			log.Error("control plane", "err", err)
+		}
+	}()
+}
+
+// controlBackend adapts *orchestrator.Orchestrator to control.Backend so the
+// orchestrator package stays free of generated-protobuf coupling.
+type controlBackend struct{ o *orchestrator.Orchestrator }
+
+func (b controlBackend) Health(ctx context.Context) control.HealthStatus {
+	s := b.o.Health(ctx)
+	return control.HealthStatus{
+		Healthy:            s.Healthy,
+		LastTickAt:         s.LastTickAt,
+		LastProviderListAt: s.LastProviderListAt,
+		LastForgejoPollAt:  s.LastForgejoPollAt,
+	}
 }
 
 // sshDispatcherFrom builds the SSH dispatcher from config.
