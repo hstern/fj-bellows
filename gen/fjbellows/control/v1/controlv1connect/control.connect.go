@@ -35,6 +35,9 @@ const (
 const (
 	// ControlServiceHealthProcedure is the fully-qualified name of the ControlService's Health RPC.
 	ControlServiceHealthProcedure = "/fjbellows.control.v1.ControlService/Health"
+	// ControlServiceListWorkersProcedure is the fully-qualified name of the ControlService's
+	// ListWorkers RPC.
+	ControlServiceListWorkersProcedure = "/fjbellows.control.v1.ControlService/ListWorkers"
 )
 
 // ControlServiceClient is a client for the fjbellows.control.v1.ControlService service.
@@ -42,6 +45,12 @@ type ControlServiceClient interface {
 	// Health returns a readiness snapshot: is the reconcile loop ticking,
 	// and have the upstream probes (provider, Forgejo) succeeded recently?
 	Health(context.Context, *connect.Request[v1.HealthRequest]) (*connect.Response[v1.HealthResponse], error)
+	// ListWorkers returns the orchestrator's current view of every worker VM
+	// in the pool: state, address, when it was created / last busy, and the
+	// current job handle if any. This is what the e2e harness will poll
+	// instead of grepping the orchestrator's stderr log for "worker ready" /
+	// "job complete" / "destroyed idle node".
+	ListWorkers(context.Context, *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error)
 }
 
 // NewControlServiceClient constructs a client for the fjbellows.control.v1.ControlService service.
@@ -61,12 +70,19 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("Health")),
 			connect.WithClientOptions(opts...),
 		),
+		listWorkers: connect.NewClient[v1.ListWorkersRequest, v1.ListWorkersResponse](
+			httpClient,
+			baseURL+ControlServiceListWorkersProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("ListWorkers")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // controlServiceClient implements ControlServiceClient.
 type controlServiceClient struct {
-	health *connect.Client[v1.HealthRequest, v1.HealthResponse]
+	health      *connect.Client[v1.HealthRequest, v1.HealthResponse]
+	listWorkers *connect.Client[v1.ListWorkersRequest, v1.ListWorkersResponse]
 }
 
 // Health calls fjbellows.control.v1.ControlService.Health.
@@ -74,11 +90,22 @@ func (c *controlServiceClient) Health(ctx context.Context, req *connect.Request[
 	return c.health.CallUnary(ctx, req)
 }
 
+// ListWorkers calls fjbellows.control.v1.ControlService.ListWorkers.
+func (c *controlServiceClient) ListWorkers(ctx context.Context, req *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error) {
+	return c.listWorkers.CallUnary(ctx, req)
+}
+
 // ControlServiceHandler is an implementation of the fjbellows.control.v1.ControlService service.
 type ControlServiceHandler interface {
 	// Health returns a readiness snapshot: is the reconcile loop ticking,
 	// and have the upstream probes (provider, Forgejo) succeeded recently?
 	Health(context.Context, *connect.Request[v1.HealthRequest]) (*connect.Response[v1.HealthResponse], error)
+	// ListWorkers returns the orchestrator's current view of every worker VM
+	// in the pool: state, address, when it was created / last busy, and the
+	// current job handle if any. This is what the e2e harness will poll
+	// instead of grepping the orchestrator's stderr log for "worker ready" /
+	// "job complete" / "destroyed idle node".
+	ListWorkers(context.Context, *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error)
 }
 
 // NewControlServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -94,10 +121,18 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("Health")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceListWorkersHandler := connect.NewUnaryHandler(
+		ControlServiceListWorkersProcedure,
+		svc.ListWorkers,
+		connect.WithSchema(controlServiceMethods.ByName("ListWorkers")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/fjbellows.control.v1.ControlService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlServiceHealthProcedure:
 			controlServiceHealthHandler.ServeHTTP(w, r)
+		case ControlServiceListWorkersProcedure:
+			controlServiceListWorkersHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -109,4 +144,8 @@ type UnimplementedControlServiceHandler struct{}
 
 func (UnimplementedControlServiceHandler) Health(context.Context, *connect.Request[v1.HealthRequest]) (*connect.Response[v1.HealthResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.Health is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) ListWorkers(context.Context, *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ListWorkers is not implemented"))
 }

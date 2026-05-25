@@ -133,6 +133,185 @@ func (x *HealthResponse) GetLastForgejoPollAt() *timestamppb.Timestamp {
 	return nil
 }
 
+type ListWorkersRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListWorkersRequest) Reset() {
+	*x = ListWorkersRequest{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWorkersRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWorkersRequest) ProtoMessage() {}
+
+func (x *ListWorkersRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWorkersRequest.ProtoReflect.Descriptor instead.
+func (*ListWorkersRequest) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{2}
+}
+
+type ListWorkersResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Workers       []*Worker              `protobuf:"bytes,1,rep,name=workers,proto3" json:"workers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListWorkersResponse) Reset() {
+	*x = ListWorkersResponse{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWorkersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWorkersResponse) ProtoMessage() {}
+
+func (x *ListWorkersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWorkersResponse.ProtoReflect.Descriptor instead.
+func (*ListWorkersResponse) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ListWorkersResponse) GetWorkers() []*Worker {
+	if x != nil {
+		return x.Workers
+	}
+	return nil
+}
+
+// Worker is the orchestrator's view of a single worker VM. Field shape
+// mirrors orchestrator.Node plus the active job handle (recorded by the
+// dispatch goroutine when a node transitions to Busy).
+type Worker struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// instance_id is the provider's identifier (Linode ID, docker container
+	// ID, etc.). Unique within a deployment's tag scope.
+	InstanceId string `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	// state is one of: provisioning | idle | busy | draining | removing.
+	State string `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	// ip is the worker's reachable address; empty for providers that dispatch
+	// by container exec (docker).
+	Ip string `protobuf:"bytes,3,opt,name=ip,proto3" json:"ip,omitempty"`
+	// created_at is the provider's instance creation time. Anchors the
+	// billing-hour timer.
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// last_busy is when the node most recently finished (or started) a job;
+	// drives the per-second idle timeout.
+	LastBusy *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=last_busy,json=lastBusy,proto3" json:"last_busy,omitempty"`
+	// current_job is the Forgejo job handle in flight on this worker. Empty
+	// unless state == "busy". Goes empty again when the dispatch goroutine
+	// transitions the node back to idle.
+	CurrentJob    string `protobuf:"bytes,6,opt,name=current_job,json=currentJob,proto3" json:"current_job,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Worker) Reset() {
+	*x = Worker{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Worker) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Worker) ProtoMessage() {}
+
+func (x *Worker) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Worker.ProtoReflect.Descriptor instead.
+func (*Worker) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Worker) GetInstanceId() string {
+	if x != nil {
+		return x.InstanceId
+	}
+	return ""
+}
+
+func (x *Worker) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *Worker) GetIp() string {
+	if x != nil {
+		return x.Ip
+	}
+	return ""
+}
+
+func (x *Worker) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *Worker) GetLastBusy() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastBusy
+	}
+	return nil
+}
+
+func (x *Worker) GetCurrentJob() string {
+	if x != nil {
+		return x.CurrentJob
+	}
+	return ""
+}
+
 var File_fjbellows_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_fjbellows_control_v1_control_proto_rawDesc = "" +
@@ -144,9 +323,23 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\flast_tick_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"lastTickAt\x12M\n" +
 	"\x15last_provider_list_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x12lastProviderListAt\x12K\n" +
-	"\x14last_forgejo_poll_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x11lastForgejoPollAt2e\n" +
+	"\x14last_forgejo_poll_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x11lastForgejoPollAt\"\x14\n" +
+	"\x12ListWorkersRequest\"M\n" +
+	"\x13ListWorkersResponse\x126\n" +
+	"\aworkers\x18\x01 \x03(\v2\x1c.fjbellows.control.v1.WorkerR\aworkers\"\xe4\x01\n" +
+	"\x06Worker\x12\x1f\n" +
+	"\vinstance_id\x18\x01 \x01(\tR\n" +
+	"instanceId\x12\x14\n" +
+	"\x05state\x18\x02 \x01(\tR\x05state\x12\x0e\n" +
+	"\x02ip\x18\x03 \x01(\tR\x02ip\x129\n" +
+	"\n" +
+	"created_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x127\n" +
+	"\tlast_busy\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\blastBusy\x12\x1f\n" +
+	"\vcurrent_job\x18\x06 \x01(\tR\n" +
+	"currentJob2\xc9\x01\n" +
 	"\x0eControlService\x12S\n" +
-	"\x06Health\x12#.fjbellows.control.v1.HealthRequest\x1a$.fjbellows.control.v1.HealthResponseB\xdb\x01\n" +
+	"\x06Health\x12#.fjbellows.control.v1.HealthRequest\x1a$.fjbellows.control.v1.HealthResponse\x12b\n" +
+	"\vListWorkers\x12(.fjbellows.control.v1.ListWorkersRequest\x1a).fjbellows.control.v1.ListWorkersResponseB\xdb\x01\n" +
 	"\x18com.fjbellows.control.v1B\fControlProtoP\x01Z?github.com/hstern/fj-bellows/gen/fjbellows/control/v1;controlv1\xa2\x02\x03FCX\xaa\x02\x14Fjbellows.Control.V1\xca\x02\x14Fjbellows\\Control\\V1\xe2\x02 Fjbellows\\Control\\V1\\GPBMetadata\xea\x02\x16Fjbellows::Control::V1b\x06proto3"
 
 var (
@@ -161,23 +354,31 @@ func file_fjbellows_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_fjbellows_control_v1_control_proto_rawDescData
 }
 
-var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_fjbellows_control_v1_control_proto_goTypes = []any{
 	(*HealthRequest)(nil),         // 0: fjbellows.control.v1.HealthRequest
 	(*HealthResponse)(nil),        // 1: fjbellows.control.v1.HealthResponse
-	(*timestamppb.Timestamp)(nil), // 2: google.protobuf.Timestamp
+	(*ListWorkersRequest)(nil),    // 2: fjbellows.control.v1.ListWorkersRequest
+	(*ListWorkersResponse)(nil),   // 3: fjbellows.control.v1.ListWorkersResponse
+	(*Worker)(nil),                // 4: fjbellows.control.v1.Worker
+	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
 }
 var file_fjbellows_control_v1_control_proto_depIdxs = []int32{
-	2, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
-	2, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
-	2, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
-	0, // 3: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
-	1, // 4: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
-	4, // [4:5] is the sub-list for method output_type
-	3, // [3:4] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	5, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
+	5, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
+	5, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
+	4, // 3: fjbellows.control.v1.ListWorkersResponse.workers:type_name -> fjbellows.control.v1.Worker
+	5, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
+	5, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
+	0, // 6: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
+	2, // 7: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
+	1, // 8: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
+	3, // 9: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
+	8, // [8:10] is the sub-list for method output_type
+	6, // [6:8] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_fjbellows_control_v1_control_proto_init() }
@@ -191,7 +392,7 @@ func file_fjbellows_control_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fjbellows_control_v1_control_proto_rawDesc), len(file_fjbellows_control_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -15,6 +15,36 @@ type HealthStatus struct {
 	LastForgejoPollAt  time.Time
 }
 
+// WorkerView is the per-node shape returned by PoolSnapshot. Stable,
+// wire-friendly mirror of orchestrator.Node so the control plane can
+// translate to protobuf without coupling the orchestrator to generated code.
+type WorkerView struct {
+	InstanceID string
+	State      string
+	IP         string
+	CreatedAt  time.Time
+	LastBusy   time.Time
+	CurrentJob string
+}
+
+// PoolSnapshot returns a copy of every node currently in the pool.
+// Equivalent of Pool.Snapshot but stringified for the wire (NodeState → string).
+func (o *Orchestrator) PoolSnapshot() []WorkerView {
+	nodes := o.pool.Snapshot()
+	out := make([]WorkerView, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, WorkerView{
+			InstanceID: n.InstanceID,
+			State:      string(n.State),
+			IP:         n.IP,
+			CreatedAt:  n.CreatedAt,
+			LastBusy:   n.LastBusy,
+			CurrentJob: n.CurrentJob,
+		})
+	}
+	return out
+}
+
 // Health returns a snapshot of the freshness counters. The ctx is accepted to
 // match a future interface where the answer might require an upstream probe;
 // today it is unused.
