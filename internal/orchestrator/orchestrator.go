@@ -315,9 +315,11 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 		return
 	}
 	o.pool.SetState(node.InstanceID, StateBusy)
+	o.pool.SetJob(node.InstanceID, job.Handle)
 	o.wg.Go(func() {
 		defer func() {
 			o.pool.SetState(node.InstanceID, StateIdle)
+			o.pool.SetJob(node.InstanceID, "")
 			o.pool.Touch(node.InstanceID, o.now())
 			o.unmarkDispatching(job.Handle)
 		}()

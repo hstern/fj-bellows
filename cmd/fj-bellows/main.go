@@ -203,6 +203,22 @@ func (b controlBackend) Health(ctx context.Context) control.HealthStatus {
 	}
 }
 
+func (b controlBackend) PoolSnapshot() []control.WorkerView {
+	in := b.o.PoolSnapshot()
+	out := make([]control.WorkerView, 0, len(in))
+	for _, w := range in {
+		out = append(out, control.WorkerView{
+			InstanceID: w.InstanceID,
+			State:      w.State,
+			IP:         w.IP,
+			CreatedAt:  w.CreatedAt,
+			LastBusy:   w.LastBusy,
+			CurrentJob: w.CurrentJob,
+		})
+	}
+	return out
+}
+
 // sshDispatcherFrom builds the SSH dispatcher from config.
 func sshDispatcherFrom(cfg *config.Config, signer ssh.Signer) *orchestrator.SSHDispatcher {
 	return &orchestrator.SSHDispatcher{

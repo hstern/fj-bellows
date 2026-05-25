@@ -32,6 +32,25 @@ func (h *apiHandler) Health(
 	}), nil
 }
 
+func (h *apiHandler) ListWorkers(
+	_ context.Context,
+	_ *connect.Request[controlv1.ListWorkersRequest],
+) (*connect.Response[controlv1.ListWorkersResponse], error) {
+	view := h.b.PoolSnapshot()
+	workers := make([]*controlv1.Worker, 0, len(view))
+	for _, w := range view {
+		workers = append(workers, &controlv1.Worker{
+			InstanceId: w.InstanceID,
+			State:      w.State,
+			Ip:         w.IP,
+			CreatedAt:  tsOrNil(w.CreatedAt),
+			LastBusy:   tsOrNil(w.LastBusy),
+			CurrentJob: w.CurrentJob,
+		})
+	}
+	return connect.NewResponse(&controlv1.ListWorkersResponse{Workers: workers}), nil
+}
+
 // tsOrNil emits a Timestamp only for non-zero times; zero stays nil so the
 // wire form omits the field instead of advertising 1970-01-01.
 func tsOrNil(t time.Time) *timestamppb.Timestamp {
