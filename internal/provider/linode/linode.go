@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/linode/linodego"
-	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
 
 	"github.com/hstern/fj-bellows/internal/provider"
@@ -65,28 +64,6 @@ type Linode struct {
 	// access key wired into the cache VM's cloud-init. Setting `cache:`
 	// without `vpc:` auto-synthesizes the VPC (FJB-6 design).
 	cache *managedCache
-
-	// sshSigner / sshUser / sshPort are populated by SetSSHIdentity from
-	// the orchestrator's loaded SSH key before Configure runs. The
-	// managed cache's persistent reverse-tunnel (FJB-7) uses them to
-	// dial the cache VM; the public half of sshSigner is also placed in
-	// the cache VM's authorized_keys so the dial is accepted. Nil
-	// signer => no tunnel (deployments without SSH, e.g. docker-only,
-	// never reach this path; the linode provider always wants it set
-	// in main.go when cache is enabled).
-	sshSigner ssh.Signer
-	sshUser   string
-	sshPort   int
-}
-
-// SetSSHIdentity supplies the orchestrator's SSH identity to the
-// Linode provider so cache-VM operations that need to reach back into
-// the orchestrator's network namespace (FJB-7) can dial in. Called
-// from cmd/fj-bellows before Configure. Idempotent.
-func (l *Linode) SetSSHIdentity(signer ssh.Signer, user string, port int) {
-	l.sshSigner = signer
-	l.sshUser = user
-	l.sshPort = port
 }
 
 func init() {
@@ -318,19 +295,12 @@ func (l *Linode) setupManagedCache(ctx context.Context, tag string) error {
 	if l.vpc != nil {
 		subID = l.vpc.workerSubnetID()
 	}
-	// Inject the orchestrator's SSH identity if it was set (it always is
-	// in production when cache is enabled — see SetSSHIdentity called
-	// from main.go). The public half goes into the cache VM's
-	// authorized_keys; the private half is used by the persistent
-	// reverse-tunnel (FJB-7). When signer is nil — e.g. tests that
-	// don't exercise dispatch — both authorized_keys and the tunnel
-	// are simply omitted.
-	authKey := ""
-	if l.sshSigner != nil {
-		authKey = strings.TrimRight(string(ssh.MarshalAuthorizedKey(l.sshSigner.PublicKey())), "\n")
-	}
-	cache.setHardwareContext(fwID, subID, authKey)
-	cache.setTunnelIdentity(l.sshSigner, l.sshUser, l.sshPort)
+	// FJB-13: zot is now a scratch registry workers address
+	// explicitly; the orchestrator no longer dials the cache VM (the
+	// FJB-7 reverse-tunnel is gone), so it doesn't need the cache VM
+	// to accept its SSH key. Leave authorized_keys empty — operators
+	// break-glass via Linode Lish or add their own key manually.
+	cache.setHardwareContext(fwID, subID, "")
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		return fmt.Errorf("linode: cache: %w", err)
 	}

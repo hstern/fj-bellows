@@ -102,21 +102,18 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   "Placement Group ID: 0 not found" — FJB-10. Don't add a new managed
   resource without the matching `ensure()` and an entry in
   `ensureManagedResources`.
-- **The Linode managed-cache VM reaches upstream through a persistent
-  orchestrator-side `ssh -R`, not its own NIC.** The cache VM is
-  provisioned at Configure-time and never participates in a dispatch SSH
-  session, so it can't inherit the per-dispatch worker tunnel — instead
-  the linode provider starts a long-lived reconnect-loop goroutine that
-  opens a reverse-forward listener on `127.0.0.1:<upstream-port>` on the
-  cache VM and bridges each accepted connection to the upstream from the
-  orchestrator's own network namespace. The cache cloud-init pins
-  `127.0.0.1 <upstream-host>` in /etc/hosts so zot's sync extension
-  hits the loopback listener; TLS SNI is unchanged, so a public-CA cert
-  on the upstream still validates end-to-end. The orchestrator's SSH
-  identity is plumbed into the linode provider via `SetSSHIdentity` from
-  `cmd/fj-bellows` before `Configure` runs. Closes FJB-7. Don't drop the
-  /etc/hosts override; don't try to give the cache VM direct LAN access
-  via NAT (the tunnel is the answer).
+- **The managed cache is a scratch registry, not a transparent
+  pull-through.** zot listens at `cache.fjb.internal:5000` over the
+  VPC NIC; workers address it explicitly when they want round-trip-
+  free intermediate-artifact push/pull. Nothing intercepts traffic
+  to any other registry — push to Forgejo, GHCR, Docker Hub goes
+  direct from the worker, no daemon.json rewrite, no containerd
+  `hosts.toml`. The previous transparent-redirect machinery (sync
+  extension, FJB-7 reverse-tunnel, FJB-9 containerd-snapshotter) was
+  retired in FJB-13 because dockerd's containerd image store ships
+  OCI manifests on push, which Forgejo 15.x rejects on PUT. Don't
+  reintroduce any of that without solving the OCI-vs-Docker
+  registry compat at the same time.
 - **The Linode managed firewall is owned by `cfg.Tag`, eager-created at
   Configure, refreshed on a goroutine, and reaped on last Destroy** — no
   Provider-level shutdown hook. The `firewall:` block is mutually exclusive

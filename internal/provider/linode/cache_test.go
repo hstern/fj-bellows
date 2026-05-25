@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	testUpstreamURL = "https://upstream.example/v2/"
 	// Placeholder PEM body used by tests that exercise the cloud-init
 	// renderer with non-empty server cert / key fields. Not a real PEM
 	// — the renderer doesn't parse the content, it just substitutes
@@ -127,8 +126,7 @@ func (f *fakeCacheClient) GetInstance(_ context.Context, id int) (*linodego.Inst
 func newTestManagedCache(t *testing.T, client cacheClient, bucket *managedBucket) *managedCache {
 	t.Helper()
 	cfg := cacheConfig{
-		Upstream: &cacheUpstreamConfig{URL: testUpstreamURL},
-		TLS:      &cacheTLSConfig{CADir: t.TempDir()},
+		TLS: &cacheTLSConfig{CADir: t.TempDir()},
 	}
 	return newManagedCache(cfg, "test-tag", testBucketRegion, client, bucket, slog.Default())
 }
@@ -148,8 +146,7 @@ func newAdoptableTestManagedCache(t *testing.T, client cacheClient, bucket *mana
 		t.Fatalf("seed CA dir: %v", err)
 	}
 	cfg := cacheConfig{
-		Upstream: &cacheUpstreamConfig{URL: testUpstreamURL},
-		TLS:      &cacheTLSConfig{CADir: caDir},
+		TLS: &cacheTLSConfig{CADir: caDir},
 	}
 	return newManagedCache(cfg, "test-tag", testBucketRegion, client, bucket, slog.Default())
 }
@@ -364,8 +361,6 @@ func TestRenderCacheCloudInitRequiresAllFields(t *testing.T) {
 		ZotVersion:    testStubZotVersion,
 		ServerCertPEM: testStubPEM,
 		ServerKeyPEM:  testStubPEM,
-		UpstreamURL:   "https://u",
-		UpstreamHost:  "u",
 	}
 	cases := []struct {
 		name string
@@ -379,8 +374,6 @@ func TestRenderCacheCloudInitRequiresAllFields(t *testing.T) {
 		{name: "missing zot version", wipe: func(p *cacheCloudInitParams) { p.ZotVersion = "" }},
 		{name: "missing server cert", wipe: func(p *cacheCloudInitParams) { p.ServerCertPEM = "" }},
 		{name: "missing server key", wipe: func(p *cacheCloudInitParams) { p.ServerKeyPEM = "" }},
-		{name: "missing upstream URL", wipe: func(p *cacheCloudInitParams) { p.UpstreamURL = "" }},
-		{name: "missing upstream host", wipe: func(p *cacheCloudInitParams) { p.UpstreamHost = "" }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -408,8 +401,6 @@ func TestRenderCacheCloudInitProducesValidCloudInit(t *testing.T) {
 		ZotVersion:    "2.1.7",
 		ServerCertPEM: stubCertPEM,
 		ServerKeyPEM:  stubKeyPEM,
-		UpstreamURL:   testUpstreamURL,
-		UpstreamHost:  "upstream.example",
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -424,7 +415,6 @@ func TestRenderCacheCloudInitProducesValidCloudInit(t *testing.T) {
 		"zot.service",
 		"systemctl enable --now zot.service",
 		defaultCacheReadyFile,
-		testUpstreamURL,               // sync extension
 		"-----BEGIN CERTIFICATE-----", // baked-in server cert
 		"-----BEGIN EC PRIVATE KEY-----",
 		"/etc/zot/tls/cert.pem",
@@ -446,8 +436,6 @@ func TestRenderCacheCloudInitReadyFileDefaults(t *testing.T) {
 		ZotVersion:    testStubZotVersion,
 		ServerCertPEM: testStubPEM,
 		ServerKeyPEM:  testStubPEM,
-		UpstreamURL:   "https://u",
-		UpstreamHost:  "u",
 		// ReadyFile intentionally omitted
 	})
 	if err != nil {
@@ -650,9 +638,6 @@ func TestWorkerExtrasLooksUpAndCachesVPCIP(t *testing.T) {
 	}
 	if x.CachePort != defaultCachePort {
 		t.Errorf("CachePort = %d, want %d", x.CachePort, defaultCachePort)
-	}
-	if x.UpstreamHost != "upstream.example" {
-		t.Errorf("UpstreamHost = %q, want %q (parsed from %q)", x.UpstreamHost, "upstream.example", testUpstreamURL)
 	}
 	if x.CACertPEM == "" {
 		t.Error("CACertPEM empty")

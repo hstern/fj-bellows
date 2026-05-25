@@ -189,18 +189,16 @@ provider_config:
     subnets:
       cache:
         ipv4: 10.0.0.0/24
-  # Managed pull-through cache (FJB-6 PR 2a + PR 2b). Adds Object
-  # Storage R/W to the PAT scope and requires Object Storage to be
-  # enabled on the Linode account (one-click in the Cloud Manager,
-  # flat 5 USD/mo). Cache VM tag is \$TAG-cache so the worker prefix
-  # sweep above also reaps it; bucket and key sweeps live in
-  # destroy_tagged. The PR 2b worker integration wraps each worker
-  # cloud-init with the cache CA, /etc/hosts entry, and a containerd
-  # mirror config for upstream.example.com (a placeholder that does
-  # not conflict with the docker pulls workers make for the e2e job).
+  # Managed scratch registry (FJB-13). zot listens at
+  # cache.fjb.internal:5000 over the VPC NIC; workers can
+  # docker push/pull cache.fjb.internal:5000/... explicitly. No
+  # transparent redirect of any other hostname, so the e2e's plain
+  # echo job still works without touching zot. Adds Object Storage
+  # R/W to the PAT scope; requires Object Storage enabled on the
+  # account (one-click in the Cloud Manager, flat 5 USD/mo). Cache
+  # VM tag is \$TAG-cache so the worker prefix sweep above also
+  # reaps it; bucket and key sweeps live in destroy_tagged.
   cache:
-    upstream:
-      url: https://upstream.example.com/v2/
     tls:
       ca_dir: $WORKDIR/cache-ca
 ssh:
@@ -321,28 +319,21 @@ if ! ls /etc/ssl/certs/ 2>/dev/null | grep -q fjb-cache; then
   errs="$errs ca-cert-not-in-trust-store"
 fi
 
-# containerd hosts.toml — PULL-ONLY mirror is the load-bearing
-# safety boundary. Assert explicitly so a refactor that adds "push"
-# can't sneak past.
-toml=$(find /etc/containerd/certs.d -name hosts.toml 2>/dev/null | head -1)
-if [ -z "$toml" ]; then
-  errs="$errs hosts-toml-missing"
-else
-  if ! grep -q '"pull"' "$toml" || ! grep -q '"resolve"' "$toml"; then
-    errs="$errs hosts-toml-missing-pull-or-resolve"
-  fi
-  if grep -q '"push"' "$toml"; then
-    errs="$errs hosts-toml-has-push-BOUNDARY-BROKEN"
-  fi
-  if ! grep -q 'cache.fjb.internal' "$toml"; then
-    errs="$errs hosts-toml-missing-cache-host"
-  fi
+# FJB-13: the worker fragment must NOT ship a containerd hosts.toml
+# (the transparent-redirect mechanism was retired) or a daemon.json
+# (containerd-snapshotter broke docker push to Forgejo). Assert
+# explicitly so a refactor reintroducing either gets caught.
+if find /etc/containerd/certs.d -name hosts.toml 2>/dev/null | grep -q .; then
+  errs="$errs hosts-toml-present-FJB-13-REGRESSION"
+fi
+if [ -e /etc/docker/daemon.json ]; then
+  errs="$errs daemon-json-present-FJB-13-REGRESSION"
 fi
 
 # PROBE:OK / PROBE:FAIL covers ONLY the worker-side plumbing
-# assertions above (hosts, CA, hosts.toml). These are the load-
-# bearing pieces — they prove the multipart wrap landed and the
-# pull-only safety boundary is intact.
+# assertions above (hosts, CA, no-transparent-redirect). These are
+# the load-bearing pieces — they prove the multipart wrap landed
+# and the FJB-13 cleanups stuck.
 if [ -n "$errs" ]; then
   echo "PROBE:FAIL:$errs"
 else

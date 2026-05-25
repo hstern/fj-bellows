@@ -393,31 +393,33 @@ vpc:
 	}
 }
 
-func TestConfigureCacheRequiresUpstreamURL(t *testing.T) {
-	// PR 2b — cache: {} (no upstream) must fail validation. Workers'
-	// containerd mirror needs an upstream host; zot's sync extension
-	// needs an upstream URL. A future PR may default this from
-	// forgejo.url, but for now operators must declare it.
+func TestConfigureCacheRejectsLegacyUpstreamField(t *testing.T) {
+	// FJB-13: zot is a scratch registry now, not a transparent
+	// pull-through of an upstream. Configs carrying the old
+	// `cache.upstream:` block must fail loudly with a migration
+	// note rather than silently dropping behavior.
 	l := &Linode{}
 	node := nodeFromYAML(t, `
 region: example-region
 type: example-type
 image: example/image
 token: abc123
-cache: {}
+cache:
+  upstream:
+    url: https://upstream.example/v2/
 `)
 	err := l.Configure(context.Background(), "testtag", node)
 	if err == nil {
-		t.Fatal("expected validation error: cache.upstream.url is required")
+		t.Fatal("expected validation error: cache.upstream is no longer supported")
 	}
-	if !strings.Contains(err.Error(), "upstream") {
-		t.Errorf("error should mention upstream, got: %v", err)
+	if !strings.Contains(err.Error(), "FJB-13") || !strings.Contains(err.Error(), "scratch registry") {
+		t.Errorf("error should explain the deprecation, got: %v", err)
 	}
 }
 
 func TestConfigureCacheAutoSynthesizesVPC(t *testing.T) {
-	// cache: with upstream but no vpc: must auto-populate cfg.VPC so
-	// workers can reach the cache over a private NIC. The auto-
+	// cache: {} without an explicit vpc: must auto-populate cfg.VPC
+	// so workers can reach the cache over a private NIC. The auto-
 	// synthesis runs at Configure-time after validateAll. The
 	// pre-flight + API calls beyond that point all fail under the
 	// fake token, but the auto-synthesis runs first so we can
@@ -428,9 +430,7 @@ region: example-region
 type: example-type
 image: example/image
 token: abc123
-cache:
-  upstream:
-    url: https://upstream.example/v2/
+cache: {}
 `)
 	err := l.Configure(context.Background(), "testtag", node)
 	if err == nil {
@@ -464,9 +464,7 @@ vpc:
   subnets:
     cache:
       ipv4: 192.168.55.0/24
-cache:
-  upstream:
-    url: https://upstream.example/v2/
+cache: {}
 `)
 	_ = l.Configure(context.Background(), "testtag", node) // API failure is expected
 	if l.cfg.VPC == nil {
@@ -490,9 +488,7 @@ region: example-region
 type: example-type
 image: example/image
 token: abc123
-cache:
-  upstream:
-    url: https://upstream.example/v2/
+cache: {}
 `)
 	err := l.Configure(context.Background(), "testtag", node)
 	if err == nil {
