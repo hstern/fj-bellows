@@ -17,7 +17,16 @@ make build              # go build ./...
 make race               # go test -race ./...  (orchestrator is concurrent — always -race)
 make lint               # golangci-lint run ./...  (config in .golangci.yml)
 make vuln               # govulncheck ./...
+make proto              # buf generate → gen/  (control-plane protobuf + ConnectRPC stubs)
+make proto-check        # CI safety: regenerate and fail on drift in gen/
 ```
+
+The proto targets require `buf`, `protoc-gen-go`, and `protoc-gen-connect-go`
+on `$PATH`. Install with `brew install bufbuild/buf/buf` and
+`go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+connectrpc.com/connect/cmd/protoc-gen-connect-go@latest`. The `gen/` tree is
+committed and CI runs `make proto-check`; if your PR touches `proto/`, run
+`make proto` and commit the regenerated `gen/`.
 
 CI runs these in two jobs (`.github/workflows/ci.yml`): `test` (vet, build,
 `-race` tests, govulncheck) and `lint` (golangci-lint). Both checks should be

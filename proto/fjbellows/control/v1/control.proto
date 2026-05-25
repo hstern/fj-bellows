@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package fjbellows.control.v1;
+
+option go_package = "github.com/hstern/fj-bellows/gen/fjbellows/control/v1;controlv1";
+
+import "google/protobuf/timestamp.proto";
+
+// ControlService is the operator-facing control plane for a running fj-bellows
+// daemon. Mounted via ConnectRPC so the same handler speaks Connect/JSON
+// (curl-friendly), gRPC, and gRPC-Web (for a future browser client).
+service ControlService {
+  // Health returns a readiness snapshot: is the reconcile loop ticking,
+  // and have the upstream probes (provider, Forgejo) succeeded recently?
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  // healthy is true when every signal below is within the freshness threshold
+  // (3 * poll_interval). A daemon that just started reports healthy once it has
+  // completed its first reconcile tick.
+  bool healthy = 1;
+
+  // last_tick_at is when the reconcile loop most recently completed.
+  google.protobuf.Timestamp last_tick_at = 2;
+
+  // last_provider_list_at is when prov.List most recently succeeded.
+  google.protobuf.Timestamp last_provider_list_at = 3;
+
+  // last_forgejo_poll_at is when WaitingJobs or ListRunners most recently
+  // succeeded; whichever was later.
+  google.protobuf.Timestamp last_forgejo_poll_at = 4;
+}

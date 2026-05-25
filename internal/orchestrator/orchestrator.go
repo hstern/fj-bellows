@@ -73,6 +73,12 @@ type Orchestrator struct {
 	active      map[string]struct{} // runner UUIDs we registered and still expect
 	now         func() time.Time    // injectable clock for tests
 
+	// Freshness timestamps consumed by the control plane's Health endpoint.
+	// Each is bumped under mu on success of the corresponding upstream call.
+	lastTickAt         time.Time
+	lastProviderListAt time.Time
+	lastForgejoPollAt  time.Time
+
 	// reapSeen tracks runner UUIDs that looked like zombies last tick; only
 	// reaped after two consecutive sightings so a just-registered runner is not
 	// deleted in the window before its UUID is recorded. Touched only by the
@@ -173,17 +179,22 @@ func (o *Orchestrator) destroyAll() {
 // Reconcile performs one convergence pass: sync the pool to provider truth,
 // dispatch waiting jobs, provision capacity, and apply teardown.
 func (o *Orchestrator) Reconcile(ctx context.Context) {
+	defer o.markTick()
+
 	insts, err := o.prov.List(ctx, o.cfg.Tag)
 	if err != nil {
 		o.log.Error("list instances", "err", err)
 		return
 	}
+	o.markProviderList()
 	o.syncPool(insts)
 
 	jobs, err := o.jobs.WaitingJobs(ctx)
 	if err != nil {
 		o.log.Error("poll waiting jobs", "err", err)
 		jobs = nil
+	} else {
+		o.markForgejoPoll()
 	}
 	jobs = filterServiceable(jobs, o.cfg.Labels)
 
@@ -221,6 +232,9 @@ func (o *Orchestrator) reapZombieRunners(ctx context.Context) {
 		}
 		o.log.Info("reaped zombie runner", "uuid", r.UUID, "name", r.Name)
 	}
+	// ListRunners reaching this point means the Forgejo call succeeded above;
+	// bump the freshness signal alongside WaitingJobs.
+	o.markForgejoPoll()
 	o.reapSeen = seen
 }
 
