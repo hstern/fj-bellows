@@ -172,10 +172,16 @@ provider_config:
 - **`flexible`** (default): when Linode can't satisfy the anti-affinity
   constraint (host pool exhausted, etc.), it places the Linode on a
   shared host anyway. Best-effort isolation; never blocks a worker boot.
+  fjb extends this semantic to **PG capacity** too (FJB-11): if the
+  group is full (`scale.max` ≥ region's PG max-members) and the create
+  call returns "Placement Group is at its full capacity", Provision
+  drops the PG attach for that one Linode and retries. The PG fills
+  back up at its own pace; this single worker just doesn't get the
+  anti-affinity slot. A `WARN` log records the bypass.
 - **`strict`**: refuses the create when the anti-affinity slot isn't
-  available. Provision returns an error; the orchestrator surfaces it
-  and retries next tick. Use when the isolation guarantee matters more
-  than worker availability.
+  available OR the PG is at capacity. Provision returns an error; the
+  orchestrator surfaces it and retries next tick. Use when the
+  isolation guarantee matters more than worker availability.
 
 **PAT scope** for managed mode: `Linodes: Read/Write` **and** `Placement
 Groups: Read/Write`. The simpler `placement_group_id` mode below only

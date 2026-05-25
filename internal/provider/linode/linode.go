@@ -394,10 +394,61 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	}
 	l.applyManagedResourceAttachments(&opts)
 	inst, err := l.client.CreateInstance(ctx, opts)
+	if err != nil && l.shouldRetryWithoutPlacementGroup(err) {
+		// FJB-11: with enforcement=flexible the operator's intent is
+		// "best-effort PG, don't block on it". Linode's API treats
+		// PG-full as a hard 400 anyway, so we honor flexible at the
+		// orchestrator level by dropping the PG attach for this one
+		// Linode and retrying. The PG fills back up at its own pace;
+		// this single worker just doesn't get the anti-affinity slot.
+		slog.Default().Warn(
+			"placement group at capacity; provisioning this worker without PG attach (enforcement: flexible)",
+			"tag", spec.Tag, "label", spec.Name,
+		)
+		opts.PlacementGroup = nil
+		inst, err = l.client.CreateInstance(ctx, opts)
+	}
 	if err != nil {
 		return provider.Instance{}, fmt.Errorf("linode: create instance: %w", err)
 	}
 	return toInstance(*inst), nil
+}
+
+// shouldRetryWithoutPlacementGroup applies the FJB-11 flexible-
+// enforcement semantic: a PG-full error on a managed PG with
+// enforcement=flexible warrants one retry without the PG attach.
+// Strict enforcement bubbles the error (the operator explicitly
+// chose to prefer no-worker over no-anti-affinity). Operator-managed
+// PGs (placement_group_id) are left alone — fjb doesn't know the
+// operator's intent for that group.
+func (l *Linode) shouldRetryWithoutPlacementGroup(err error) bool {
+	if l.pg == nil {
+		return false
+	}
+	if l.pg.cfg.resolvedPolicy() != linodego.PlacementGroupPolicyFlexible {
+		return false
+	}
+	return isPlacementGroupFull(err)
+}
+
+// isPlacementGroupFull pattern-matches the Linode 400 surfaced when
+// the placement group has hit its per-region max_members ceiling.
+// We match on the human-readable substring rather than a structured
+// field because the Linode API doesn't expose a typed error code for
+// this case as of writing. linodego.Error wraps it; the bare-string
+// fallback covers cases where the error has already been wrapped
+// into a generic error chain (errors.As also unwraps via
+// asLinodeError, so this is belt-and-suspenders).
+func isPlacementGroupFull(err error) bool {
+	if err == nil {
+		return false
+	}
+	const marker = "Placement Group is at its full capacity"
+	var le *linodego.Error
+	if asLinodeError(err, &le) {
+		return le.Code == 400 && strings.Contains(le.Message, marker)
+	}
+	return strings.Contains(err.Error(), marker)
 }
 
 // applyManagedResourceAttachments stamps the firewall + placement

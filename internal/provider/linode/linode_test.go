@@ -2,6 +2,7 @@ package linode
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -24,6 +25,114 @@ func nodeFromYAML(t *testing.T, s string) yaml.Node {
 		return *n.Content[0]
 	}
 	return n
+}
+
+// TestIsPlacementGroupFullMatchesLinodeError covers the typed-error
+// path: a wrapped linodego.Error with the canonical capacity-full
+// message and a 400 status must match. Non-matching codes / messages
+// must not. This is the detection knob the FJB-11 flexible fallback
+// in Provision keys on.
+func TestIsPlacementGroupFullMatchesLinodeError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{
+			name: "canonical 400 message",
+			err: &linodego.Error{
+				Code:    400,
+				Message: "Placement Group is at its full capacity. Cannot assign any more Linodes.",
+			},
+			want: true,
+		},
+		{
+			name: "wrong status code with right message",
+			err: &linodego.Error{
+				Code:    500,
+				Message: "Placement Group is at its full capacity. Cannot assign any more Linodes.",
+			},
+			want: false,
+		},
+		{
+			name: "different 400 — unrelated rejection",
+			err: &linodego.Error{
+				Code:    400,
+				Message: "Region not enabled for placement groups",
+			},
+			want: false,
+		},
+		{
+			name: "bare string fallback (already-wrapped chain)",
+			//nolint:revive // matches the literal Linode API message we detect on
+			err:  errors.New("linode: create: [400] Placement Group is at its full capacity. Cannot assign any more Linodes."),
+			want: true,
+		},
+		{
+			name: "unrelated bare-string error",
+			err:  errors.New("network unreachable"),
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isPlacementGroupFull(c.err); got != c.want {
+				t.Errorf("isPlacementGroupFull(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// TestShouldRetryWithoutPlacementGroup covers the policy branch: only
+// managed PG + flexible enforcement gets the auto-retry. Strict
+// bubbles (the operator chose no-worker over no-anti-affinity);
+// operator-managed PGs (placement_group_id) are never auto-retried
+// because fjb doesn't know the operator's intent.
+func TestShouldRetryWithoutPlacementGroup(t *testing.T) {
+	pgFull := &linodego.Error{Code: 400, Message: "Placement Group is at its full capacity"}
+	otherErr := &linodego.Error{Code: 400, Message: "Some other rejection"}
+
+	cases := []struct {
+		name string
+		l    *Linode
+		err  error
+		want bool
+	}{
+		{
+			name: "managed flexible + PG-full → retry",
+			l:    &Linode{pg: &managedPlacementGroup{cfg: placementGroupConfig{Enforcement: ""}}},
+			err:  pgFull,
+			want: true,
+		},
+		{
+			name: "managed strict + PG-full → no retry",
+			l: &Linode{pg: &managedPlacementGroup{cfg: placementGroupConfig{
+				Enforcement: string(linodego.PlacementGroupPolicyStrict),
+			}}},
+			err:  pgFull,
+			want: false,
+		},
+		{
+			name: "managed flexible + unrelated error → no retry",
+			l:    &Linode{pg: &managedPlacementGroup{cfg: placementGroupConfig{}}},
+			err:  otherErr,
+			want: false,
+		},
+		{
+			name: "no managed PG → no retry (operator-managed PGs are left alone)",
+			l:    &Linode{pg: nil},
+			err:  pgFull,
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.l.shouldRetryWithoutPlacementGroup(c.err); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
 }
 
 func TestConfigure(t *testing.T) {
