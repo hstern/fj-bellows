@@ -38,6 +38,8 @@ const (
 	// ControlServiceListWorkersProcedure is the fully-qualified name of the ControlService's
 	// ListWorkers RPC.
 	ControlServiceListWorkersProcedure = "/fjbellows.control.v1.ControlService/ListWorkers"
+	// ControlServiceGetCacheProcedure is the fully-qualified name of the ControlService's GetCache RPC.
+	ControlServiceGetCacheProcedure = "/fjbellows.control.v1.ControlService/GetCache"
 )
 
 // ControlServiceClient is a client for the fjbellows.control.v1.ControlService service.
@@ -51,6 +53,11 @@ type ControlServiceClient interface {
 	// instead of grepping the orchestrator's stderr log for "worker ready" /
 	// "job complete" / "destroyed idle node".
 	ListWorkers(context.Context, *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error)
+	// GetCache returns the managed pull-through registry cache VM's state.
+	// Present=false for providers that don't manage a cache (docker), or
+	// when the `cache:` block is absent. Turns the e2e harness's soft
+	// "/v2/ reachable" check into a fatal "cache present + running" gate.
+	GetCache(context.Context, *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error)
 }
 
 // NewControlServiceClient constructs a client for the fjbellows.control.v1.ControlService service.
@@ -76,6 +83,12 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("ListWorkers")),
 			connect.WithClientOptions(opts...),
 		),
+		getCache: connect.NewClient[v1.GetCacheRequest, v1.GetCacheResponse](
+			httpClient,
+			baseURL+ControlServiceGetCacheProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("GetCache")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -83,6 +96,7 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 type controlServiceClient struct {
 	health      *connect.Client[v1.HealthRequest, v1.HealthResponse]
 	listWorkers *connect.Client[v1.ListWorkersRequest, v1.ListWorkersResponse]
+	getCache    *connect.Client[v1.GetCacheRequest, v1.GetCacheResponse]
 }
 
 // Health calls fjbellows.control.v1.ControlService.Health.
@@ -93,6 +107,11 @@ func (c *controlServiceClient) Health(ctx context.Context, req *connect.Request[
 // ListWorkers calls fjbellows.control.v1.ControlService.ListWorkers.
 func (c *controlServiceClient) ListWorkers(ctx context.Context, req *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error) {
 	return c.listWorkers.CallUnary(ctx, req)
+}
+
+// GetCache calls fjbellows.control.v1.ControlService.GetCache.
+func (c *controlServiceClient) GetCache(ctx context.Context, req *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error) {
+	return c.getCache.CallUnary(ctx, req)
 }
 
 // ControlServiceHandler is an implementation of the fjbellows.control.v1.ControlService service.
@@ -106,6 +125,11 @@ type ControlServiceHandler interface {
 	// instead of grepping the orchestrator's stderr log for "worker ready" /
 	// "job complete" / "destroyed idle node".
 	ListWorkers(context.Context, *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error)
+	// GetCache returns the managed pull-through registry cache VM's state.
+	// Present=false for providers that don't manage a cache (docker), or
+	// when the `cache:` block is absent. Turns the e2e harness's soft
+	// "/v2/ reachable" check into a fatal "cache present + running" gate.
+	GetCache(context.Context, *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error)
 }
 
 // NewControlServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -127,12 +151,20 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("ListWorkers")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceGetCacheHandler := connect.NewUnaryHandler(
+		ControlServiceGetCacheProcedure,
+		svc.GetCache,
+		connect.WithSchema(controlServiceMethods.ByName("GetCache")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/fjbellows.control.v1.ControlService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlServiceHealthProcedure:
 			controlServiceHealthHandler.ServeHTTP(w, r)
 		case ControlServiceListWorkersProcedure:
 			controlServiceListWorkersHandler.ServeHTTP(w, r)
+		case ControlServiceGetCacheProcedure:
+			controlServiceGetCacheHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -148,4 +180,8 @@ func (UnimplementedControlServiceHandler) Health(context.Context, *connect.Reque
 
 func (UnimplementedControlServiceHandler) ListWorkers(context.Context, *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ListWorkers is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) GetCache(context.Context, *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.GetCache is not implemented"))
 }
