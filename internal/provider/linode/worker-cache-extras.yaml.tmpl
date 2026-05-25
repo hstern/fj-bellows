@@ -1,6 +1,12 @@
 #cloud-config
-# Worker cache-extras fragment (FJB-6 PR 2b). cloud-init merges this
-# with the base worker user-data the orchestrator rendered.
+# Worker cache-extras fragment. cloud-init merges this with the base
+# worker user-data the orchestrator rendered.
+#
+# FJB-13: zot is a scratch registry workers address explicitly at
+# cache.fjb.internal:5000. This fragment only ships CA trust +
+# hostname resolution — workers know about zot only; nothing
+# intercepts pulls of any other registry. Push to the canonical
+# registry (Forgejo etc.) goes direct from the worker.
 #
 # merge_how is required because cloud-init's default merge strategy
 # REPLACES lists across multipart parts — without this directive
@@ -16,25 +22,12 @@ merge_how:
     settings: [no_replace, recurse_list]
   - name: str
     settings: [append]
-# Four things are added:
-#  1. The fjb-managed CA, so workers trust the cache's TLS cert.
+# Two things are added:
+#  1. The fjb-managed CA, so workers trust the cache's TLS cert when
+#     they `docker push/pull cache.fjb.internal:5000/...`.
 #  2. An /etc/hosts entry mapping the cache hostname to its VPC IP
 #     (no DNS dependency — workers reach the cache by IP via the
-#     hosts file lookup).
-#  3. A containerd hosts.toml that redirects PULLS from the upstream
-#     registry through the cache. Capabilities are deliberately
-#     PULL-ONLY — pushes to the upstream hostname continue to take
-#     the public NIC direct to upstream, which is the boundary that
-#     makes "no push replication" safe.
-#  4. /etc/docker/daemon.json that enables Docker's containerd image
-#     store (FJB-9). Without it, dockerd uses its own image store
-#     and ignores /etc/containerd/certs.d/ entirely — every job-
-#     container pull bypasses the cache and goes direct to upstream.
-#     Requires Docker >= 23; the worker image must be linode/debian13
-#     (trixie, docker.io 26) or newer. cloud-init writes files in the
-#     init stage (before package install), so dockerd starts with
-#     this config in place; the systemctl restart in runcmd is belt-
-#     and-suspenders for the case where docker was already running.
+#     hosts-file lookup over the VPC NIC).
 write_files:
   - path: /usr/local/share/ca-certificates/fjb-cache.crt
     permissions: '0644'
@@ -44,17 +37,5 @@ write_files:
     append: true
     content: |
       {{.CacheIP}} {{.CacheHost}}
-  - path: /etc/containerd/certs.d/{{.UpstreamHost}}/hosts.toml
-    permissions: '0644'
-    content: |
-      server = "https://{{.UpstreamHost}}"
-
-      [host."https://{{.CacheHost}}:{{.CachePort}}"]
-        capabilities = ["pull", "resolve"]
-  - path: /etc/docker/daemon.json
-    permissions: '0644'
-    content: |
-      {"features": {"containerd-snapshotter": true}}
 runcmd:
   - update-ca-certificates
-  - systemctl restart docker

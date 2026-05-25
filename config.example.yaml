@@ -54,10 +54,6 @@ provider: linode
 provider_config:
   region: us-ord
   type: g6-nanode-1
-  # Workers need Docker >= 23 for the pull-through cache to actually work
-  # (containerd-snapshotter feature; FJB-9). Bookworm's packaged docker.io is
-  # 20.10 and silently ignores the daemon.json snapshotter flag, leaving the
-  # cache empty. Trixie ships docker.io 26.1.5 which has it native.
   image: linode/debian13
   token: <linode-pat>
 
@@ -101,32 +97,20 @@ provider_config:
   #   # no override).
   #   # worker_subnet: cache
 
-  # Managed pull-through registry cache (FJB-6 PR 2a + PR 2b). ABSENT =
-  # no cache: workers pull direct from upstream. PRESENT = one zot VM +
-  # one Object Storage bucket per deployment, plus a multipart-MIME wrap
-  # on each worker's cloud-init that adds CA trust, a /etc/hosts entry
-  # for the cache hostname, and a containerd hosts.toml that redirects
-  # PULLS of `upstream.url`'s host through the cache. Pushes to that
-  # hostname still go direct to upstream (pull-only mirror capabilities
-  # — the boundary that makes "no push replication" safe). Auto-
-  # synthesizes the `vpc:` block above if not declared. Adds
-  # `Object Storage: R/W` to the PAT scope and requires Object Storage
-  # to be enabled on the Linode account ($5/mo flat, one-click at Cloud
-  # Manager → Object Storage).
+  # Managed scratch registry (FJB-13). ABSENT = no cache. PRESENT =
+  # one zot VM + one Object Storage bucket per deployment, plus a
+  # multipart-MIME wrap on each worker's cloud-init that ships the
+  # fjb-managed CA + an /etc/hosts entry mapping cache.fjb.internal
+  # to the cache's VPC IP. Workers can then
+  #   docker push/pull cache.fjb.internal:5000/foo/bar:t
+  # for intermediate build artifacts that don't need to round-trip to
+  # the canonical registry. Pushes to the canonical registry
+  # (forgejo.url etc.) go direct from the worker — nothing intercepts
+  # them. Auto-synthesizes the `vpc:` block above if not declared.
+  # Adds `Object Storage: R/W` to the PAT scope and requires Object
+  # Storage to be enabled on the Linode account ($5/mo flat, one-
+  # click at Cloud Manager → Object Storage).
   # cache:
-  #   upstream:
-  #     # Hostname upstreams (including LAN-internal split-horizon names)
-  #     # are reached over a persistent orchestrator-side ssh -R tunnel
-  #     # (FJB-7): the cache VM cloud-init pins 127.0.0.1 <host> in
-  #     # /etc/hosts and the orchestrator bridges loopback connections to
-  #     # the real upstream from its own (LAN-aware) network namespace,
-  #     # so a Forgejo at https://git.lan.example/v2/ on RFC1918 works
-  #     # without any cloud-side route. TLS SNI is unchanged, so a
-  #     # public-CA cert continues to validate end-to-end. IP-literal
-  #     # upstreams (https://10.0.0.5/...) can't use the /etc/hosts
-  #     # redirect — pick a hostname when LAN-internal reachability
-  #     # matters.
-  #     url: https://forgejo.example.com/v2/
   #   # CA persistence path. Adopt-existing on daemon restart requires
   #   # the CA dir to survive between restarts. Default under
   #   # os.UserConfigDir(); set to a stable path when running fjb as a

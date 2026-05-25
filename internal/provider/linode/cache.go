@@ -8,17 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"text/template"
 
 	"github.com/linode/linodego"
-	"golang.org/x/crypto/ssh"
 )
 
 // cacheClient is the slice of *linodego.Client the managed-cache code
@@ -28,18 +24,29 @@ type cacheClient interface {
 	ListInstances(ctx context.Context, opts *linodego.ListOptions) ([]linodego.Instance, error)
 	CreateInstance(ctx context.Context, opts linodego.InstanceCreateOptions) (*linodego.Instance, error)
 	DeleteInstance(ctx context.Context, id int) error
-	GetInstance(ctx context.Context, id int) (*linodego.Instance, error)
 	ListInstanceConfigs(ctx context.Context, linodeID int, opts *linodego.ListOptions) ([]linodego.InstanceConfig, error)
 }
 
 // cacheConfig is the provider_config.cache sub-block.
+//
+// FJB-13: zot is a scratch registry workers address explicitly at
+// `cache.fjb.internal:5000`, not a transparent pull-through cache.
+// Pushes of intermediate build artifacts land in zot's S3 bucket;
+// pulls of those artifacts come back from zot. Pushes that need to
+// reach the canonical registry (Forgejo, Docker Hub, etc.) go direct
+// to that registry from the worker, bypassing zot. There is no
+// transparent redirect of any hostname — workers know about zot only
+// via its hostname + TLS trust + /etc/hosts entry, and use it
+// explicitly. The previous transparent-redirect machinery (sync
+// extension, containerd hosts.toml mirror, FJB-7 reverse-tunnel,
+// FJB-9 containerd-snapshotter) is gone.
 type cacheConfig struct {
 	// Type is the Linode instance type for the cache VM. Default is
 	// g6-nanode-1 — sufficient for the typical small-team workload;
 	// operators bump to g6-standard-1 (2 GB) under burst-pull pressure.
 	Type string `yaml:"type"`
 
-	// Image is the Linode image ID. Default is linode/debian12.
+	// Image is the Linode image ID. Default is linode/debian13.
 	Image string `yaml:"image"`
 
 	// ZotVersion pins the zot binary release the cloud-init downloads.
@@ -47,12 +54,11 @@ type cacheConfig struct {
 	// deliberately to take a new zot.
 	ZotVersion string `yaml:"zot_version"`
 
-	// Upstream identifies the registry workers will pull from (via the
-	// cache). zot uses Upstream.URL for its sync extension; the
-	// containerd hosts.toml on each worker mirrors Upstream's host.
-	// PR 2b requires this to be set explicitly when `cache:` is
-	// enabled. A future PR will default Upstream.URL from forgejo.url
-	// when omitted.
+	// Upstream is a removed field, accepted only to surface a clear
+	// deprecation error for operators copy-pasting old configs. The
+	// transparent-redirect model it powered (zot's sync extension)
+	// was retired in FJB-13. validate() rejects any non-nil value
+	// with a migration note.
 	Upstream *cacheUpstreamConfig `yaml:"upstream"`
 
 	// TLS holds the fjb-managed CA persistence settings. The CA is
@@ -63,13 +69,11 @@ type cacheConfig struct {
 	TLS *cacheTLSConfig `yaml:"tls"`
 }
 
-// cacheUpstreamConfig identifies the registry the cache mirrors.
-// PR 2b requires URL; a future PR will also support Username/Password
-// for Basic-auth pulls (zot's sync extension supports credentials).
+// cacheUpstreamConfig is retained only so the YAML decoder doesn't
+// trip on stale `cache.upstream:` blocks in old configs — validate()
+// rejects with a clear deprecation message. Will be removed after
+// the field stops appearing in operators' configs.
 type cacheUpstreamConfig struct {
-	// URL is the full registry URL (scheme + host + optional port +
-	// optional path). Workers redirect upstream pulls of this host
-	// through the cache.
 	URL string `yaml:"url"`
 }
 
@@ -100,28 +104,14 @@ const (
 // calls. Real validation (bucket reachability, OS-enablement) happens
 // at ensureAtConfigure when we hit the API.
 func (c cacheConfig) validate() error {
-	if c.Upstream == nil || strings.TrimSpace(c.Upstream.URL) == "" {
-		return errors.New("cache.upstream.url is required when cache: is set " +
-			"(a future PR will default this from forgejo.url; for now declare it explicitly)")
-	}
-	if _, err := parseUpstreamHost(c.Upstream.URL); err != nil {
-		return fmt.Errorf("cache.upstream.url %q: %w", c.Upstream.URL, err)
+	if c.Upstream != nil {
+		return errors.New("cache.upstream is no longer supported (FJB-13): " +
+			"zot is now a scratch registry workers address at " +
+			"cache.fjb.internal:5000 directly, not a transparent pull-through " +
+			"of an upstream registry — remove the cache.upstream block from " +
+			"your config")
 	}
 	return nil
-}
-
-// parseUpstreamHost extracts the hostname (no port, no path) from a
-// registry URL. The hostname is what workers' containerd hosts.toml
-// keys on (the directory path under /etc/containerd/certs.d/).
-func parseUpstreamHost(rawURL string) (string, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "", fmt.Errorf("invalid URL: %w", err)
-	}
-	if u.Host == "" {
-		return "", errors.New("URL has no host")
-	}
-	return u.Hostname(), nil
 }
 
 // resolvedType / Image / ZotVersion substitute defaults for empty
@@ -222,22 +212,6 @@ type managedCache struct {
 	// up lazily on first WorkerExtras call (so a fresh-create VM has
 	// time to settle on its IP) and cached. Empty until then.
 	cacheVPCIP string
-
-	// signer / sshUser / sshPort identify how the orchestrator SSHes
-	// into the cache VM for the persistent reverse-tunnel (FJB-7).
-	// Populated by setTunnelIdentity from the same SSH key the
-	// dispatcher uses; nil signer disables the tunnel (tests against
-	// the fake cache client, deployments where SSH wasn't configured).
-	signer  ssh.Signer
-	sshUser string
-	sshPort int
-
-	// tunnel runs the long-lived ssh -R bridging upstream connections
-	// from the cache VM back through the orchestrator's network
-	// namespace. Non-nil iff ensureAtConfigure successfully started
-	// it; maybeCleanupCache stops it before DeleteInstance so the
-	// loop doesn't churn against a deleted VM.
-	tunnel *cacheTunnel
 }
 
 func newManagedCache(cfg cacheConfig, tag, region string, client cacheClient, bucket *managedBucket, log *slog.Logger) *managedCache {
@@ -263,22 +237,7 @@ func (m *managedCache) setHardwareContext(firewallID, vpcSubnetID int, authorize
 	m.authorizedKey = authorizedKey
 }
 
-// setTunnelIdentity supplies the SSH identity the orchestrator will
-// use to dial the cache VM for the persistent reverse-tunnel
-// (FJB-7). signer is the orchestrator's SSH private key (same one
-// the dispatcher uses for workers); user / port match cfg.SSH.
-// Calling with a nil signer is fine — the tunnel just won't start,
-// which is the right behavior for tests against the fake client and
-// for deployments without an SSH key. authorizedKey on
-// setHardwareContext must be the public half of signer for the cache
-// VM to accept the orchestrator's dial.
-func (m *managedCache) setTunnelIdentity(signer ssh.Signer, user string, port int) {
-	m.signer = signer
-	m.sshUser = user
-	m.sshPort = port
-}
-
-// ensure brings the cache VM (and its bucket + scoped key + tunnel)
+// ensure brings the cache VM (and its bucket + scoped key)
 // into existence on demand. No-op when the cached linodeID is still
 // valid; otherwise re-runs ensureAtConfigure to recreate from
 // scratch. The reaper resets linodeID to 0 when it deletes the VM
@@ -333,7 +292,6 @@ func (m *managedCache) ensureAtConfigure(ctx context.Context) error {
 		m.linodeID = existing.ID
 		m.adoptedExisting = true
 		m.log.Info("managed cache: adopted existing Linode", "id", existing.ID, "label", existing.Label, "ca_dir", caDir)
-		m.startTunnel()
 		return nil
 	}
 
@@ -341,17 +299,13 @@ func (m *managedCache) ensureAtConfigure(ctx context.Context) error {
 }
 
 // createFreshCacheLinode mints the bucket + key, renders cloud-init,
-// creates the cache VM, and starts the tunnel. Extracted from
-// ensureAtConfigure to keep the cyclomatic complexity of the parent
-// under the linter's budget; the adopt branch returns early.
+// and creates the cache VM. Extracted from ensureAtConfigure to keep
+// the cyclomatic complexity of the parent under the linter's budget;
+// the adopt branch returns early.
 func (m *managedCache) createFreshCacheLinode(ctx context.Context, pair cacheCertPair) error {
 	creds, err := m.bucket.ensureAtConfigure(ctx)
 	if err != nil {
 		return fmt.Errorf("bucket: %w", err)
-	}
-	upstreamHost, err := parseUpstreamHost(m.cfg.Upstream.URL)
-	if err != nil {
-		return fmt.Errorf("parse upstream URL: %w", err)
 	}
 	userData, err := renderCacheCloudInit(cacheCloudInitParams{
 		Bucket:        creds.Bucket,
@@ -363,8 +317,6 @@ func (m *managedCache) createFreshCacheLinode(ctx context.Context, pair cacheCer
 		ReadyFile:     defaultCacheReadyFile,
 		ServerCertPEM: string(pair.ServerCertPEM),
 		ServerKeyPEM:  string(pair.ServerKeyPEM),
-		UpstreamURL:   m.cfg.Upstream.URL,
-		UpstreamHost:  upstreamHost,
 	})
 	if err != nil {
 		return fmt.Errorf("render cloud-init: %w", err)
@@ -380,7 +332,6 @@ func (m *managedCache) createFreshCacheLinode(ctx context.Context, pair cacheCer
 	}
 	m.linodeID = inst.ID
 	m.log.Info("managed cache: created", "id", inst.ID, "label", inst.Label)
-	m.startTunnel()
 	return nil
 }
 
@@ -418,85 +369,6 @@ func (m *managedCache) buildCreateOpts(userData, rootPass string) linodego.Insta
 	return opts
 }
 
-// startTunnel kicks off the persistent ssh -R from the orchestrator
-// to the cache VM (FJB-7). Pre-conditions: m.linodeID is set, and
-// setTunnelIdentity was called with a non-nil signer. When either is
-// missing the tunnel is silently skipped — fine for unit tests
-// against the fake client and for deployments that haven't wired SSH
-// (those naturally have no LAN-internal reach to lose). The
-// goroutine handles the cache-VM-not-yet-reachable window via its own
-// reconnect loop; we don't block Configure on the first connect.
-func (m *managedCache) startTunnel() {
-	if m.signer == nil || m.linodeID == 0 {
-		return
-	}
-	if m.tunnel != nil {
-		// Defensive: idempotent against accidental double-call.
-		return
-	}
-	upstream, err := url.Parse(m.cfg.Upstream.URL)
-	if err != nil {
-		m.log.Warn("managed cache: parse upstream URL for tunnel, skipping", "err", err)
-		return
-	}
-	host := upstream.Hostname()
-	port := upstreamPort(upstream)
-	if host == "" || port == 0 {
-		m.log.Warn("managed cache: upstream URL has no host or port, skipping tunnel",
-			"url", m.cfg.Upstream.URL)
-		return
-	}
-	linodeID := m.linodeID
-	m.tunnel = &cacheTunnel{
-		signer:       m.signer,
-		sshUser:      m.sshUser,
-		sshPort:      m.sshPort,
-		upstreamHost: host,
-		upstreamPort: port,
-		lookupIP: func(ctx context.Context) (string, error) {
-			return m.lookupCachePublicIP(ctx, linodeID)
-		},
-		log: m.log.With("component", "cache_tunnel"),
-	}
-	m.tunnel.Start()
-}
-
-// upstreamPort returns the effective port for an upstream URL,
-// defaulting from scheme. Returns 0 only if the scheme is neither
-// http nor https (and no explicit port was given).
-func upstreamPort(u *url.URL) int {
-	if p := u.Port(); p != "" {
-		n, err := strconv.Atoi(p)
-		if err == nil && n > 0 && n <= 65535 {
-			return n
-		}
-		return 0
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "http":
-		return 80
-	case "https":
-		return 443
-	}
-	return 0
-}
-
-// lookupCachePublicIP fetches the cache VM's first public IPv4. The
-// cache tunnel calls this on every reconnect attempt; on a fresh-
-// create VM the IP may not be assigned for the first few seconds,
-// which surfaces as an error here and the tunnel backs off and
-// retries.
-func (m *managedCache) lookupCachePublicIP(ctx context.Context, linodeID int) (string, error) {
-	inst, err := m.client.GetInstance(ctx, linodeID)
-	if err != nil {
-		return "", fmt.Errorf("get cache linode %d: %w", linodeID, err)
-	}
-	if len(inst.IPv4) == 0 || inst.IPv4[0] == nil {
-		return "", fmt.Errorf("cache linode %d has no public IPv4 assigned yet", linodeID)
-	}
-	return inst.IPv4[0].String(), nil
-}
-
 // findCacheLinode looks up the deployment's cache VM by tag. Cache VMs
 // carry `<tag>-cache` and NOT the worker tag, so this is a distinct
 // lookup from the orchestrator's List(tag).
@@ -520,13 +392,6 @@ func (m *managedCache) findCacheLinode(ctx context.Context) (*linodego.Instance,
 // cached layers are valuable across deployments; PR 2b adds the
 // retain_after_destroy knob for explicit destruction.
 func (m *managedCache) maybeCleanupCache(ctx context.Context) {
-	// Stop the tunnel before deleting the VM so the reconnect loop
-	// doesn't briefly churn against a host that's gone away. Stop is
-	// idempotent and a no-op when the tunnel never started.
-	if m.tunnel != nil {
-		m.tunnel.Stop()
-		m.tunnel = nil
-	}
 	if m.linodeID != 0 {
 		if err := m.client.DeleteInstance(ctx, m.linodeID); err != nil {
 			m.log.Warn("managed cache: delete linode during cleanup", "id", m.linodeID, "err", err)
@@ -584,22 +449,6 @@ type cacheCloudInitParams struct {
 	// these via the CA distributed in the multipart worker cloud-init.
 	ServerCertPEM string
 	ServerKeyPEM  string
-
-	// UpstreamURL configures zot's sync extension to pull-through
-	// from the operator's primary registry. Empty disables sync;
-	// PR 2b requires it via cacheConfig.validate so the template
-	// always sees a non-empty value here.
-	UpstreamURL string
-
-	// UpstreamHost is the hostname extracted from UpstreamURL. The
-	// template uses it to add a /etc/hosts entry pointing the
-	// upstream hostname at 127.0.0.1, where the orchestrator's
-	// persistent ssh -R reverse-tunnel listens (FJB-7). When the
-	// upstream URL uses an IP literal there is nothing to override —
-	// /etc/hosts maps names not IPs — so the template skips the
-	// override block in that case. Either way the value is required
-	// so the renderer is single-shape.
-	UpstreamHost string
 }
 
 // renderCacheCloudInit fills the embedded template. Defaults to the
@@ -622,7 +471,6 @@ func renderCacheCloudInit(p cacheCloudInitParams) (string, error) {
 			}
 			return strings.Join(lines, "\n")
 		},
-		"isIPLiteral": func(s string) bool { return net.ParseIP(s) != nil },
 	}).Parse(cacheCloudInitTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parse cache cloud-init template: %w", err)
@@ -663,12 +511,6 @@ func validateCloudInitParams(p cacheCloudInitParams) error {
 	if p.ServerKeyPEM == "" {
 		missing = append(missing, "ServerKeyPEM")
 	}
-	if p.UpstreamURL == "" {
-		missing = append(missing, "UpstreamURL")
-	}
-	if p.UpstreamHost == "" {
-		missing = append(missing, "UpstreamHost")
-	}
 	if len(missing) > 0 {
 		return fmt.Errorf("cache cloud-init: missing required field(s): %s", strings.Join(missing, ", "))
 	}
@@ -677,24 +519,25 @@ func validateCloudInitParams(p cacheCloudInitParams) error {
 
 // workerExtrasData is what the worker cloud-init wrap needs: the
 // trust anchor (CA cert PEM), the cache hostname workers should
-// resolve, the cache VPC IP that hostname maps to, the cache TLS
-// port, and the upstream host the containerd mirror config keys on.
+// resolve, the cache VPC IP that hostname maps to, and the cache
+// TLS port. FJB-13: no transparent-redirect mirror config is shipped
+// any more — workers address zot at cache.fjb.internal explicitly.
 type workerExtrasData struct {
-	CACertPEM    string
-	CacheHost    string
-	CacheIP      string
-	CachePort    int
-	UpstreamHost string
+	CACertPEM string
+	CacheHost string
+	CacheIP   string
+	CachePort int
 }
 
 // workerExtras returns the data the linode provider's Provision needs
-// to wrap each worker's cloud-init with cache-trust + mirror config.
-// Looks up the cache VPC IP lazily (so a fresh-create cache VM has
-// time to settle on its IP between Configure and the first Provision)
-// and caches it on managedCache for subsequent calls. Returns an error
-// when the IP isn't yet assigned — the orchestrator's reconcile loop
-// retries Provision next tick, which is the right behavior since the
-// IP is a precondition for worker→cache TLS.
+// to wrap each worker's cloud-init with cache trust + hostname
+// resolution. Looks up the cache VPC IP lazily (so a fresh-create
+// cache VM has time to settle on its IP between Configure and the
+// first Provision) and caches it on managedCache for subsequent
+// calls. Returns an error when the IP isn't yet assigned — the
+// orchestrator's reconcile loop retries Provision next tick, which is
+// the right behavior since the IP is a precondition for worker→cache
+// TLS.
 func (m *managedCache) workerExtras(ctx context.Context) (workerExtrasData, error) {
 	if len(m.caCertPEM) == 0 {
 		return workerExtrasData{}, errors.New("workerExtras: cache CA not initialised")
@@ -706,16 +549,11 @@ func (m *managedCache) workerExtras(ctx context.Context) (workerExtrasData, erro
 		}
 		m.cacheVPCIP = ip
 	}
-	upstreamHost, err := parseUpstreamHost(m.cfg.Upstream.URL)
-	if err != nil {
-		return workerExtrasData{}, err
-	}
 	return workerExtrasData{
-		CACertPEM:    string(m.caCertPEM),
-		CacheHost:    defaultCacheHostname,
-		CacheIP:      m.cacheVPCIP,
-		CachePort:    defaultCachePort,
-		UpstreamHost: upstreamHost,
+		CACertPEM: string(m.caCertPEM),
+		CacheHost: defaultCacheHostname,
+		CacheIP:   m.cacheVPCIP,
+		CachePort: defaultCachePort,
 	}, nil
 }
 

@@ -116,9 +116,6 @@ func validateWorkerExtras(x workerExtrasData) error {
 	if x.CachePort == 0 {
 		missing = append(missing, "CachePort")
 	}
-	if x.UpstreamHost == "" {
-		missing = append(missing, "UpstreamHost")
-	}
 	if len(missing) > 0 {
 		return fmt.Errorf("worker cache extras: missing required field(s): %s", strings.Join(missing, ", "))
 	}

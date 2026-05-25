@@ -1,13 +1,19 @@
 #cloud-config
-# Cache VM bootstrap for fj-bellows (FJB-6). Installs zot, writes the
+# Cache VM bootstrap for fj-bellows. Installs zot, writes the
 # fjb-managed TLS cert (signed by the persisted CA so workers trust it),
-# configures zot's S3 storage driver + sync extension, and starts the
-# systemd unit.
+# configures zot's S3 storage driver, and starts the systemd unit.
+#
+# FJB-13: zot is a scratch registry workers address explicitly. There
+# is no sync extension pulling from an upstream registry, and the
+# orchestrator does not dial this VM for any reverse-tunnel. Workers
+# `docker push/pull cache.fjb.internal:5000/<ref>` directly; pushes
+# bound for the canonical registry (Forgejo etc.) go from the worker
+# straight to that registry without touching zot.
 #
 # Bound to 0.0.0.0:5000: the deployment firewall drops public-inbound
 # tcp/5000 (only tcp/22 is open per the auto sentinel), and the VPC NIC
 # stays reachable from workers within the cache subnet. Operators can
-# break-glass via SSH + a local port-forward.
+# break-glass via Lish or SSH + a local port-forward.
 package_update: true
 packages:
   - curl
@@ -42,17 +48,6 @@ write_files:
         },
         "log": {
           "level": "info"
-        },
-        "extensions": {
-          "sync": {
-            "enable": true,
-            "registries": [{
-              "urls": ["{{.UpstreamURL}}"],
-              "onDemand": true,
-              "tlsVerify": true,
-              "content": [{"prefix": "**"}]
-            }]
-          }
         }
       }
   - path: /etc/zot/tls/cert.pem
@@ -78,17 +73,6 @@ write_files:
       User=root
       [Install]
       WantedBy=multi-user.target
-  - path: /etc/ssh/sshd_config.d/20-fj-bellows-tunnel.conf
-    permissions: '0644'
-    content: |
-      # FJB-7: the orchestrator dials this VM with `ssh -R` to bridge
-      # upstream registry traffic through its own (LAN-aware) network
-      # namespace. AllowTcpForwarding=yes is OpenSSH's compiled-in
-      # default, but pin it explicitly so a hardened base image can't
-      # silently break the cache by setting it to `no`. GatewayPorts
-      # stays off (the dispatcher binds 127.0.0.1 only, never 0.0.0.0).
-      AllowTcpForwarding yes
-      GatewayPorts no
 runcmd:
 {{- if .HostPrivateKey}}
   - |
@@ -114,19 +98,6 @@ runcmd:
     curl -fsSL -o /usr/local/bin/zot "$url"
     chmod +x /usr/local/bin/zot
   - mkdir -p /var/lib/zot
-{{- if not (isIPLiteral .UpstreamHost)}}
-  - |
-    set -eu
-    # FJB-7: point the upstream hostname at 127.0.0.1 so zot's sync
-    # extension hits the orchestrator's persistent ssh -R listener
-    # instead of dialing the public NIC (which cannot reach RFC1918
-    # / split-horizon hosts on the operator's LAN). TLS SNI is
-    # unchanged ({{.UpstreamHost}}), so a public-CA cert on the
-    # upstream continues to validate end-to-end.
-    line='127.0.0.1 {{.UpstreamHost}}'
-    grep -qF "$line" /etc/hosts || echo "$line" >> /etc/hosts
-{{- end}}
-  - systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
   - systemctl daemon-reload
   - systemctl enable --now zot.service
   - touch {{.ReadyFile}}

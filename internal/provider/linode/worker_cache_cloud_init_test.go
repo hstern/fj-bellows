@@ -9,11 +9,10 @@ import (
 
 func testValidWorkerExtras() workerExtrasData {
 	return workerExtrasData{
-		CACertPEM:    "-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----\n",
-		CacheHost:    defaultCacheHostname,
-		CacheIP:      "10.0.0.42",
-		CachePort:    defaultCachePort,
-		UpstreamHost: "upstream.example.com",
+		CACertPEM: "-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----\n",
+		CacheHost: defaultCacheHostname,
+		CacheIP:   "10.0.0.42",
+		CachePort: defaultCachePort,
 	}
 }
 
@@ -60,56 +59,35 @@ func TestWrapWorkerUserDataForCachePropagatesBaseAndExtras(t *testing.T) {
 		t.Fatalf("wrap: %v", err)
 	}
 	for _, want := range []string{
-		"unique-base-marker",                 // base content present
-		"FAKECA",                             // CA PEM body present
-		"10.0.0.42",                          // cache IP
-		defaultCacheHostname,                 // cache hostname
-		"upstream.example.com",               // upstream host
-		"update-ca-certificates",             // runcmd from extras
-		`capabilities = ["pull", "resolve"]`, // pull-only mirror
-		"/etc/docker/daemon.json",            // FJB-9: dockerd snapshotter config path
-		`{"features": {"containerd-snapshotter": true}}`, // FJB-9: feature payload
-		"systemctl restart docker",                       // FJB-9: pick up daemon.json
+		"unique-base-marker",     // base content present
+		"FAKECA",                 // CA PEM body present
+		"10.0.0.42",              // cache IP
+		defaultCacheHostname,     // cache hostname
+		"update-ca-certificates", // runcmd from extras
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("wrapped output missing %q\n---\n%s", want, out)
 		}
 	}
-	// Must NOT include "push" in capabilities — that's the boundary
-	// that keeps push-to-upstream from being silently captured.
-	if strings.Contains(out, `"push"`) {
-		t.Errorf("worker mirror config contains \"push\" capability — boundary broken")
+	// FJB-13: zot is a scratch registry workers address explicitly.
+	// The fragment must NOT ship a containerd hosts.toml redirect
+	// (broke push to Forgejo with OCI manifests) or a daemon.json
+	// turning on the containerd image store.
+	for _, mustNot := range []string{
+		"hosts.toml",
+		"containerd-snapshotter",
+		"/etc/docker/daemon.json",
+		"systemctl restart docker",
+	} {
+		if strings.Contains(out, mustNot) {
+			t.Errorf("wrapped output must not contain %q (FJB-13: scratch-registry model)\n---\n%s", mustNot, out)
+		}
 	}
 }
 
 func TestWrapWorkerUserDataForCacheRejectsEmptyBase(t *testing.T) {
 	if _, err := wrapWorkerUserDataForCache("", testValidWorkerExtras()); err == nil {
 		t.Error("expected error on empty base user-data")
-	}
-}
-
-// TestWrapWorkerUserDataForCacheRoutesDockerThroughContainerd is the
-// FJB-9 regression: without the containerd-snapshotter daemon.json,
-// dockerd ignores /etc/containerd/certs.d/ and every job-container
-// pull bypasses the cache (zero objects in the cache S3 bucket).
-// Three load-bearing facts on the wire:
-//  1. The daemon.json path is correct (dockerd reads exactly this path).
-//  2. The feature payload is exactly the keys/values dockerd expects.
-//  3. A docker restart fires so daemon.json is picked up even when
-//     dockerd was running before /etc/docker/daemon.json existed.
-func TestWrapWorkerUserDataForCacheRoutesDockerThroughContainerd(t *testing.T) {
-	out, err := wrapWorkerUserDataForCache("#cloud-config\n", testValidWorkerExtras())
-	if err != nil {
-		t.Fatalf("wrap: %v", err)
-	}
-	if !strings.Contains(out, "path: /etc/docker/daemon.json") {
-		t.Errorf("daemon.json write_files entry missing — dockerd will keep its own image store:\n%s", out)
-	}
-	if !strings.Contains(out, `{"features": {"containerd-snapshotter": true}}`) {
-		t.Errorf("daemon.json feature payload missing or wrong:\n%s", out)
-	}
-	if !strings.Contains(out, "systemctl restart docker") {
-		t.Errorf("docker restart missing — daemon.json isn't hot-reloaded so the running dockerd won't pick it up:\n%s", out)
 	}
 }
 
@@ -123,7 +101,6 @@ func TestRenderWorkerCacheExtrasRequiresAllFields(t *testing.T) {
 		{name: "missing host", wipe: func(x *workerExtrasData) { x.CacheHost = "" }},
 		{name: "missing IP", wipe: func(x *workerExtrasData) { x.CacheIP = "" }},
 		{name: "missing port", wipe: func(x *workerExtrasData) { x.CachePort = 0 }},
-		{name: "missing upstream", wipe: func(x *workerExtrasData) { x.UpstreamHost = "" }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

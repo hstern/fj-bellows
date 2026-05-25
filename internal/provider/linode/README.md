@@ -289,11 +289,24 @@ subnets within an operator-managed VPC" story to factor in). Would
 mirror `firewall_id:` / `placement_group_id:` as `vpc_id:` +
 `vpc_subnet_id:` if added later.
 
-## Cache (FJB-6 PR 2a + PR 2b)
+## Cache (FJB-13 scratch-registry model)
 
-Optional. Stands up a [zot](https://zotregistry.dev/) registry as a
-pull-through cache backed by Linode Object Storage, with workers
-wired to pull through it.
+Optional. Stands up a [zot](https://zotregistry.dev/) registry backed
+by Linode Object Storage. Workers address it explicitly at
+`cache.fjb.internal:5000` — there is no transparent redirect of any
+other hostname's traffic. Use it for **intermediate build artifacts**
+that workers `docker push` and later `docker pull` without needing
+to round-trip the canonical registry (Forgejo etc.). Pushes that need
+to reach the canonical registry go direct from the worker to that
+registry, bypassing zot entirely.
+
+Why this shape: the original FJB-6 design did a transparent pull-
+through redirect of an `upstream:` URL through zot's sync extension,
+which required Docker's containerd image store (FJB-9). That image
+store broke `docker push` to Forgejo with OCI-manifest 404s
+(FJB-13). The scratch-registry model gets the round-trip-elimination
+benefit for intermediates without entangling itself with how
+dockerd negotiates manifest formats.
 
 ### `cache:` — managed mode
 
@@ -302,10 +315,6 @@ provider_config:
   region: us-ord
   # ... firewall: / placement_group: as before ...
   cache:
-    # Required. Workers' containerd mirror config keys on the host of
-    # this URL; zot's sync extension pull-throughs from this URL.
-    upstream:
-      url: https://forgejo.example.com/v2/
     # Optional. CA persistence path (load-or-generate) — daemon
     # restart with the same CA dir lets fj-bellows adopt the existing
     # cache VM instead of recreating it. Default: under
@@ -334,31 +343,35 @@ When `cache:` is set, fj-bellows:
    `<deployment-tag>-cache` (NOT the deployment tag — the worker
    `List(tag)` lookup is exact-match, so the cache never surfaces as a
    worker the reconciler tries to dispatch to). Its cloud-init downloads
-   the pinned zot binary, generates a self-signed TLS cert with openssl,
-   writes `/etc/zot/config.json` pointing at the bucket, and starts the
-   `zot.service` systemd unit on port 5000.
+   the pinned zot binary, writes `/etc/zot/config.json` pointing at the
+   bucket, and starts the `zot.service` systemd unit on port 5000.
 5. **Attaches the cache to the deployment firewall and VPC** — the
    firewall's default `allow_inbound: [auto]` covers SSH; tcp/5000 is
    reachable only over the VPC NIC (the public NIC's firewall drops
    non-SSH inbound).
+6. **Wraps each worker's cloud-init** with the fjb-managed CA + an
+   `/etc/hosts` entry mapping `cache.fjb.internal` to the cache's VPC
+   IP. Workers can then `docker push/pull cache.fjb.internal:5000/...`
+   with TLS verifying against the trusted CA.
 
 The cache VM uses the SAME deployment firewall as workers — no separate
 firewall block. Operators get SSH break-glass via the operator's IP
 (per the `auto` sentinel); registry traffic stays off the public NIC.
 
-### Worker image requirement (Docker >= 23)
+### Using the cache from a workflow
 
-The worker `image:` must ship a Docker version that supports the
-**containerd image store** (`{"features": {"containerd-snapshotter":
-true}}` in `daemon.json`) — Docker 23+. Without it, dockerd uses its
-own image store and silently ignores `/etc/containerd/certs.d/`, so
-every job-container pull bypasses the cache and goes direct to
-upstream (zero objects in the cache bucket — FJB-9). `linode/debian13`
-(trixie, docker.io 26.1.5) is the practical floor; `linode/debian12`
-(bookworm, docker.io 20.10) is too old. The cache-extras cloud-init
-writes `/etc/docker/daemon.json` and restarts docker, so the operator
-doesn't manage the daemon config — but the binary has to be new
-enough to understand the feature.
+Inside any workflow step:
+
+```sh
+docker build -t cache.fjb.internal:5000/myrepo/builder:cache .
+docker push cache.fjb.internal:5000/myrepo/builder:cache
+# ...later, possibly another job on another worker:
+docker pull cache.fjb.internal:5000/myrepo/builder:cache
+```
+
+The image lives in zot's S3 bucket. Pushes to the canonical registry
+(`docker push git.example/...`) work normally and go straight to that
+registry — fjb does not intercept anything outside `cache.fjb.internal`.
 
 ### PAT scope
 
@@ -406,28 +419,26 @@ clearer error message lands in PR 2b.
   `secret_key` only once at create, so any prior-lifetime key is
   unusable to the new daemon).
 
-### Worker integration (PR 2b)
+### Worker integration
 
 When `cache:` is set, the linode provider wraps each worker's
 cloud-init in a multipart-MIME message whose second part is a
-deployment-specific fragment that:
+deployment-specific fragment that ships exactly two things:
 
-- Trusts the **fjb-managed CA** — written to
+- The **fjb-managed CA** — written to
   `/usr/local/share/ca-certificates/fjb-cache.crt` and registered via
   `update-ca-certificates`. The CA is generated once and persisted to
   `cache.tls.ca_dir` so daemon restarts adopt the existing cache VM
   (signed by the same CA).
-- Adds an `/etc/hosts` entry: `<cache VPC IP> cache.fjb.internal`.
-  No DNS dependency — the hosts lookup wins. The VPC IP is looked up
-  from the cache linode's config interfaces on first Provision after
+- An `/etc/hosts` entry: `<cache VPC IP> cache.fjb.internal`. No DNS
+  dependency — the hosts lookup wins. The VPC IP is looked up from
+  the cache linode's config interfaces on first Provision after
   Configure and cached for the daemon's lifetime.
-- Installs a containerd `hosts.toml` for the configured upstream host
-  with **pull-only capabilities** (`["pull", "resolve"]`, NOT
-  `"push"`). This is the boundary that keeps
-  `docker push <upstream-host>/foo` going direct to upstream over the
-  public NIC — the cache is a target only for explicit pushes to the
-  cache hostname. Without this, push traffic would be silently
-  captured by the cache and never reach the upstream registry.
+
+That's it. No containerd `hosts.toml`, no `/etc/docker/daemon.json`,
+no docker restart, no transparent redirect of any registry traffic.
+Workers see zot as one more registry hostname they can address by
+name; everything else stays the way the runner image shipped it.
 
 The provider-side multipart wrap keeps the `bootstrap` package and
 the orchestrator unaware of provider-specific cache concerns — they
@@ -461,56 +472,6 @@ A fourth case — **CA dir empty, cache VM exists** — is detected and
 rejected with a clear error. The operator picks: restore the CA
 backup, or destroy the cache VM and let the next start recreate it
 under the fresh CA.
-
-### Upstream reachability — orchestrator reverse-tunnel (FJB-7)
-
-The cache VM lives on Linode and reaches the operator's upstream
-registry through a **persistent `ssh -R` tunnel from the
-orchestrator**, not directly. This is what makes a LAN-internal
-upstream (`https://git.stern.ca/v2/` on `192.168.x.x`, split-horizon
-DNS, etc.) usable without exposing it on the public internet.
-
-How it composes:
-
-1. The cache VM cloud-init pins `127.0.0.1 <upstream-host>` in
-   `/etc/hosts` and writes
-   `/etc/ssh/sshd_config.d/20-fj-bellows-tunnel.conf` to keep
-   `AllowTcpForwarding yes` (a hardened base image setting it to
-   `no` would silently break sync).
-2. After Configure creates the VM (or adopts an existing one), a
-   long-lived orchestrator goroutine dials the cache VM over SSH
-   (TOFU host-key pinning, same shape as the dispatcher's worker
-   pin), opens a remote port-forward listener on
-   `127.0.0.1:<upstream-port>` on the cache VM, and bridges each
-   accepted connection to `<upstream-host>:<upstream-port>` from the
-   orchestrator's own network namespace.
-3. zot's sync extension dials `https://<upstream-host>/...`, the
-   `/etc/hosts` override sends it to loopback, the listener forwards
-   it through SSH to the orchestrator, the orchestrator dials the
-   real upstream over its LAN/public route, and bytes flow.
-
-TLS SNI stays the original hostname, so a public-CA cert on the
-upstream continues to validate end-to-end on the cache VM.
-
-The goroutine reconnects with exponential backoff (1s → 30s) and
-shuts down cleanly on cache cleanup (last Destroy) so the loop
-doesn't churn against a destroyed VM. Lifecycle matches the
-managed-firewall refresh loop: `context.Background`-rooted, no
-Provider.Shutdown hook required.
-
-**IP-literal upstreams** (`https://10.0.0.5/v2/`): the `/etc/hosts`
-override is skipped — /etc/hosts maps names not IPs, so loopback
-redirection can't be done that way. The tunnel still starts but zot
-will dial the IP directly and fail for LAN-internal IP literals.
-Use a hostname upstream when the LAN-internal route matters.
-
-**Pre-conditions**: the SSH key the dispatcher uses
-(`cfg.ssh.private_key_file`) is plumbed into the linode provider via
-`SetSSHIdentity` from `cmd/fj-bellows`; its public half is injected
-into the cache VM's `authorized_keys` via cloud-init so the dial is
-accepted. Deployments without an SSH key (e.g. docker-only) never
-reach this path; deployments with cache disabled never start the
-tunnel.
 
 ### Operator-managed cache mode
 
