@@ -26,6 +26,7 @@ write_files:
         "distSpecVersion": "1.1.0",
         "storage": {
           "rootDirectory": "/var/lib/zot",
+          "dedupe": false,
           "storageDriver": {
             "name": "s3",
             "region": "{{.Region}}",
