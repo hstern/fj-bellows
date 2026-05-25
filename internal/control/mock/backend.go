@@ -17,8 +17,10 @@ type Backend struct {
 	mu               sync.Mutex
 	healthFn         func(ctx context.Context) control.HealthStatus
 	poolSnapshotFn   func() []control.WorkerView
+	cacheStatusFn    func(ctx context.Context) *control.CacheStatus
 	healthCall       int
 	poolSnapshotCall int
+	cacheStatusCall  int
 }
 
 // SetHealth installs the response for subsequent Health calls.
@@ -32,6 +34,13 @@ func (b *Backend) SetHealth(fn func(ctx context.Context) control.HealthStatus) {
 func (b *Backend) SetPoolSnapshot(fn func() []control.WorkerView) {
 	b.mu.Lock()
 	b.poolSnapshotFn = fn
+	b.mu.Unlock()
+}
+
+// SetCacheStatus installs the response for subsequent CacheStatus calls.
+func (b *Backend) SetCacheStatus(fn func(ctx context.Context) *control.CacheStatus) {
+	b.mu.Lock()
+	b.cacheStatusFn = fn
 	b.mu.Unlock()
 }
 
@@ -57,6 +66,25 @@ func (b *Backend) PoolSnapshot() []control.WorkerView {
 		return nil
 	}
 	return fn()
+}
+
+// CacheStatus implements control.Backend.
+func (b *Backend) CacheStatus(ctx context.Context) *control.CacheStatus {
+	b.mu.Lock()
+	fn := b.cacheStatusFn
+	b.cacheStatusCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	return fn(ctx)
+}
+
+// CacheStatusCalls returns the number of times CacheStatus has been invoked.
+func (b *Backend) CacheStatusCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cacheStatusCall
 }
 
 // HealthCalls returns the number of times Health has been invoked.

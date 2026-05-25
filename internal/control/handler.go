@@ -51,6 +51,25 @@ func (h *apiHandler) ListWorkers(
 	return connect.NewResponse(&controlv1.ListWorkersResponse{Workers: workers}), nil
 }
 
+func (h *apiHandler) GetCache(
+	ctx context.Context,
+	_ *connect.Request[controlv1.GetCacheRequest],
+) (*connect.Response[controlv1.GetCacheResponse], error) {
+	s := h.b.CacheStatus(ctx)
+	if s == nil {
+		return connect.NewResponse(&controlv1.GetCacheResponse{Present: false}), nil
+	}
+	return connect.NewResponse(&controlv1.GetCacheResponse{
+		Present:         s.Present,
+		AdoptedExisting: s.AdoptedExisting,
+		LinodeId:        int64(s.LinodeID),
+		VpcIp:           s.VPCIP,
+		BucketRegion:    s.BucketRegion,
+		BucketLabel:     s.BucketLabel,
+		VmState:         s.VMState,
+	}), nil
+}
+
 // tsOrNil emits a Timestamp only for non-zero times; zero stays nil so the
 // wire form omits the field instead of advertising 1970-01-01.
 func tsOrNil(t time.Time) *timestamppb.Timestamp {

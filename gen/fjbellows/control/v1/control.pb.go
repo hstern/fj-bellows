@@ -312,6 +312,150 @@ func (x *Worker) GetCurrentJob() string {
 	return ""
 }
 
+type GetCacheRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetCacheRequest) Reset() {
+	*x = GetCacheRequest{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetCacheRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetCacheRequest) ProtoMessage() {}
+
+func (x *GetCacheRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetCacheRequest.ProtoReflect.Descriptor instead.
+func (*GetCacheRequest) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{5}
+}
+
+type GetCacheResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// present is true when a managed cache is configured AND its Linode ID is
+	// populated (ensureAtConfigure has run). False both for "no cache:
+	// block" and for "cache is being set up but not yet ready".
+	Present bool `protobuf:"varint,1,opt,name=present,proto3" json:"present,omitempty"`
+	// adopted_existing is true when the cache VM was found pre-existing
+	// and adopted rather than created fresh. Daemon restart against a
+	// warm cache sets this to true.
+	AdoptedExisting bool `protobuf:"varint,2,opt,name=adopted_existing,json=adoptedExisting,proto3" json:"adopted_existing,omitempty"`
+	// linode_id is the provider's instance ID for the cache VM. Zero when
+	// present is false.
+	LinodeId int64 `protobuf:"varint,3,opt,name=linode_id,json=linodeId,proto3" json:"linode_id,omitempty"`
+	// vpc_ip is the cache VM's IPv4 on the VPC subnet. Empty until the
+	// first WorkerExtras call resolves it.
+	VpcIp string `protobuf:"bytes,4,opt,name=vpc_ip,json=vpcIp,proto3" json:"vpc_ip,omitempty"`
+	// bucket_region is the Linode Object Storage region holding the
+	// cache's S3-compatible bucket.
+	BucketRegion string `protobuf:"bytes,5,opt,name=bucket_region,json=bucketRegion,proto3" json:"bucket_region,omitempty"`
+	// bucket_label is the bucket name.
+	BucketLabel string `protobuf:"bytes,6,opt,name=bucket_label,json=bucketLabel,proto3" json:"bucket_label,omitempty"`
+	// vm_state is the Linode API's instance status field
+	// (running, booting, offline, ...). Empty when not present, or when
+	// the on-demand Linode API call failed (caller can retry).
+	VmState       string `protobuf:"bytes,7,opt,name=vm_state,json=vmState,proto3" json:"vm_state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetCacheResponse) Reset() {
+	*x = GetCacheResponse{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetCacheResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetCacheResponse) ProtoMessage() {}
+
+func (x *GetCacheResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetCacheResponse.ProtoReflect.Descriptor instead.
+func (*GetCacheResponse) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *GetCacheResponse) GetPresent() bool {
+	if x != nil {
+		return x.Present
+	}
+	return false
+}
+
+func (x *GetCacheResponse) GetAdoptedExisting() bool {
+	if x != nil {
+		return x.AdoptedExisting
+	}
+	return false
+}
+
+func (x *GetCacheResponse) GetLinodeId() int64 {
+	if x != nil {
+		return x.LinodeId
+	}
+	return 0
+}
+
+func (x *GetCacheResponse) GetVpcIp() string {
+	if x != nil {
+		return x.VpcIp
+	}
+	return ""
+}
+
+func (x *GetCacheResponse) GetBucketRegion() string {
+	if x != nil {
+		return x.BucketRegion
+	}
+	return ""
+}
+
+func (x *GetCacheResponse) GetBucketLabel() string {
+	if x != nil {
+		return x.BucketLabel
+	}
+	return ""
+}
+
+func (x *GetCacheResponse) GetVmState() string {
+	if x != nil {
+		return x.VmState
+	}
+	return ""
+}
+
 var File_fjbellows_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_fjbellows_control_v1_control_proto_rawDesc = "" +
@@ -336,10 +480,20 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"created_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x127\n" +
 	"\tlast_busy\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\blastBusy\x12\x1f\n" +
 	"\vcurrent_job\x18\x06 \x01(\tR\n" +
-	"currentJob2\xc9\x01\n" +
+	"currentJob\"\x11\n" +
+	"\x0fGetCacheRequest\"\xee\x01\n" +
+	"\x10GetCacheResponse\x12\x18\n" +
+	"\apresent\x18\x01 \x01(\bR\apresent\x12)\n" +
+	"\x10adopted_existing\x18\x02 \x01(\bR\x0fadoptedExisting\x12\x1b\n" +
+	"\tlinode_id\x18\x03 \x01(\x03R\blinodeId\x12\x15\n" +
+	"\x06vpc_ip\x18\x04 \x01(\tR\x05vpcIp\x12#\n" +
+	"\rbucket_region\x18\x05 \x01(\tR\fbucketRegion\x12!\n" +
+	"\fbucket_label\x18\x06 \x01(\tR\vbucketLabel\x12\x19\n" +
+	"\bvm_state\x18\a \x01(\tR\avmState2\xa4\x02\n" +
 	"\x0eControlService\x12S\n" +
 	"\x06Health\x12#.fjbellows.control.v1.HealthRequest\x1a$.fjbellows.control.v1.HealthResponse\x12b\n" +
-	"\vListWorkers\x12(.fjbellows.control.v1.ListWorkersRequest\x1a).fjbellows.control.v1.ListWorkersResponseB\xdb\x01\n" +
+	"\vListWorkers\x12(.fjbellows.control.v1.ListWorkersRequest\x1a).fjbellows.control.v1.ListWorkersResponse\x12Y\n" +
+	"\bGetCache\x12%.fjbellows.control.v1.GetCacheRequest\x1a&.fjbellows.control.v1.GetCacheResponseB\xdb\x01\n" +
 	"\x18com.fjbellows.control.v1B\fControlProtoP\x01Z?github.com/hstern/fj-bellows/gen/fjbellows/control/v1;controlv1\xa2\x02\x03FCX\xaa\x02\x14Fjbellows.Control.V1\xca\x02\x14Fjbellows\\Control\\V1\xe2\x02 Fjbellows\\Control\\V1\\GPBMetadata\xea\x02\x16Fjbellows::Control::V1b\x06proto3"
 
 var (
@@ -354,28 +508,32 @@ func file_fjbellows_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_fjbellows_control_v1_control_proto_rawDescData
 }
 
-var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_fjbellows_control_v1_control_proto_goTypes = []any{
 	(*HealthRequest)(nil),         // 0: fjbellows.control.v1.HealthRequest
 	(*HealthResponse)(nil),        // 1: fjbellows.control.v1.HealthResponse
 	(*ListWorkersRequest)(nil),    // 2: fjbellows.control.v1.ListWorkersRequest
 	(*ListWorkersResponse)(nil),   // 3: fjbellows.control.v1.ListWorkersResponse
 	(*Worker)(nil),                // 4: fjbellows.control.v1.Worker
-	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
+	(*GetCacheRequest)(nil),       // 5: fjbellows.control.v1.GetCacheRequest
+	(*GetCacheResponse)(nil),      // 6: fjbellows.control.v1.GetCacheResponse
+	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
 }
 var file_fjbellows_control_v1_control_proto_depIdxs = []int32{
-	5, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
-	5, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
-	5, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
+	7, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
+	7, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
+	7, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
 	4, // 3: fjbellows.control.v1.ListWorkersResponse.workers:type_name -> fjbellows.control.v1.Worker
-	5, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
-	5, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
+	7, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
+	7, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
 	0, // 6: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
 	2, // 7: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
-	1, // 8: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
-	3, // 9: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
-	8, // [8:10] is the sub-list for method output_type
-	6, // [6:8] is the sub-list for method input_type
+	5, // 8: fjbellows.control.v1.ControlService.GetCache:input_type -> fjbellows.control.v1.GetCacheRequest
+	1, // 9: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
+	3, // 10: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
+	6, // 11: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
+	9, // [9:12] is the sub-list for method output_type
+	6, // [6:9] is the sub-list for method input_type
 	6, // [6:6] is the sub-list for extension type_name
 	6, // [6:6] is the sub-list for extension extendee
 	0, // [0:6] is the sub-list for field type_name
@@ -392,7 +550,7 @@ func file_fjbellows_control_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fjbellows_control_v1_control_proto_rawDesc), len(file_fjbellows_control_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
