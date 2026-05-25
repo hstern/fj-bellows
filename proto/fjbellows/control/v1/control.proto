@@ -20,6 +20,12 @@ service ControlService {
   // instead of grepping the orchestrator's stderr log for "worker ready" /
   // "job complete" / "destroyed idle node".
   rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+
+  // GetCache returns the managed pull-through registry cache VM's state.
+  // Present=false for providers that don't manage a cache (docker), or
+  // when the `cache:` block is absent. Turns the e2e harness's soft
+  // "/v2/ reachable" check into a fatal "cache present + running" gate.
+  rpc GetCache(GetCacheRequest) returns (GetCacheResponse);
 }
 
 message HealthRequest {}
@@ -74,4 +80,38 @@ message Worker {
   // unless state == "busy". Goes empty again when the dispatch goroutine
   // transitions the node back to idle.
   string current_job = 6;
+}
+
+message GetCacheRequest {}
+
+message GetCacheResponse {
+  // present is true when a managed cache is configured AND its Linode ID is
+  // populated (ensureAtConfigure has run). False both for "no cache:
+  // block" and for "cache is being set up but not yet ready".
+  bool present = 1;
+
+  // adopted_existing is true when the cache VM was found pre-existing
+  // and adopted rather than created fresh. Daemon restart against a
+  // warm cache sets this to true.
+  bool adopted_existing = 2;
+
+  // linode_id is the provider's instance ID for the cache VM. Zero when
+  // present is false.
+  int64 linode_id = 3;
+
+  // vpc_ip is the cache VM's IPv4 on the VPC subnet. Empty until the
+  // first WorkerExtras call resolves it.
+  string vpc_ip = 4;
+
+  // bucket_region is the Linode Object Storage region holding the
+  // cache's S3-compatible bucket.
+  string bucket_region = 5;
+
+  // bucket_label is the bucket name.
+  string bucket_label = 6;
+
+  // vm_state is the Linode API's instance status field
+  // (running, booting, offline, ...). Empty when not present, or when
+  // the on-demand Linode API call failed (caller can retry).
+  string vm_state = 7;
 }

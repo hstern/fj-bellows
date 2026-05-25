@@ -20,6 +20,24 @@ type Backend interface {
 	// PoolSnapshot returns the orchestrator's current view of the worker pool.
 	// Used by ListWorkers; cheap (one mutex acquisition + slice copy).
 	PoolSnapshot() []WorkerView
+
+	// CacheStatus returns the managed-cache snapshot for the provider that
+	// owns one (today: Linode). Returns nil for providers without a cache
+	// (docker) so the handler can answer Present=false. The Linode API
+	// may be touched for live VM status — keep this off any hot path.
+	CacheStatus(ctx context.Context) *CacheStatus
+}
+
+// CacheStatus is the shape control returns from GetCache. Mirrors the
+// provider-side type one-for-one so the adapter stays trivial.
+type CacheStatus struct {
+	Present         bool
+	AdoptedExisting bool
+	LinodeID        int
+	VPCIP           string
+	BucketRegion    string
+	BucketLabel     string
+	VMState         string
 }
 
 // WorkerView is the per-node shape the control plane returns from ListWorkers.
