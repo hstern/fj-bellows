@@ -76,6 +76,21 @@ func newManagedPlacementGroup(cfg placementGroupConfig, tag, region string, clie
 	}
 }
 
+// ensure brings the placement group into existence on demand. No-op
+// when the cached ID is still valid; otherwise re-runs ensureAtConfigure
+// to recreate the group. The reaper sets m.id to 0 when it deletes the
+// group on last-Destroy, so a subsequent Provision call needs this hook
+// to self-heal instead of sending PlacementGroup.ID=0 to Linode (which
+// rejects it as "Placement Group ID: 0 not found", wedging the
+// orchestrator in a retry loop — see FJB-10).
+func (m *managedPlacementGroup) ensure(ctx context.Context) error {
+	if m.id != 0 {
+		return nil
+	}
+	m.log.Info("managed placement group: re-creating after teardown")
+	return m.ensureAtConfigure(ctx)
+}
+
 // ensureAtConfigure finds-or-creates the placement group at Configure time.
 // Failures here are returned to the caller; Configure then refuses to start
 // the daemon (eager-create matches the managed firewall design — surface

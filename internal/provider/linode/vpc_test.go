@@ -452,6 +452,65 @@ func TestMaybeCleanupVPCDeletesWhenIdle(t *testing.T) {
 	}
 }
 
+// TestVPCEnsureRecreatesAfterReap is the FJB-10 VPC sibling. The
+// graceful-degradation in Provision (workerSubnetID()==0 skips the
+// VPC NIC) hides the bug — workers silently lose their VPC NIC after
+// a cascade and can't reach the cache. ensure() restores it.
+func TestVPCEnsureRecreatesAfterReap(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeVPCClient()
+	cfg := vpcConfig{Subnets: map[string]subnetConfig{
+		testSubnetCache: {IPv4: testCIDRCache},
+	}}
+	m := newManagedVPC(cfg, "test-tag", "us-ord", fake, slog.Default())
+	if err := m.ensureAtConfigure(ctx); err != nil {
+		t.Fatalf("initial ensureAtConfigure: %v", err)
+	}
+	if m.id == 0 {
+		t.Fatal("initial ensure failed to set m.id")
+	}
+	m.maybeCleanupVPC(ctx)
+	if m.id != 0 || m.workerSubnetID() != 0 {
+		t.Fatalf("post-reap state wrong: id=%d subnetID=%d", m.id, m.workerSubnetID())
+	}
+
+	beforeCreate := fake.createCalls
+	if err := m.ensure(ctx); err != nil {
+		t.Fatalf("ensure() after reap: %v", err)
+	}
+	if m.id == 0 {
+		t.Error("ensure() left m.id = 0; workers would degrade to public-NIC-only and lose cache reachability (FJB-10)")
+	}
+	if m.workerSubnetID() == 0 {
+		t.Error("ensure() did not repopulate subnets; workers would have no VPC NIC")
+	}
+	if fake.createCalls != beforeCreate+1 {
+		t.Errorf("createCalls = %d, want %d", fake.createCalls, beforeCreate+1)
+	}
+}
+
+// TestVPCEnsureNoOpWhenIDStillValid — steady-state no-op.
+func TestVPCEnsureNoOpWhenIDStillValid(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeVPCClient()
+	cfg := vpcConfig{Subnets: map[string]subnetConfig{
+		testSubnetCache: {IPv4: testCIDRCache},
+	}}
+	m := newManagedVPC(cfg, "test-tag", "us-ord", fake, slog.Default())
+	if err := m.ensureAtConfigure(ctx); err != nil {
+		t.Fatalf("ensureAtConfigure: %v", err)
+	}
+	beforeList := fake.listCalls
+	beforeCreate := fake.createCalls
+	if err := m.ensure(ctx); err != nil {
+		t.Fatalf("ensure(): %v", err)
+	}
+	if fake.listCalls != beforeList || fake.createCalls != beforeCreate {
+		t.Errorf("ensure() should be no-op with valid id; listCalls %d→%d, createCalls %d→%d",
+			beforeList, fake.listCalls, beforeCreate, fake.createCalls)
+	}
+}
+
 func TestMaybeCleanupVPCNoOpWhenAbsent(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakeVPCClient()

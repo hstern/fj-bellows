@@ -80,6 +80,17 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   single-tenant ephemeral and treats its job as trusted (operator's own
   repos), matching every other CI runner stack — same security posture as
   GitHub Actions, GitLab Runner, Drone.
+- **Every managed Linode resource must be lazy-recreatable from Provision.**
+  Firewall, placement group, VPC, and the cache VM are eager-created at
+  Configure but reaped on last-Destroy when their attached-thing count
+  drops to zero. The reaper clears the cached ID to zero; the next
+  Provision MUST re-create them via `ensure(ctx)` (a no-op when id !=
+  0, otherwise calls `ensureAtConfigure`) before reading any IDs into
+  `InstanceCreateOptions`. Without this, `PlacementGroup.ID = 0`
+  reaches Linode and wedges the orchestrator in a 10s-retry loop with
+  "Placement Group ID: 0 not found" — FJB-10. Don't add a new managed
+  resource without the matching `ensure()` and an entry in
+  `ensureManagedResources`.
 - **The Linode managed-cache VM reaches upstream through a persistent
   orchestrator-side `ssh -R`, not its own NIC.** The cache VM is
   provisioned at Configure-time and never participates in a dispatch SSH

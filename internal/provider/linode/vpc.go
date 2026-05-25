@@ -112,6 +112,21 @@ func newManagedVPC(cfg vpcConfig, tag, region string, client vpcClient, log *slo
 	}
 }
 
+// ensure brings the VPC and its subnets into existence on demand.
+// No-op when the cached ID is still valid; otherwise re-runs
+// ensureAtConfigure to recreate the VPC. The reaper resets m.id to 0
+// and clears m.subnetIDs when it deletes the VPC on last-Destroy, so
+// a subsequent Provision needs this hook to self-heal instead of
+// degrading workers to public-NIC-only (which silently breaks
+// worker→cache reachability) — same FJB-10 shape as the PG and FW.
+func (m *managedVPC) ensure(ctx context.Context) error {
+	if m.id != 0 {
+		return nil
+	}
+	m.log.Info("managed vpc: re-creating after teardown")
+	return m.ensureAtConfigure(ctx)
+}
+
 // ensureAtConfigure finds-or-creates the VPC and all declared subnets.
 // Eager at Configure (same rationale as firewall + PG): PAT-scope mistakes
 // surface at startup instead of at the first job arrival.

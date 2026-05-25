@@ -270,5 +270,58 @@ func TestMaybeCleanupPlacementGroupNoOpWhenNotFound(t *testing.T) {
 	}
 }
 
+// TestPlacementGroupEnsureRecreatesAfterReap is the FJB-10 regression:
+// after the reaper has cleared the cached ID (deleted the group on
+// last-Destroy), the next Provision must NOT send PlacementGroup.ID=0
+// to Linode. ensure() restores the group via ensureAtConfigure.
+func TestPlacementGroupEnsureRecreatesAfterReap(t *testing.T) {
+	fake := newFakePlacementGroupClient()
+	m := newManagedPlacementGroup(placementGroupConfig{}, testTag, "us-ord", fake, slog.Default())
+	if err := m.ensureAtConfigure(context.Background()); err != nil {
+		t.Fatalf("initial ensureAtConfigure: %v", err)
+	}
+	firstID := m.id
+	if firstID == 0 {
+		t.Fatal("initial ensure failed to set m.id")
+	}
+	// Simulate the reaper having torn down the group and cleared the ID.
+	m.maybeCleanupPlacementGroup(context.Background())
+	if m.id != 0 {
+		t.Fatalf("post-reap m.id = %d, want 0 (precondition broken)", m.id)
+	}
+
+	beforeCreate := fake.createCalls
+	if err := m.ensure(context.Background()); err != nil {
+		t.Fatalf("ensure() after reap: %v", err)
+	}
+	if m.id == 0 {
+		t.Error("ensure() left m.id = 0; would re-send Placement Group ID: 0 not found to Linode (FJB-10)")
+	}
+	if fake.createCalls != beforeCreate+1 {
+		t.Errorf("createCalls = %d, want %d (ensure() should have re-created the group)",
+			fake.createCalls, beforeCreate+1)
+	}
+}
+
+// TestPlacementGroupEnsureNoOpWhenIDStillValid asserts the common-
+// case is genuinely a no-op — no API calls on steady-state Provision,
+// otherwise we'd flood the Linode API with redundant List/Get calls.
+func TestPlacementGroupEnsureNoOpWhenIDStillValid(t *testing.T) {
+	fake := newFakePlacementGroupClient()
+	m := newManagedPlacementGroup(placementGroupConfig{}, testTag, "us-ord", fake, slog.Default())
+	if err := m.ensureAtConfigure(context.Background()); err != nil {
+		t.Fatalf("ensureAtConfigure: %v", err)
+	}
+	beforeList := fake.listCalls
+	beforeCreate := fake.createCalls
+	if err := m.ensure(context.Background()); err != nil {
+		t.Fatalf("ensure(): %v", err)
+	}
+	if fake.listCalls != beforeList || fake.createCalls != beforeCreate {
+		t.Errorf("ensure() with valid m.id should be a no-op; got listCalls %d→%d, createCalls %d→%d",
+			beforeList, fake.listCalls, beforeCreate, fake.createCalls)
+	}
+}
+
 // fakePlacementGroupClient satisfies the interface.
 var _ placementGroupClient = (*fakePlacementGroupClient)(nil)

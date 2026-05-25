@@ -278,6 +278,23 @@ func (m *managedCache) setTunnelIdentity(signer ssh.Signer, user string, port in
 	m.sshPort = port
 }
 
+// ensure brings the cache VM (and its bucket + scoped key + tunnel)
+// into existence on demand. No-op when the cached linodeID is still
+// valid; otherwise re-runs ensureAtConfigure to recreate from
+// scratch. The reaper resets linodeID to 0 when it deletes the VM
+// on last-Destroy, so a subsequent Provision needs this hook to
+// self-heal instead of erroring out with "cache linode not
+// provisioned yet" in workerExtras — same FJB-10 shape as PG, FW,
+// VPC. The CA dir is persistent across reaps, so the new VM is
+// signed by the same CA workers already trust.
+func (m *managedCache) ensure(ctx context.Context) error {
+	if m.linodeID != 0 {
+		return nil
+	}
+	m.log.Info("managed cache: re-creating after teardown")
+	return m.ensureAtConfigure(ctx)
+}
+
 // ensureAtConfigure adopts an existing cache VM if one is tagged for
 // this deployment, otherwise mints the bucket + scoped key, renders
 // cloud-init, and creates the VM. Eager at Configure (same rationale
