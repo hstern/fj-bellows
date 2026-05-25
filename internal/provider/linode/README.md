@@ -386,12 +386,20 @@ clearer error message lands in PR 2b.
   bucket + key creation entirely. The existing VM keeps its baked-in
   credentials and stays serving. Daemon restarts therefore don't churn
   the cache.
-- **Reap on last Destroy**: the cache VM gets `DeleteInstance` on the
-  last worker teardown. The Object Storage key follows. The bucket
-  itself is **not** deleted — cached layers are typically valuable
-  across deployments, and Linode's `DeleteObjectStorageBucket` rejects
-  non-empty buckets with a 400 anyway. A `retain_after_destroy` knob
-  with explicit force-empty semantics lands in PR 2b.
+- **Cache VM lifecycle is decoupled from worker count** (FJB-12). The
+  cache VM, bucket, and scoped key all outlive the worker fleet —
+  idle teardown reaps workers but leaves the cache warm so the next
+  job after a quiet period doesn't pay 3-5 min of cache boot, and so
+  the deadlock window where Provision needed the VPC IP from a
+  just-reaped cache VM is closed. Firewall and VPC reapers still
+  fire correctly because both gate on "no devices/linodes attached"
+  and the cache VM keeps them in use; the placement group (which the
+  cache VM doesn't join) reaps cleanly when the last worker leaves.
+  Operators wanting an explicit teardown delete the cache VM via the
+  Linode console (one Linode + one bucket — the cache is still
+  re-createable on the next Provision via `cache.ensure()` per
+  FJB-10 if you wanted to start fresh). A future fjb flag could
+  automate this if it becomes a common operation.
 - **Stale-key reaping**: at Configure, fj-bellows lists Object Storage
   keys whose label matches the deployment pattern and reaps any
   left-over keys from prior daemon lifetimes (rationale: Linode reveals

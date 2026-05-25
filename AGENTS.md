@@ -80,10 +80,21 @@ repo, not in-tree). `//nolint` directives must name the linter and give a reason
   single-tenant ephemeral and treats its job as trusted (operator's own
   repos), matching every other CI runner stack — same security posture as
   GitHub Actions, GitLab Runner, Drone.
+- **The managed cache VM outlives the worker fleet — don't reap it on
+  last Destroy.** The cache VM, its bucket, and the scoped key are
+  intentionally NOT reaped from the per-instance `Linode.Destroy` path
+  (FJB-12). Reaping on every idle-to-empty transition burned 3-5 min
+  of cold-start cache boot on the next job and created a deadlock
+  window where the next Provision needed the VPC IP from a just-
+  reaped VM. Firewall/VPC reapers still fire correctly because the
+  cache VM keeps them in use. The cache is still re-creatable on
+  demand via `cache.ensure()` (FJB-10) for unrelated vanishings
+  (Linode incident, manual delete). Don't add the cache reap back to
+  `Linode.Destroy`.
 - **Every managed Linode resource must be lazy-recreatable from Provision.**
-  Firewall, placement group, VPC, and the cache VM are eager-created at
-  Configure but reaped on last-Destroy when their attached-thing count
-  drops to zero. The reaper clears the cached ID to zero; the next
+  Firewall, placement group, and VPC are eager-created at Configure
+  but reaped on last-Destroy when their attached-thing count drops to
+  zero. The cache VM is eager-created and stays warm (see above). The reaper clears the cached ID to zero; the next
   Provision MUST re-create them via `ensure(ctx)` (a no-op when id !=
   0, otherwise calls `ensureAtConfigure`) before reading any IDs into
   `InstanceCreateOptions`. Without this, `PlacementGroup.ID = 0`
