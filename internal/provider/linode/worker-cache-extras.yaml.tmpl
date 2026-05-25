@@ -22,14 +22,22 @@ merge_how:
     settings: [no_replace, recurse_list]
   - name: str
     settings: [append]
-# Two things are added:
-#  1. The fjb-managed CA, so workers trust the cache's TLS cert when
-#     they `docker push/pull cache.fjb.internal:5000/...`.
-#  2. An /etc/hosts entry mapping the cache hostname to its VPC IP
+# Three things are added:
+#  1. The fjb-managed CA in the system trust store, so any TLS client
+#     on the worker (including dockerd) trusts the cache's cert.
+#  2. The same CA at /etc/docker/certs.d/<host>:<port>/ca.crt —
+#     Docker checks this per-registry path before falling back to the
+#     system store, so this avoids dockerd-version-specific
+#     differences in how SystemCertPool is consulted.
+#  3. An /etc/hosts entry mapping the cache hostname to its VPC IP
 #     (no DNS dependency — workers reach the cache by IP via the
 #     hosts-file lookup over the VPC NIC).
 write_files:
   - path: /usr/local/share/ca-certificates/fjb-cache.crt
+    permissions: '0644'
+    content: |
+{{.CACertPEM | indent 6}}
+  - path: /etc/docker/certs.d/{{.CacheHost}}:{{.CachePort}}/ca.crt
     permissions: '0644'
     content: |
 {{.CACertPEM | indent 6}}

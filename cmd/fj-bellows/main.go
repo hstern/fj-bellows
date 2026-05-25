@@ -25,7 +25,7 @@ import (
 
 	// Register in-tree providers.
 	dockerprov "github.com/hstern/fj-bellows/internal/provider/docker"
-	_ "github.com/hstern/fj-bellows/internal/provider/linode"
+	linodeprov "github.com/hstern/fj-bellows/internal/provider/linode"
 )
 
 func main() {
@@ -106,6 +106,16 @@ func run(opts runOpts, log *slog.Logger) error {
 	prov, err := provider.New(cfg.Provider)
 	if err != nil {
 		return err
+	}
+	// Hand the Linode provider the orchestrator's SSH public key so
+	// the managed cache VM (if `cache:` is set) accepts ssh from the
+	// operator for debugging. No tunnel; this is inbound-only debug
+	// access. No-op for non-Linode providers.
+	if l, ok := prov.(*linodeprov.Linode); ok && authKey != "" {
+		// ssh.MarshalAuthorizedKey appends a trailing newline; Linode's
+		// authorized_keys API rejects multi-line values with a 400.
+		// The worker Provision path already does this trim on spec.AuthorizedKey.
+		l.SetSSHAuthorizedKey(strings.TrimSpace(authKey))
 	}
 	// Bound the Configure-time network calls (provider sentinel fetches,
 	// firewall API, etc.) so a hung upstream can't wedge startup forever.

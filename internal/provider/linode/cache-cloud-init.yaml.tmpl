@@ -26,6 +26,7 @@ write_files:
         "distSpecVersion": "1.1.0",
         "storage": {
           "rootDirectory": "/var/lib/zot",
+          "dedupe": false,
           "storageDriver": {
             "name": "s3",
             "region": "{{.Region}}",
@@ -41,6 +42,7 @@ write_files:
         "http": {
           "address": "0.0.0.0",
           "port": "5000",
+          "compat": ["docker2s2"],
           "tls": {
             "cert": "/etc/zot/tls/cert.pem",
             "key": "/etc/zot/tls/key.pem"

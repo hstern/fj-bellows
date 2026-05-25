@@ -64,6 +64,22 @@ type Linode struct {
 	// access key wired into the cache VM's cloud-init. Setting `cache:`
 	// without `vpc:` auto-synthesizes the VPC (FJB-6 design).
 	cache *managedCache
+
+	// sshAuthorizedKey is populated by SetSSHAuthorizedKey before
+	// Configure runs. The cache VM bakes this into authorized_keys so
+	// the operator can ssh in for debugging — matches what workers
+	// already get via spec.AuthorizedKey at Provision time. The cache
+	// VM never dials back to the orchestrator (no tunnel); this is
+	// strictly inbound-debug access.
+	sshAuthorizedKey string
+}
+
+// SetSSHAuthorizedKey supplies the orchestrator's SSH public key
+// (authorized_keys line) so the managed cache VM accepts the
+// operator's ssh. Call from cmd/fj-bellows before Configure. No-op
+// for non-Linode providers; harmless when cache is disabled.
+func (l *Linode) SetSSHAuthorizedKey(authKey string) {
+	l.sshAuthorizedKey = authKey
 }
 
 func init() {
@@ -295,12 +311,12 @@ func (l *Linode) setupManagedCache(ctx context.Context, tag string) error {
 	if l.vpc != nil {
 		subID = l.vpc.workerSubnetID()
 	}
-	// FJB-13: zot is now a scratch registry workers address
-	// explicitly; the orchestrator no longer dials the cache VM (the
-	// FJB-7 reverse-tunnel is gone), so it doesn't need the cache VM
-	// to accept its SSH key. Leave authorized_keys empty — operators
-	// break-glass via Linode Lish or add their own key manually.
-	cache.setHardwareContext(fwID, subID, "")
+	// FJB-13: zot is a scratch registry; the orchestrator no longer
+	// dials the cache VM, so the SSH key in authorized_keys is for
+	// operator debugging only (the dispatcher's tunnel is gone). The
+	// key is supplied via SetSSHAuthorizedKey from cmd/fj-bellows;
+	// empty when no SSH was configured (docker provider).
+	cache.setHardwareContext(fwID, subID, l.sshAuthorizedKey)
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		return fmt.Errorf("linode: cache: %w", err)
 	}
