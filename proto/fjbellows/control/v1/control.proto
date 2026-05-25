@@ -13,6 +13,13 @@ service ControlService {
   // Health returns a readiness snapshot: is the reconcile loop ticking,
   // and have the upstream probes (provider, Forgejo) succeeded recently?
   rpc Health(HealthRequest) returns (HealthResponse);
+
+  // ListWorkers returns the orchestrator's current view of every worker VM
+  // in the pool: state, address, when it was created / last busy, and the
+  // current job handle if any. This is what the e2e harness will poll
+  // instead of grepping the orchestrator's stderr log for "worker ready" /
+  // "job complete" / "destroyed idle node".
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
 }
 
 message HealthRequest {}
@@ -32,4 +39,39 @@ message HealthResponse {
   // last_forgejo_poll_at is when WaitingJobs or ListRunners most recently
   // succeeded; whichever was later.
   google.protobuf.Timestamp last_forgejo_poll_at = 4;
+}
+
+message ListWorkersRequest {}
+
+message ListWorkersResponse {
+  repeated Worker workers = 1;
+}
+
+// Worker is the orchestrator's view of a single worker VM. Field shape
+// mirrors orchestrator.Node plus the active job handle (recorded by the
+// dispatch goroutine when a node transitions to Busy).
+message Worker {
+  // instance_id is the provider's identifier (Linode ID, docker container
+  // ID, etc.). Unique within a deployment's tag scope.
+  string instance_id = 1;
+
+  // state is one of: provisioning | idle | busy | draining | removing.
+  string state = 2;
+
+  // ip is the worker's reachable address; empty for providers that dispatch
+  // by container exec (docker).
+  string ip = 3;
+
+  // created_at is the provider's instance creation time. Anchors the
+  // billing-hour timer.
+  google.protobuf.Timestamp created_at = 4;
+
+  // last_busy is when the node most recently finished (or started) a job;
+  // drives the per-second idle timeout.
+  google.protobuf.Timestamp last_busy = 5;
+
+  // current_job is the Forgejo job handle in flight on this worker. Empty
+  // unless state == "busy". Goes empty again when the dispatch goroutine
+  // transitions the node back to idle.
+  string current_job = 6;
 }

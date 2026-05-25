@@ -16,6 +16,21 @@ type Backend interface {
 	// Health returns a readiness snapshot. Implementations should be cheap;
 	// the handler may call this many times per second under k8s liveness.
 	Health(ctx context.Context) HealthStatus
+
+	// PoolSnapshot returns the orchestrator's current view of the worker pool.
+	// Used by ListWorkers; cheap (one mutex acquisition + slice copy).
+	PoolSnapshot() []WorkerView
+}
+
+// WorkerView is the per-node shape the control plane returns from ListWorkers.
+// Mirrors orchestrator.Node plus the in-flight job handle.
+type WorkerView struct {
+	InstanceID string
+	State      string
+	IP         string
+	CreatedAt  time.Time
+	LastBusy   time.Time
+	CurrentJob string
 }
 
 // HealthStatus is the orchestrator's view of its own readiness.
