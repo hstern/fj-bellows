@@ -28,6 +28,10 @@ type Backend struct {
 	forceProvisionFn   func(ctx context.Context) (string, error)
 	pauseFn            func(ctx context.Context)
 	resumeFn           func(ctx context.Context)
+	getConfigFn        func(ctx context.Context) (string, string)
+	reloadConfigFn     func(ctx context.Context) ([]string, error)
+	execOnWorkerFn     func(ctx context.Context, instanceID, command string) ([]byte, []byte, int32, int64, int64, error)
+	providerInfoFn     func(ctx context.Context) (string, map[string]string)
 	healthCall         int
 	poolSnapshotCall   int
 	cacheStatusCall    int
@@ -39,6 +43,10 @@ type Backend struct {
 	forceProvisionCall int
 	pauseCall          int
 	resumeCall         int
+	getConfigCall      int
+	reloadConfigCall   int
+	execOnWorkerCall   int
+	providerInfoCall   int
 }
 
 // SetHealth installs the response for subsequent Health calls.
@@ -315,6 +323,110 @@ func (b *Backend) ResumeCalls() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.resumeCall
+}
+
+// SetGetConfig installs the response for subsequent GetConfig calls.
+func (b *Backend) SetGetConfig(fn func(ctx context.Context) (string, string)) {
+	b.mu.Lock()
+	b.getConfigFn = fn
+	b.mu.Unlock()
+}
+
+// GetConfig implements control.Backend.
+func (b *Backend) GetConfig(ctx context.Context) (string, string) {
+	b.mu.Lock()
+	fn := b.getConfigFn
+	b.getConfigCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return "", ""
+	}
+	return fn(ctx)
+}
+
+// GetConfigCalls returns the number of times GetConfig has been invoked.
+func (b *Backend) GetConfigCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.getConfigCall
+}
+
+// SetReloadConfig installs the response for subsequent ReloadConfig calls.
+func (b *Backend) SetReloadConfig(fn func(ctx context.Context) ([]string, error)) {
+	b.mu.Lock()
+	b.reloadConfigFn = fn
+	b.mu.Unlock()
+}
+
+// ReloadConfig implements control.Backend.
+func (b *Backend) ReloadConfig(ctx context.Context) ([]string, error) {
+	b.mu.Lock()
+	fn := b.reloadConfigFn
+	b.reloadConfigCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return nil, nil
+	}
+	return fn(ctx)
+}
+
+// ReloadConfigCalls returns the number of times ReloadConfig has been invoked.
+func (b *Backend) ReloadConfigCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.reloadConfigCall
+}
+
+// SetExecOnWorker installs the response for subsequent ExecOnWorker calls.
+func (b *Backend) SetExecOnWorker(fn func(ctx context.Context, instanceID, command string) ([]byte, []byte, int32, int64, int64, error)) {
+	b.mu.Lock()
+	b.execOnWorkerFn = fn
+	b.mu.Unlock()
+}
+
+// ExecOnWorker implements control.Backend.
+func (b *Backend) ExecOnWorker(ctx context.Context, instanceID, command string) ([]byte, []byte, int32, int64, int64, error) {
+	b.mu.Lock()
+	fn := b.execOnWorkerFn
+	b.execOnWorkerCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return nil, nil, 0, 0, 0, nil
+	}
+	return fn(ctx, instanceID, command)
+}
+
+// ExecOnWorkerCalls returns the number of times ExecOnWorker has been invoked.
+func (b *Backend) ExecOnWorkerCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.execOnWorkerCall
+}
+
+// SetProviderInfo installs the response for subsequent ProviderInfo calls.
+func (b *Backend) SetProviderInfo(fn func(ctx context.Context) (string, map[string]string)) {
+	b.mu.Lock()
+	b.providerInfoFn = fn
+	b.mu.Unlock()
+}
+
+// ProviderInfo implements control.Backend.
+func (b *Backend) ProviderInfo(ctx context.Context) (string, map[string]string) {
+	b.mu.Lock()
+	fn := b.providerInfoFn
+	b.providerInfoCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return "", map[string]string{}
+	}
+	return fn(ctx)
+}
+
+// ProviderInfoCalls returns the number of times ProviderInfo has been invoked.
+func (b *Backend) ProviderInfoCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.providerInfoCall
 }
 
 // HealthCalls returns the number of times Health has been invoked.

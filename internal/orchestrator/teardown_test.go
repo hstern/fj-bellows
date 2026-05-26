@@ -110,3 +110,92 @@ func TestShouldTeardownUnknownModel(t *testing.T) {
 		t.Error("unknown billing model must not tear down")
 	}
 }
+
+func TestTimingPerSecond(t *testing.T) {
+	tp := TeardownPolicy{Model: provider.BillingPerSecond, IdleTimeout: 5 * time.Minute}
+	base := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	n := Node{LastBusy: base, CreatedAt: base.Add(-time.Hour), State: StateIdle}
+
+	got := tp.Timing(n, base.Add(time.Minute))
+	if got.BillingModel != "per_second" {
+		t.Errorf("BillingModel = %q, want per_second", got.BillingModel)
+	}
+	if !got.ReapEligibleAt.Equal(base.Add(5 * time.Minute)) {
+		t.Errorf("ReapEligibleAt = %s, want %s", got.ReapEligibleAt, base.Add(5*time.Minute))
+	}
+	if !got.PaidHourEndAt.IsZero() {
+		t.Errorf("PaidHourEndAt = %s, want zero (per-second has no paid-hour)", got.PaidHourEndAt)
+	}
+}
+
+func TestTimingPerSecondZeroLastBusy(t *testing.T) {
+	// A freshly-provisioned node hasn't been busy yet — ReapEligibleAt
+	// stays zero rather than reporting a meaningless "1970 + idleTimeout".
+	tp := TeardownPolicy{Model: provider.BillingPerSecond, IdleTimeout: 5 * time.Minute}
+	got := tp.Timing(Node{State: StateProvisioning}, time.Now())
+	if !got.ReapEligibleAt.IsZero() {
+		t.Errorf("ReapEligibleAt = %s, want zero", got.ReapEligibleAt)
+	}
+	if got.BillingModel != "per_second" {
+		t.Errorf("BillingModel = %q, want per_second", got.BillingModel)
+	}
+}
+
+func TestTimingHourly(t *testing.T) {
+	created := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	tp := TeardownPolicy{
+		Model:       provider.BillingHourlyRoundUp,
+		HourMargin:  5 * time.Minute,
+		BillingHour: time.Hour,
+	}
+	n := Node{CreatedAt: created, State: StateIdle}
+
+	// First hour: reap at created+55m, paid-hour boundary at created+1h.
+	got := tp.Timing(n, created.Add(10*time.Minute))
+	if got.BillingModel != "hourly_round_up" {
+		t.Errorf("BillingModel = %q, want hourly_round_up", got.BillingModel)
+	}
+	if want := created.Add(55 * time.Minute); !got.ReapEligibleAt.Equal(want) {
+		t.Errorf("ReapEligibleAt = %s, want %s", got.ReapEligibleAt, want)
+	}
+	if want := created.Add(time.Hour); !got.PaidHourEndAt.Equal(want) {
+		t.Errorf("PaidHourEndAt = %s, want %s", got.PaidHourEndAt, want)
+	}
+
+	// Second hour: rolled past the first kill mark, reap at created+115m.
+	got = tp.Timing(n, created.Add(65*time.Minute))
+	if want := created.Add(115 * time.Minute); !got.ReapEligibleAt.Equal(want) {
+		t.Errorf("second-hour ReapEligibleAt = %s, want %s", got.ReapEligibleAt, want)
+	}
+	if want := created.Add(2 * time.Hour); !got.PaidHourEndAt.Equal(want) {
+		t.Errorf("second-hour PaidHourEndAt = %s, want %s", got.PaidHourEndAt, want)
+	}
+}
+
+func TestTimingHourlyZeroCreated(t *testing.T) {
+	// A node we haven't seen a CreatedAt for yet (e.g., adoption-in-flight)
+	// must not yield bogus 1970-based timestamps.
+	tp := TeardownPolicy{
+		Model:       provider.BillingHourlyRoundUp,
+		HourMargin:  5 * time.Minute,
+		BillingHour: time.Hour,
+	}
+	got := tp.Timing(Node{}, time.Now())
+	if !got.ReapEligibleAt.IsZero() {
+		t.Errorf("ReapEligibleAt = %s, want zero", got.ReapEligibleAt)
+	}
+	if !got.PaidHourEndAt.IsZero() {
+		t.Errorf("PaidHourEndAt = %s, want zero", got.PaidHourEndAt)
+	}
+	if got.BillingModel != "hourly_round_up" {
+		t.Errorf("BillingModel = %q, want hourly_round_up", got.BillingModel)
+	}
+}
+
+func TestTimingUnknownModel(t *testing.T) {
+	tp := TeardownPolicy{Model: provider.BillingModel(99)}
+	got := tp.Timing(Node{CreatedAt: time.Now()}, time.Now())
+	if got != (TeardownTiming{}) {
+		t.Errorf("unknown model Timing = %+v, want zero value", got)
+	}
+}

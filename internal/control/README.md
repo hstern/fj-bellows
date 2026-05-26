@@ -31,11 +31,14 @@ shim. Subsequent PRs widen the proto + handler with:
 | FJB-25 | `StreamLogs` (server-streaming structured slog records) |
 | FJB-26 | `ForceReap`, `ForceProvision` (admin verbs; gated by `-enable-control-writes`) |
 | FJB-27 | `Pause`, `Resume` (reconciler-quiesce verbs; same gate) |
+| FJB-28 | `GetConfig` (read-only redacted YAML dump), `ReloadConfig` (hot-swap a subset; gated by `-enable-control-writes`) |
+| FJB-29 | `ExecOnWorker` (one-shot debug exec over the orchestrator's SSH path) |
+| FJB-30 | `ListWorkers` billing-window fields (`paid_hour_end_at`, `reap_eligible_at`, `billing_model`) |
+| FJB-31 | `ProviderInfo` (provider-defined operator-debug key/value map) |
 
-Deferred to follow-up tickets: config dump+reload,
-SSH-proxy, billing-window view, provider-passthrough. v1 leans on
-loopback-binding as the default auth boundary; the bearer-token interceptor
-(FJB-33, below) is what binds a non-loopback deployment.
+All FJB-14 follow-ups now ship. v1 leans on
+loopback-binding as the default auth boundary; the bearer-token
+interceptor (FJB-33, below) is what binds a non-loopback deployment.
 
 ## Auth on non-loopback binds (FJB-33)
 
@@ -176,6 +179,49 @@ A `reconciler_paused` / `reconciler_resumed` event is also published on the
 `StreamEvents` stream on each real transition (idempotent re-pauses /
 re-resumes are silent on both the log and the event stream).
 
+## ExecOnWorker (FJB-29)
+
+`ExecOnWorker(instance_id, command)` runs a single shell command on the
+named worker over the orchestrator's existing SSH dispatcher. The
+orchestrator already holds every worker's host key and signer, so the
+RPC needs no new credentials — it's a thin operator convenience for
+"poke at this specific VM" without rediscovering its address + key
+file.
+
+- Gated by `-enable-control-writes`; an exec is a write-equivalent
+  verb. `CodePermissionDenied` when the flag is unset.
+- The command is `sh -c <command>` on the worker; `shellQuote` keeps
+  attacker-influenced bytes from breaking out of the quoting. No
+  interactive TTY.
+- Command size is capped at 64 KiB; oversize requests are
+  `CodeInvalidArgument`.
+- Each output stream (stdout, stderr) is truncated to 1 MiB. The
+  response carries `truncated_stdout` / `truncated_stderr` with the
+  original byte count when truncation happened, so the operator can
+  tell when output was clipped (default 0 means "not truncated").
+- A non-zero remote exit is NOT an error — it lands in `exit_code` so
+  the operator sees the same signal as a local shell.
+- The orchestrator refuses to exec on a `provisioning` (SSH may not be
+  up yet) or `removing` (Destroy in flight) worker —
+  `CodeFailedPrecondition`. `idle` and `busy` are both fine; an exec on
+  a busy worker is an out-of-band debug poke and does not interfere
+  with the dispatch session.
+- Unknown instance → `CodeNotFound`.
+- SSH dial / transport failures → `CodeInternal`.
+- The docker provider has no SSH path; calling `ExecOnWorker` against
+  it returns `CodeUnimplemented` (a docker-exec variant is a separate
+  future RPC, not handled here — sorry).
+- Every call emits an `Info` audit line carrying the caller identity
+  threaded from the handler:
+
+```
+exec-on-worker requested id=100 caller="peer=10.0.0.5:54312 token"
+```
+
+The session is bound by the caller's context deadline; if none is
+set, the daemon imposes a 60-second default so a hung remote command
+can't pin the dispatch goroutine forever.
+
 ## Wire format for ad-hoc / e2e clients
 
 Connect's JSON protocol is one POST per method. The e2e harness and any
@@ -241,6 +287,136 @@ Stream shape:
 Each `StreamLogsResponse` carries `at`, `level` (slog's String form:
 `"DEBUG"` / `"INFO"` / `"WARN"` / `"ERROR"`), `message`, and an `attrs`
 map.
+
+## ListWorkers billing window (FJB-30)
+
+Each `Worker` in `ListWorkers` carries three fields that surface the
+teardown policy's view of the worker, so operators can debug warm-hold /
+reap timing from the control plane instead of from log archaeology:
+
+- `billing_model` — `"per_second"` or `"hourly_round_up"`, matching the
+  provider's `BillingModel()`. Empty for the zero policy.
+- `reap_eligible_at` — the earliest instant the policy would tear this
+  worker down: `last_busy + idle_timeout` for per-second, the next
+  `created + N*billing_hour - hour_margin` mark for hourly.
+- `paid_hour_end_at` — the next paid-hour boundary
+  (`reap_eligible_at + hour_margin`). Empty for per-second.
+
+Values are computed from `orchestrator.TeardownPolicy.Timing(node, now)`,
+which is the read-only sibling of `ShouldTeardown` — same math, no
+decision. The Linode e2e uses `billing_hour: 60s, hour_margin: 10s` so
+both timestamps populate within seconds of worker creation.
+
+## GetConfig and ReloadConfig (FJB-28)
+
+`GetConfig` is the operator-side answer to "what is the daemon actually
+using?" It serialises the resolved live config (defaults filled in by
+`config.applyDefaults`, not the raw file as written) as YAML, with secrets
+replaced by `<redacted>`. Always allowed — the response carries no
+credentials and no admin verbs.
+
+Redaction rules (see `internal/config/redact.go`):
+
+- `forgejo.token` → the marker. The field stays present so the operator
+  can confirm "yes, a token is configured."
+- Inside the opaque `provider_config` blob: any mapping key whose
+  case-insensitive name matches one of `token`, `password`, `secret`,
+  `key`, `api_key`, `access_key`, `secret_key` has its scalar value
+  replaced. Matching is *exact*, not substring — `tokenizer` and
+  `secretRecipe` are NOT redacted.
+- `ssh.private_key_file` (the *path*) passes through unchanged. The file
+  it points to is the secret; the path is operator config.
+- Everything else (Forgejo URL, scope, labels, scale, poll, tag, SSH
+  user/port, the rest of `provider_config`) passes through unchanged.
+
+`ReloadConfig` re-reads `config.yaml` from disk, validates it, and hands
+the hot-reloadable subset to the orchestrator. It is gated by
+`-enable-control-writes`. Returns the list of changed dotted-key field
+names (e.g. `["poll.interval", "scale.max"]`); an empty list means the
+re-read parsed to the same values that were already live.
+
+The hot-reloadable subset is exactly the fields the reconcile loop reads
+off `o.cfg` on each tick:
+
+| Field | What it controls |
+| --- | --- |
+| `scale.max` | warm pool ceiling |
+| `forgejo.labels` | label set advertised to workers and used to match jobs |
+| `poll.interval` | reconcile cadence; the ticker is re-created on change |
+| `poll.idle_timeout` | per-second billing teardown timer |
+| `poll.hour_margin` | hourly-rounding teardown (the `:55` rule) |
+| `poll.billing_hour` | hourly-rounding cycle length |
+| `runner_version` | the forgejo-runner version baked into the next cloud-init |
+| `drain_on_shutdown` / `drain_timeout` / `destroy_on_exit` | shutdown behaviour |
+
+Restart-required fields — `ReloadConfig` refuses with
+`CodeFailedPrecondition` and lists the offending fields:
+
+| Field | Why a restart is required |
+| --- | --- |
+| `provider` | the provider client is built once at startup |
+| `provider_config` | re-running `provider.Configure` would re-allocate firewalls/PGs/VPCs |
+| `forgejo.url` / `forgejo.token` / `forgejo.scope` | the Forgejo client wraps these at startup |
+| `tag` | switching tag mid-flight would orphan every live VM the daemon owns |
+| `ssh.*` | the SSH signer is loaded once at startup |
+| billing model | derived from the provider's compile-time `BillingModel()` |
+
+The reload is atomic: if any non-hot field has drifted, no hot field is
+applied either. The operator's edit is rejected wholesale; they fix the
+non-hot field (or accept that they need a restart) and try again. The
+config-path returned by `GetConfig` makes that "fix and retry" loop
+self-evident — the operator knows which file to edit.
+
+When `poll.interval` changes, the orchestrator's `Run` goroutine
+recreates the ticker via a one-slot signal channel so the new cadence
+takes effect on the next tick boundary. This is the only field that
+touches live state outside `o.cfg` — every other hot field is consumed
+by the reconcile loop on the next read of `o.cfg`.
+
+Each `ReloadConfig` call emits an audit log line with the caller
+identity (same convention as the force verbs), so a deployment can trace
+"who reloaded what, when" against the slog stream.
+
+## ProviderInfo (FJB-31)
+
+`ProviderInfo` is a unary RPC that surfaces provider-defined operator-
+debug info as a free-form `map<string, string>`. The control plane
+type-asserts the live provider to the optional `provider.InfoProvider`
+interface and copies its `Info(ctx)` map through; providers that don't
+implement the interface answer with an empty map. The provider slug
+(e.g. `"linode"`, `"docker"`) is always populated.
+
+Keys are stable and provider-documented. Today:
+
+- **Linode** — see `internal/provider/linode/README.md` for the full
+  list, but operators reach for it mainly during capacity-full
+  incidents (FJB-11) and account-balance / dunning checks. Keys
+  include `region`, `type`, `image`, `firewall_id`,
+  `placement_group_id`, `vpc_id`, `cache_linode_id`,
+  `workers_in_flight`, `capacity_full_count_24h`, and
+  `account_balance_usd` (empty when the PAT lacks Account read
+  scope).
+- **Docker** — `docker_bin`, `image`, `network`, `wait_timeout`.
+
+Sample call:
+
+```sh
+curl -sS -X POST \
+  -H 'content-type: application/json' \
+  -d '{}' \
+  http://127.0.0.1:9876/fjbellows.control.v1.ControlService/ProviderInfo
+```
+
+Or via `fjbctl`:
+
+```sh
+fjbctl info             # sorted text view (default)
+fjbctl -json info       # raw JSON
+```
+
+Values are operator-readable strings — no secrets, no PII. A provider
+that needs to surface something sensitive should add a dedicated RPC
+with its own auth posture instead.
 
 ## Backend abstraction
 

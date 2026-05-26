@@ -56,9 +56,21 @@ const (
 	ControlServicePauseProcedure = "/fjbellows.control.v1.ControlService/Pause"
 	// ControlServiceResumeProcedure is the fully-qualified name of the ControlService's Resume RPC.
 	ControlServiceResumeProcedure = "/fjbellows.control.v1.ControlService/Resume"
+	// ControlServiceGetConfigProcedure is the fully-qualified name of the ControlService's GetConfig
+	// RPC.
+	ControlServiceGetConfigProcedure = "/fjbellows.control.v1.ControlService/GetConfig"
+	// ControlServiceReloadConfigProcedure is the fully-qualified name of the ControlService's
+	// ReloadConfig RPC.
+	ControlServiceReloadConfigProcedure = "/fjbellows.control.v1.ControlService/ReloadConfig"
+	// ControlServiceExecOnWorkerProcedure is the fully-qualified name of the ControlService's
+	// ExecOnWorker RPC.
+	ControlServiceExecOnWorkerProcedure = "/fjbellows.control.v1.ControlService/ExecOnWorker"
 	// ControlServiceStreamLogsProcedure is the fully-qualified name of the ControlService's StreamLogs
 	// RPC.
 	ControlServiceStreamLogsProcedure = "/fjbellows.control.v1.ControlService/StreamLogs"
+	// ControlServiceProviderInfoProcedure is the fully-qualified name of the ControlService's
+	// ProviderInfo RPC.
+	ControlServiceProviderInfoProcedure = "/fjbellows.control.v1.ControlService/ProviderInfo"
 )
 
 // ControlServiceClient is a client for the fjbellows.control.v1.ControlService service.
@@ -118,6 +130,23 @@ type ControlServiceClient interface {
 	// Resume re-arms the auto-tick. Idempotent. Audit-logged. Gated by
 	// -enable-control-writes; returns CodePermissionDenied otherwise.
 	Resume(context.Context, *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error)
+	// GetConfig returns the daemon's resolved live config as YAML, with secrets
+	// (forgejo.token, anything inside provider_config that looks like a token/
+	// password/secret/key) redacted. Useful for confirming the running process
+	// parsed config.yaml as the operator intended.
+	GetConfig(context.Context, *connect.Request[v1.GetConfigRequest]) (*connect.Response[v1.GetConfigResponse], error)
+	// ReloadConfig re-reads config.yaml from disk and hot-swaps the
+	// hot-reloadable subset (poll intervals, scale.max, labels, drain
+	// settings). Returns CodeFailedPrecondition with a clear error if the
+	// new config changes provider, provider_config, forgejo.url/token, or
+	// tag — those require a daemon restart.
+	ReloadConfig(context.Context, *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error)
+	// ExecOnWorker runs a single shell command on the worker identified by
+	// instance_id, returning stdout/stderr/exit code. Uses the orchestrator's
+	// existing SSH dispatcher; no new credentials. Audit-logged. Bounded
+	// command size, bounded output size — see the field comments. Gated by
+	// the daemon's -enable-control-writes flag.
+	ExecOnWorker(context.Context, *connect.Request[v1.ExecOnWorkerRequest]) (*connect.Response[v1.ExecOnWorkerResponse], error)
 	// StreamLogs streams structured slog records from the daemon. The first
 	// message is a stream_opened sentinel (zero `at`, empty `message`,
 	// level=""); clients should skip it (same convention as StreamEvents).
@@ -134,6 +163,11 @@ type ControlServiceClient interface {
 	// The level field is the slog level's String() form
 	// ("DEBUG"/"INFO"/"WARN"/"ERROR").
 	StreamLogs(context.Context, *connect.Request[v1.StreamLogsRequest]) (*connect.ServerStreamForClient[v1.StreamLogsResponse], error)
+	// ProviderInfo returns provider-defined operator-debug info as a free-form
+	// key/value map. Keys are stable, documented per provider in
+	// `internal/provider/<name>/README.md`. Useful for capacity-full incidents
+	// (FJB-11), account-state checks, and confirming managed-resource IDs.
+	ProviderInfo(context.Context, *connect.Request[v1.ProviderInfoRequest]) (*connect.Response[v1.ProviderInfoResponse], error)
 }
 
 // NewControlServiceClient constructs a client for the fjbellows.control.v1.ControlService service.
@@ -201,10 +235,34 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("Resume")),
 			connect.WithClientOptions(opts...),
 		),
+		getConfig: connect.NewClient[v1.GetConfigRequest, v1.GetConfigResponse](
+			httpClient,
+			baseURL+ControlServiceGetConfigProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("GetConfig")),
+			connect.WithClientOptions(opts...),
+		),
+		reloadConfig: connect.NewClient[v1.ReloadConfigRequest, v1.ReloadConfigResponse](
+			httpClient,
+			baseURL+ControlServiceReloadConfigProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("ReloadConfig")),
+			connect.WithClientOptions(opts...),
+		),
+		execOnWorker: connect.NewClient[v1.ExecOnWorkerRequest, v1.ExecOnWorkerResponse](
+			httpClient,
+			baseURL+ControlServiceExecOnWorkerProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("ExecOnWorker")),
+			connect.WithClientOptions(opts...),
+		),
 		streamLogs: connect.NewClient[v1.StreamLogsRequest, v1.StreamLogsResponse](
 			httpClient,
 			baseURL+ControlServiceStreamLogsProcedure,
 			connect.WithSchema(controlServiceMethods.ByName("StreamLogs")),
+			connect.WithClientOptions(opts...),
+		),
+		providerInfo: connect.NewClient[v1.ProviderInfoRequest, v1.ProviderInfoResponse](
+			httpClient,
+			baseURL+ControlServiceProviderInfoProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("ProviderInfo")),
 			connect.WithClientOptions(opts...),
 		),
 	}
@@ -221,7 +279,11 @@ type controlServiceClient struct {
 	streamEvents   *connect.Client[v1.StreamEventsRequest, v1.StreamEventsResponse]
 	pause          *connect.Client[v1.PauseRequest, v1.PauseResponse]
 	resume         *connect.Client[v1.ResumeRequest, v1.ResumeResponse]
+	getConfig      *connect.Client[v1.GetConfigRequest, v1.GetConfigResponse]
+	reloadConfig   *connect.Client[v1.ReloadConfigRequest, v1.ReloadConfigResponse]
+	execOnWorker   *connect.Client[v1.ExecOnWorkerRequest, v1.ExecOnWorkerResponse]
 	streamLogs     *connect.Client[v1.StreamLogsRequest, v1.StreamLogsResponse]
+	providerInfo   *connect.Client[v1.ProviderInfoRequest, v1.ProviderInfoResponse]
 }
 
 // Health calls fjbellows.control.v1.ControlService.Health.
@@ -269,9 +331,29 @@ func (c *controlServiceClient) Resume(ctx context.Context, req *connect.Request[
 	return c.resume.CallUnary(ctx, req)
 }
 
+// GetConfig calls fjbellows.control.v1.ControlService.GetConfig.
+func (c *controlServiceClient) GetConfig(ctx context.Context, req *connect.Request[v1.GetConfigRequest]) (*connect.Response[v1.GetConfigResponse], error) {
+	return c.getConfig.CallUnary(ctx, req)
+}
+
+// ReloadConfig calls fjbellows.control.v1.ControlService.ReloadConfig.
+func (c *controlServiceClient) ReloadConfig(ctx context.Context, req *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error) {
+	return c.reloadConfig.CallUnary(ctx, req)
+}
+
+// ExecOnWorker calls fjbellows.control.v1.ControlService.ExecOnWorker.
+func (c *controlServiceClient) ExecOnWorker(ctx context.Context, req *connect.Request[v1.ExecOnWorkerRequest]) (*connect.Response[v1.ExecOnWorkerResponse], error) {
+	return c.execOnWorker.CallUnary(ctx, req)
+}
+
 // StreamLogs calls fjbellows.control.v1.ControlService.StreamLogs.
 func (c *controlServiceClient) StreamLogs(ctx context.Context, req *connect.Request[v1.StreamLogsRequest]) (*connect.ServerStreamForClient[v1.StreamLogsResponse], error) {
 	return c.streamLogs.CallServerStream(ctx, req)
+}
+
+// ProviderInfo calls fjbellows.control.v1.ControlService.ProviderInfo.
+func (c *controlServiceClient) ProviderInfo(ctx context.Context, req *connect.Request[v1.ProviderInfoRequest]) (*connect.Response[v1.ProviderInfoResponse], error) {
+	return c.providerInfo.CallUnary(ctx, req)
 }
 
 // ControlServiceHandler is an implementation of the fjbellows.control.v1.ControlService service.
@@ -331,6 +413,23 @@ type ControlServiceHandler interface {
 	// Resume re-arms the auto-tick. Idempotent. Audit-logged. Gated by
 	// -enable-control-writes; returns CodePermissionDenied otherwise.
 	Resume(context.Context, *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error)
+	// GetConfig returns the daemon's resolved live config as YAML, with secrets
+	// (forgejo.token, anything inside provider_config that looks like a token/
+	// password/secret/key) redacted. Useful for confirming the running process
+	// parsed config.yaml as the operator intended.
+	GetConfig(context.Context, *connect.Request[v1.GetConfigRequest]) (*connect.Response[v1.GetConfigResponse], error)
+	// ReloadConfig re-reads config.yaml from disk and hot-swaps the
+	// hot-reloadable subset (poll intervals, scale.max, labels, drain
+	// settings). Returns CodeFailedPrecondition with a clear error if the
+	// new config changes provider, provider_config, forgejo.url/token, or
+	// tag — those require a daemon restart.
+	ReloadConfig(context.Context, *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error)
+	// ExecOnWorker runs a single shell command on the worker identified by
+	// instance_id, returning stdout/stderr/exit code. Uses the orchestrator's
+	// existing SSH dispatcher; no new credentials. Audit-logged. Bounded
+	// command size, bounded output size — see the field comments. Gated by
+	// the daemon's -enable-control-writes flag.
+	ExecOnWorker(context.Context, *connect.Request[v1.ExecOnWorkerRequest]) (*connect.Response[v1.ExecOnWorkerResponse], error)
 	// StreamLogs streams structured slog records from the daemon. The first
 	// message is a stream_opened sentinel (zero `at`, empty `message`,
 	// level=""); clients should skip it (same convention as StreamEvents).
@@ -347,6 +446,11 @@ type ControlServiceHandler interface {
 	// The level field is the slog level's String() form
 	// ("DEBUG"/"INFO"/"WARN"/"ERROR").
 	StreamLogs(context.Context, *connect.Request[v1.StreamLogsRequest], *connect.ServerStream[v1.StreamLogsResponse]) error
+	// ProviderInfo returns provider-defined operator-debug info as a free-form
+	// key/value map. Keys are stable, documented per provider in
+	// `internal/provider/<name>/README.md`. Useful for capacity-full incidents
+	// (FJB-11), account-state checks, and confirming managed-resource IDs.
+	ProviderInfo(context.Context, *connect.Request[v1.ProviderInfoRequest]) (*connect.Response[v1.ProviderInfoResponse], error)
 }
 
 // NewControlServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -410,10 +514,34 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("Resume")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceGetConfigHandler := connect.NewUnaryHandler(
+		ControlServiceGetConfigProcedure,
+		svc.GetConfig,
+		connect.WithSchema(controlServiceMethods.ByName("GetConfig")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlServiceReloadConfigHandler := connect.NewUnaryHandler(
+		ControlServiceReloadConfigProcedure,
+		svc.ReloadConfig,
+		connect.WithSchema(controlServiceMethods.ByName("ReloadConfig")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlServiceExecOnWorkerHandler := connect.NewUnaryHandler(
+		ControlServiceExecOnWorkerProcedure,
+		svc.ExecOnWorker,
+		connect.WithSchema(controlServiceMethods.ByName("ExecOnWorker")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlServiceStreamLogsHandler := connect.NewServerStreamHandler(
 		ControlServiceStreamLogsProcedure,
 		svc.StreamLogs,
 		connect.WithSchema(controlServiceMethods.ByName("StreamLogs")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlServiceProviderInfoHandler := connect.NewUnaryHandler(
+		ControlServiceProviderInfoProcedure,
+		svc.ProviderInfo,
+		connect.WithSchema(controlServiceMethods.ByName("ProviderInfo")),
 		connect.WithHandlerOptions(opts...),
 	)
 	return "/fjbellows.control.v1.ControlService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -436,8 +564,16 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 			controlServicePauseHandler.ServeHTTP(w, r)
 		case ControlServiceResumeProcedure:
 			controlServiceResumeHandler.ServeHTTP(w, r)
+		case ControlServiceGetConfigProcedure:
+			controlServiceGetConfigHandler.ServeHTTP(w, r)
+		case ControlServiceReloadConfigProcedure:
+			controlServiceReloadConfigHandler.ServeHTTP(w, r)
+		case ControlServiceExecOnWorkerProcedure:
+			controlServiceExecOnWorkerHandler.ServeHTTP(w, r)
 		case ControlServiceStreamLogsProcedure:
 			controlServiceStreamLogsHandler.ServeHTTP(w, r)
+		case ControlServiceProviderInfoProcedure:
+			controlServiceProviderInfoHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -483,6 +619,22 @@ func (UnimplementedControlServiceHandler) Resume(context.Context, *connect.Reque
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.Resume is not implemented"))
 }
 
+func (UnimplementedControlServiceHandler) GetConfig(context.Context, *connect.Request[v1.GetConfigRequest]) (*connect.Response[v1.GetConfigResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.GetConfig is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) ReloadConfig(context.Context, *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ReloadConfig is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) ExecOnWorker(context.Context, *connect.Request[v1.ExecOnWorkerRequest]) (*connect.Response[v1.ExecOnWorkerResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ExecOnWorker is not implemented"))
+}
+
 func (UnimplementedControlServiceHandler) StreamLogs(context.Context, *connect.Request[v1.StreamLogsRequest], *connect.ServerStream[v1.StreamLogsResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.StreamLogs is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) ProviderInfo(context.Context, *connect.Request[v1.ProviderInfoRequest]) (*connect.Response[v1.ProviderInfoResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ProviderInfo is not implemented"))
 }

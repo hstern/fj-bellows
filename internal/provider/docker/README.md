@@ -77,6 +77,22 @@ A small `cli` interface fronts the docker invocations from both the provider
 and the dispatcher. Unit tests inject an in-memory fake; `go test` needs
 neither the `docker` binary nor a running docker daemon.
 
+## ProviderInfo keys (FJB-31)
+
+The docker provider implements `provider.InfoProvider` so a `ProviderInfo`
+RPC against a docker-backed daemon returns:
+
+| Key | Meaning |
+|---|---|
+| `docker_bin` | resolved docker binary (defaulted in Configure) |
+| `image` | worker image from `provider_config.image` |
+| `network` | optional `--network` arg, empty when none |
+| `wait_timeout` | Go-duration string the dispatcher polls with |
+
+Implementing the interface (even with this trivial shape) keeps the wire
+response predictable across providers — every supported provider answers,
+none make the operator wonder whether they typed the slug wrong.
+
 ## What about SSH config?
 
 A docker-only deployment can omit `ssh.private_key_file` entirely — the

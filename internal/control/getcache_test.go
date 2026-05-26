@@ -36,7 +36,7 @@ func TestGetCache_PopulatedAndRunning(t *testing.T) {
 			AdoptedExisting: false,
 			LinodeID:        98765432,
 			VPCIP:           "10.0.0.4",
-			BucketRegion:    "us-ord",
+			BucketRegion:    testRegion,
 			BucketLabel:     "fjb-cache-test",
 			VMState:         "running",
 		}
@@ -54,7 +54,7 @@ func TestGetCache_PopulatedAndRunning(t *testing.T) {
 	if m.LinodeId != 98765432 {
 		t.Fatalf("LinodeId: want 98765432 got %d", m.LinodeId)
 	}
-	if m.VpcIp != "10.0.0.4" || m.BucketRegion != "us-ord" || m.BucketLabel != "fjb-cache-test" {
+	if m.VpcIp != "10.0.0.4" || m.BucketRegion != testRegion || m.BucketLabel != "fjb-cache-test" {
 		t.Fatalf("bucket/IP fields: %+v", m)
 	}
 	if m.VmState != "running" {

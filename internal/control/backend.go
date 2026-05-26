@@ -68,6 +68,35 @@ type Backend interface {
 
 	// Resume re-arms the auto-tick. Idempotent.
 	Resume(ctx context.Context)
+
+	// GetConfig returns the resolved live config as YAML (secrets redacted)
+	// plus the path the config was originally loaded from. Read-only; safe
+	// to ship to any operator who can reach the control plane.
+	GetConfig(ctx context.Context) (yamlText, configPath string)
+
+	// ReloadConfig re-reads config.yaml from disk and hot-swaps the
+	// hot-reloadable subset (poll intervals, scale.max, labels, runner
+	// version, drain settings). Returns the list of changed dotted-key
+	// field names; the error case is "the new config changes a non-hot
+	// field" — the daemon refuses to partially apply and the caller maps
+	// the error to CodeFailedPrecondition.
+	ReloadConfig(ctx context.Context) (changedFields []string, err error)
+
+	// ExecOnWorker runs command on the worker identified by instanceID
+	// via the orchestrator's existing SSH dispatcher. Returns the
+	// captured stdout/stderr (truncated per the orchestrator's bound,
+	// with the original byte counts carried in truncatedStdout /
+	// truncatedStderr), the remote exit code, and any orchestrator-level
+	// error (pool miss, wrong state, dispatcher mismatch, SSH failure).
+	// A remote non-zero exit is NOT an error — it lands in exitCode.
+	// Audit-logged with the caller identity threaded through ctx.
+	ExecOnWorker(ctx context.Context, instanceID, command string) (stdout, stderr []byte, exitCode int32, truncatedStdout, truncatedStderr int64, err error)
+
+	// ProviderInfo returns the configured provider's slug ("linode",
+	// "docker", ...) plus its operator-debug key/value map. Providers
+	// that don't implement provider.InfoProvider answer with an empty
+	// map; the slug is always populated. Used by the ProviderInfo RPC.
+	ProviderInfo(ctx context.Context) (provider string, info map[string]string)
 }
 
 // ReconcileResult is the per-tick summary returned by Kick. Counts are
@@ -95,7 +124,8 @@ type CacheStatus struct {
 }
 
 // WorkerView is the per-node shape the control plane returns from ListWorkers.
-// Mirrors orchestrator.Node plus the in-flight job handle.
+// Mirrors orchestrator.Node plus the in-flight job handle and the billing-
+// window snapshot (FJB-30) computed from the current TeardownPolicy.
 type WorkerView struct {
 	InstanceID string
 	State      string
@@ -103,6 +133,18 @@ type WorkerView struct {
 	CreatedAt  time.Time
 	LastBusy   time.Time
 	CurrentJob string
+
+	// PaidHourEndAt is the next paid-hour boundary for the worker — when
+	// hourly-round-up billing models close out the next paid hour. Zero
+	// for per-second models.
+	PaidHourEndAt time.Time
+	// ReapEligibleAt is the earliest time the policy will tear this worker
+	// down (LastBusy + IdleTimeout for per-second; the next :55 mark for
+	// hourly).
+	ReapEligibleAt time.Time
+	// BillingModel is "per_second" or "hourly_round_up". Empty when the
+	// policy is the zero value.
+	BillingModel string
 }
 
 // HealthStatus is the orchestrator's view of its own readiness.

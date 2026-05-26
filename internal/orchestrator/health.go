@@ -24,6 +24,10 @@ type HealthStatus struct {
 // WorkerView is the per-node shape returned by PoolSnapshot. Stable,
 // wire-friendly mirror of orchestrator.Node so the control plane can
 // translate to protobuf without coupling the orchestrator to generated code.
+//
+// The billing-window fields (PaidHourEndAt, ReapEligibleAt, BillingModel)
+// are populated from the orchestrator's TeardownPolicy via Timing(); see
+// FJB-30.
 type WorkerView struct {
 	InstanceID string
 	State      string
@@ -31,21 +35,40 @@ type WorkerView struct {
 	CreatedAt  time.Time
 	LastBusy   time.Time
 	CurrentJob string
+
+	// PaidHourEndAt is the next paid-hour boundary for the worker — when
+	// hourly-round-up billing models close out the next paid hour. Zero
+	// for per-second models.
+	PaidHourEndAt time.Time
+	// ReapEligibleAt is when the worker first becomes eligible for
+	// teardown under the current policy: LastBusy + IdleTimeout for
+	// per-second, the next :55 mark for hourly.
+	ReapEligibleAt time.Time
+	// BillingModel is the policy's billing model string:
+	// "per_second" | "hourly_round_up". Empty for the zero policy.
+	BillingModel string
 }
 
 // PoolSnapshot returns a copy of every node currently in the pool.
 // Equivalent of Pool.Snapshot but stringified for the wire (NodeState → string).
+// Each view also carries the per-worker billing-window timing computed
+// from the current TeardownPolicy.
 func (o *Orchestrator) PoolSnapshot() []WorkerView {
 	nodes := o.pool.Snapshot()
+	now := o.now()
 	out := make([]WorkerView, 0, len(nodes))
 	for _, n := range nodes {
+		t := o.cfg.Teardown.Timing(n, now)
 		out = append(out, WorkerView{
-			InstanceID: n.InstanceID,
-			State:      string(n.State),
-			IP:         n.IP,
-			CreatedAt:  n.CreatedAt,
-			LastBusy:   n.LastBusy,
-			CurrentJob: n.CurrentJob,
+			InstanceID:     n.InstanceID,
+			State:          string(n.State),
+			IP:             n.IP,
+			CreatedAt:      n.CreatedAt,
+			LastBusy:       n.LastBusy,
+			CurrentJob:     n.CurrentJob,
+			PaidHourEndAt:  t.PaidHourEndAt,
+			ReapEligibleAt: t.ReapEligibleAt,
+			BillingModel:   t.BillingModel,
 		})
 	}
 	return out

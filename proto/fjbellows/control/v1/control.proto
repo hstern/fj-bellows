@@ -74,6 +74,26 @@ service ControlService {
   // -enable-control-writes; returns CodePermissionDenied otherwise.
   rpc Resume(ResumeRequest) returns (ResumeResponse);
 
+  // GetConfig returns the daemon's resolved live config as YAML, with secrets
+  // (forgejo.token, anything inside provider_config that looks like a token/
+  // password/secret/key) redacted. Useful for confirming the running process
+  // parsed config.yaml as the operator intended.
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+
+  // ReloadConfig re-reads config.yaml from disk and hot-swaps the
+  // hot-reloadable subset (poll intervals, scale.max, labels, drain
+  // settings). Returns CodeFailedPrecondition with a clear error if the
+  // new config changes provider, provider_config, forgejo.url/token, or
+  // tag — those require a daemon restart.
+  rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse);
+
+  // ExecOnWorker runs a single shell command on the worker identified by
+  // instance_id, returning stdout/stderr/exit code. Uses the orchestrator's
+  // existing SSH dispatcher; no new credentials. Audit-logged. Bounded
+  // command size, bounded output size — see the field comments. Gated by
+  // the daemon's -enable-control-writes flag.
+  rpc ExecOnWorker(ExecOnWorkerRequest) returns (ExecOnWorkerResponse);
+
   // StreamLogs streams structured slog records from the daemon. The first
   // message is a stream_opened sentinel (zero `at`, empty `message`,
   // level=""); clients should skip it (same convention as StreamEvents).
@@ -90,6 +110,12 @@ service ControlService {
   // The level field is the slog level's String() form
   // ("DEBUG"/"INFO"/"WARN"/"ERROR").
   rpc StreamLogs(StreamLogsRequest) returns (stream StreamLogsResponse);
+
+  // ProviderInfo returns provider-defined operator-debug info as a free-form
+  // key/value map. Keys are stable, documented per provider in
+  // `internal/provider/<name>/README.md`. Useful for capacity-full incidents
+  // (FJB-11), account-state checks, and confirming managed-resource IDs.
+  rpc ProviderInfo(ProviderInfoRequest) returns (ProviderInfoResponse);
 }
 
 message HealthRequest {}
@@ -152,6 +178,19 @@ message Worker {
   // unless state == "busy". Goes empty again when the dispatch goroutine
   // transitions the node back to idle.
   string current_job = 6;
+
+  // paid_hour_end_at is when the next paid-hour boundary closes for
+  // this worker (hourly-billed providers). Empty for per-second.
+  google.protobuf.Timestamp paid_hour_end_at = 7;
+
+  // reap_eligible_at is the earliest time the policy will tear this
+  // worker down. last_busy + idle_timeout for per-second; the next
+  // :55 mark for hourly.
+  google.protobuf.Timestamp reap_eligible_at = 8;
+
+  // billing_model is the provider's billing model string:
+  // "per_second" or "hourly_round_up".
+  string billing_model = 9;
 }
 
 message GetCacheRequest {}
@@ -238,6 +277,29 @@ message ResumeRequest {}
 // armed." Idempotent: resuming an unpaused daemon returns OK.
 message ResumeResponse {}
 
+message ExecOnWorkerRequest {
+  // instance_id identifies the worker to exec into. Must be present in
+  // the pool and in state idle or busy. Workers in provisioning (SSH may
+  // not be up yet) or removing (Destroy is in flight) are rejected.
+  string instance_id = 1;
+
+  // command is the shell command line to run. Run with `sh -c <command>`
+  // on the worker. Capped at 64 KiB; longer requests are rejected with
+  // CodeInvalidArgument.
+  string command = 2;
+}
+
+message ExecOnWorkerResponse {
+  // stdout/stderr are truncated to 1 MiB each. truncated_stdout /
+  // truncated_stderr report the original byte counts when truncation
+  // happened so the operator knows there was more.
+  bytes stdout = 1;
+  bytes stderr = 2;
+  int32 exit_code = 3;
+  int64 truncated_stdout = 4;
+  int64 truncated_stderr = 5;
+}
+
 message StreamEventsRequest {
   // No filtering in v1; clients see every event.
 }
@@ -253,6 +315,31 @@ message StreamEventsResponse {
   map<string, string> attrs = 3;
 }
 
+message GetConfigRequest {}
+
+message GetConfigResponse {
+  // yaml is the daemon's resolved live config rendered as YAML, with
+  // secret-bearing fields replaced by "<redacted>". An operator can
+  // diff this against the on-disk config.yaml to confirm the daemon
+  // parsed it as intended.
+  string yaml = 1;
+
+  // config_path is the filesystem path the daemon originally loaded
+  // (the -config flag's value). Useful when the operator isn't sure
+  // which config the running process is using.
+  string config_path = 2;
+}
+
+message ReloadConfigRequest {}
+
+message ReloadConfigResponse {
+  // changed_fields names every hot-reloadable field whose value differs
+  // from the previously-running config, in dotted-key form
+  // (e.g. "scale.max", "poll.interval", "forgejo.labels"). Empty means
+  // the re-read parsed to the same values that were already live.
+  repeated string changed_fields = 1;
+}
+
 message StreamLogsRequest {
   // instance_id scopes the stream to records whose attrs["id"] matches.
   // Empty = no filter on this dimension.
@@ -266,6 +353,16 @@ message StreamLogsRequest {
   // before live streaming begins. 0 = no replay. The daemon caps this at
   // its ring-buffer capacity.
   int32 history_lines = 3;
+}
+
+message ProviderInfoRequest {}
+
+message ProviderInfoResponse {
+  // provider is the provider name slug ("linode", "docker", ...).
+  string provider = 1;
+  // info is the provider's key/value map. Empty for providers that
+  // don't implement InfoProvider.
+  map<string, string> info = 2;
 }
 
 message StreamLogsResponse {
