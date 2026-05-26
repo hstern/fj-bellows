@@ -20,15 +20,25 @@ provider in CI.
    `127.0.0.1:3000` reaches the orchestrator-side Forgejo — no out-of-process
    tunnel needed. The runner's step container (sharing the VM's network
    namespace via `--network host`) reaches Forgejo via the same loopback URL.
-4. Job completes (orchestrator logs `job complete`). The E2E config sets
+4. The harness drives state-transition observation via fj-bellows' control
+   plane (FJB-14). On startup it brings up a TCP listener on a random
+   `127.0.0.1:$CTL_PORT` (so concurrent runs don't collide) and polls the
+   ConnectRPC `ListWorkers` + `GetCache` endpoints via plain `curl -d '{}'`
+   to JSON-form URLs (Connect protocol). State transitions — worker reached
+   `idle`, job completed (worker returned to `idle` with empty
+   `current_job`), idle teardown (`workers == []`) — replace the prior
+   `grep -q '...' $LOG` scrapes. `GetCache` asserts the cache VM is
+   provisioned and the Linode API reports `vm_state=running` as a fatal
+   gate before the cache-trust probe runs. The E2E config sets
    `poll.billing_hour: 60s, poll.hour_margin: 10s`, so the orchestrator's
    hourly-cycle teardown fires within ~50s of the next cycle boundary and the
    Linode is destroyed.
-5. Between worker `job complete` and the idle teardown wait, the script
-   SSHes to the worker and runs read-only **cache-scenario assertions**
-   (FJB-6 PR 3): `/etc/hosts` maps `cache.fjb.internal` to an RFC1918
-   IP; the fjb CA is installed in the system trust store; the
-   containerd `hosts.toml` for the upstream is **PULL-ONLY** (no
+5. Between the `worker idle` signal and the `job complete` signal (so the
+   worker can't be reaped mid-probe under the short 60s billing cycle), the
+   script SSHes to the worker and runs read-only **cache-scenario
+   assertions** (FJB-6 PR 3): `/etc/hosts` maps `cache.fjb.internal` to
+   an RFC1918 IP; the fjb CA is installed in the system trust store;
+   the containerd `hosts.toml` for the upstream is **PULL-ONLY** (no
    `"push"` in capabilities — the load-bearing safety boundary that
    keeps push traffic going direct to upstream); zot's `/v2/` endpoint
    is reachable from the worker over the VPC NIC with the cert
@@ -97,3 +107,9 @@ from the Linode API.
 This is the only place `billing_hour` is shortened — production deployments
 should leave it at the default `1h` to fully use each paid hour. The teardown
 policy's pure logic is covered by `internal/orchestrator/teardown_test.go`.
+
+After teardown the harness polls `ListWorkers` until the pool is empty, then
+double-checks via the Linode API that the tagged instance is actually gone
+(catches a control-plane lie). The orchestrator stderr log is still captured
+to `$WORKDIR/fj-bellows.log` and dumped on failure for forensics — but it is
+no longer the load-bearing observation channel.
