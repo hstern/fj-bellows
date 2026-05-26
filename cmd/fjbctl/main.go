@@ -9,6 +9,7 @@
 //	fjbctl cache      — managed pull-through cache VM state
 //	fjbctl reconcile  — drive a synchronous reconcile tick
 //	fjbctl events     — stream state-transition events
+//	fjbctl info       — ProviderInfo: provider's operator-debug key/value map
 //
 // Output is human-readable by default; pass --json to any subcommand for the
 // raw protobuf-JSON response.
@@ -45,6 +46,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		return cmdReconcile(rest, stdout, stderr)
 	case "events":
 		return cmdEvents(rest, stdout, stderr)
+	case "info":
+		return cmdInfo(rest, stdout, stderr)
 	default:
 		outf(stderr, "fjbctl: unknown subcommand %q\n\n", cmd)
 		printUsage(stderr)
@@ -64,6 +67,7 @@ Subcommands:
   cache       Managed pull-through registry cache VM state.
   reconcile   Drive one synchronous reconcile tick; print the counter summary.
   events      Stream state-transition events as they happen.
+  info        ProviderInfo: provider's operator-debug key/value map.
 
 Common flags (all subcommands):
   -listen <host:port>      Daemon control plane address.
@@ -78,5 +82,6 @@ Examples:
   fjbctl health
   fjbctl workers --watch
   fjbctl reconcile
+  fjbctl info
   fjbctl -listen 100.x.y.z:9876 -token-file ~/.fjb.token events`)
 }

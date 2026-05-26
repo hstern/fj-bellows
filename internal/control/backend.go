@@ -91,6 +91,12 @@ type Backend interface {
 	// A remote non-zero exit is NOT an error — it lands in exitCode.
 	// Audit-logged with the caller identity threaded through ctx.
 	ExecOnWorker(ctx context.Context, instanceID, command string) (stdout, stderr []byte, exitCode int32, truncatedStdout, truncatedStderr int64, err error)
+
+	// ProviderInfo returns the configured provider's slug ("linode",
+	// "docker", ...) plus its operator-debug key/value map. Providers
+	// that don't implement provider.InfoProvider answer with an empty
+	// map; the slug is always populated. Used by the ProviderInfo RPC.
+	ProviderInfo(ctx context.Context) (provider string, info map[string]string)
 }
 
 // ReconcileResult is the per-tick summary returned by Kick. Counts are

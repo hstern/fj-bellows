@@ -34,8 +34,9 @@ shim. Subsequent PRs widen the proto + handler with:
 | FJB-28 | `GetConfig` (read-only redacted YAML dump), `ReloadConfig` (hot-swap a subset; gated by `-enable-control-writes`) |
 | FJB-29 | `ExecOnWorker` (one-shot debug exec over the orchestrator's SSH path) |
 | FJB-30 | `ListWorkers` billing-window fields (`paid_hour_end_at`, `reap_eligible_at`, `billing_model`) |
+| FJB-31 | `ProviderInfo` (provider-defined operator-debug key/value map) |
 
-Deferred to follow-up tickets: provider-passthrough. v1 leans on
+All FJB-14 follow-ups now ship. v1 leans on
 loopback-binding as the default auth boundary; the bearer-token
 interceptor (FJB-33, below) is what binds a non-loopback deployment.
 
@@ -375,6 +376,47 @@ by the reconcile loop on the next read of `o.cfg`.
 Each `ReloadConfig` call emits an audit log line with the caller
 identity (same convention as the force verbs), so a deployment can trace
 "who reloaded what, when" against the slog stream.
+
+## ProviderInfo (FJB-31)
+
+`ProviderInfo` is a unary RPC that surfaces provider-defined operator-
+debug info as a free-form `map<string, string>`. The control plane
+type-asserts the live provider to the optional `provider.InfoProvider`
+interface and copies its `Info(ctx)` map through; providers that don't
+implement the interface answer with an empty map. The provider slug
+(e.g. `"linode"`, `"docker"`) is always populated.
+
+Keys are stable and provider-documented. Today:
+
+- **Linode** — see `internal/provider/linode/README.md` for the full
+  list, but operators reach for it mainly during capacity-full
+  incidents (FJB-11) and account-balance / dunning checks. Keys
+  include `region`, `type`, `image`, `firewall_id`,
+  `placement_group_id`, `vpc_id`, `cache_linode_id`,
+  `workers_in_flight`, `capacity_full_count_24h`, and
+  `account_balance_usd` (empty when the PAT lacks Account read
+  scope).
+- **Docker** — `docker_bin`, `image`, `network`, `wait_timeout`.
+
+Sample call:
+
+```sh
+curl -sS -X POST \
+  -H 'content-type: application/json' \
+  -d '{}' \
+  http://127.0.0.1:9876/fjbellows.control.v1.ControlService/ProviderInfo
+```
+
+Or via `fjbctl`:
+
+```sh
+fjbctl info             # sorted text view (default)
+fjbctl -json info       # raw JSON
+```
+
+Values are operator-readable strings — no secrets, no PII. A provider
+that needs to surface something sensitive should add a dedicated RPC
+with its own auth posture instead.
 
 ## Backend abstraction
 

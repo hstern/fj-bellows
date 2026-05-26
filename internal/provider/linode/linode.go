@@ -17,6 +17,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linode/linodego"
@@ -72,6 +74,75 @@ type Linode struct {
 	// VM never dials back to the orchestrator (no tunnel); this is
 	// strictly inbound-debug access.
 	sshAuthorizedKey string
+
+	// workersInFlight counts Provision calls that have entered the
+	// CreateInstance path but not yet returned (success or failure).
+	// Surfaced via Info() for operator debugging — pairs with the
+	// orchestrator's own pending counter from the other side.
+	workersInFlight atomic.Int64
+
+	// capacityFull tracks recent "capacity full" 400s from
+	// CreateInstance over the last 24h as a small ring of timestamps.
+	// Surfaced via Info() so the operator can correlate a stuck pool
+	// with capacity pressure without scraping logs. Bounded; we only
+	// keep timestamps, not the full error bodies.
+	capacityFull capacityFullRing
+}
+
+// capacityFullRing is a tiny bounded rolling counter of "capacity full"
+// timestamps over the last 24h. The ring caps memory at
+// capacityFullRingMax entries — well above any plausible incident — and
+// the count() method ages out entries older than the window each call.
+type capacityFullRing struct {
+	mu sync.Mutex
+	// at is the timestamps of recent capacity-full events, oldest first.
+	at []time.Time
+}
+
+// capacityFullRingMax bounds the ring at a sane upper limit so a runaway
+// capacity-full storm can't grow unbounded. Far above any plausible
+// 24h incident; the typical reading is in the single digits.
+const capacityFullRingMax = 1024
+
+// capacityFullWindow is the rolling window count() reports over.
+const capacityFullWindow = 24 * time.Hour
+
+// note records that one capacity-full 400 fired right now, dropping
+// anything older than the rolling window and dropping the oldest entry
+// when the ring is at the bound.
+func (r *capacityFullRing) note(now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prune(now)
+	if len(r.at) >= capacityFullRingMax {
+		// Drop oldest.
+		r.at = r.at[1:]
+	}
+	r.at = append(r.at, now)
+}
+
+// count returns the number of capacity-full events within the rolling
+// window ending at now. Prunes aged-out entries as a side effect.
+func (r *capacityFullRing) count(now time.Time) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prune(now)
+	return len(r.at)
+}
+
+// prune drops entries older than now-capacityFullWindow. Caller holds mu.
+// Entries can arrive out of chronological order in principle (Provision
+// is called concurrently and the wall clock is sampled per-call), so we
+// scan-and-filter rather than truncating a prefix.
+func (r *capacityFullRing) prune(now time.Time) {
+	cutoff := now.Add(-capacityFullWindow)
+	kept := r.at[:0]
+	for _, t := range r.at {
+		if !t.Before(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	r.at = kept
 }
 
 // SetSSHAuthorizedKey supplies the orchestrator's SSH public key
@@ -349,6 +420,8 @@ func (l *Linode) setupManagedCache(ctx context.Context, tag string) error {
 // FJB-10. The order matches Configure: fw → pg → vpc → cache (cache
 // reads vpc.workerSubnetID).
 func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.Instance, error) {
+	l.workersInFlight.Add(1)
+	defer l.workersInFlight.Add(-1)
 	if err := l.ensureManagedResources(ctx); err != nil {
 		return provider.Instance{}, err
 	}
@@ -392,6 +465,13 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	}
 	l.applyManagedResourceAttachments(&opts)
 	inst, err := l.client.CreateInstance(ctx, opts)
+	if err != nil && isPlacementGroupFull(err) {
+		// FJB-31: surface "capacity full" pressure through Info() for
+		// the operator. We record regardless of enforcement mode — a
+		// strict-PG operator equally wants to know capacity pressure
+		// is mounting, even if we won't auto-retry.
+		l.capacityFull.note(time.Now())
+	}
 	if err != nil && l.shouldRetryWithoutPlacementGroup(err) {
 		// FJB-11: with enforcement=flexible the operator's intent is
 		// "best-effort PG, don't block on it". Linode's API treats

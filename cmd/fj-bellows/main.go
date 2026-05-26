@@ -172,6 +172,7 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 		enableWrites: opts.enableControlWrites,
 		configPath:   opts.configPath,
 		cfg:          cfg,
+		providerName: cfg.Provider,
 	}, orch, prov, logBus, log); err != nil {
 		return err
 	}
@@ -187,13 +188,14 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 }
 
 // controlOpts groups the wiring inputs for startControlPlane so adding a new
-// knob (the FJB-26 enableWrites flag) doesn't keep widening the signature.
+// knob doesn't keep widening the signature.
 type controlOpts struct {
 	listen       string
 	tokenFile    string
 	enableWrites bool
 	configPath   string
 	cfg          *config.Config
+	providerName string
 }
 
 // startControlPlane spins up the operator-facing HTTP/RPC server on a side
@@ -230,11 +232,12 @@ func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator
 		return fmt.Errorf("-enable-control-writes on non-loopback bind %q requires -control-token-file", opts.listen)
 	}
 	backend := &controlBackend{
-		o:          orch,
-		prov:       prov,
-		logBus:     logBus,
-		configPath: opts.configPath,
-		cfg:        opts.cfg,
+		o:            orch,
+		prov:         prov,
+		providerName: opts.providerName,
+		logBus:       logBus,
+		configPath:   opts.configPath,
+		cfg:          opts.cfg,
 	}
 	srv := control.NewServer(opts.listen, backend, log,
 		control.WithBearerToken(token),
@@ -255,10 +258,11 @@ func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator
 // GetConfig and ReloadConfig both take it; no other adapter method touches
 // the on-disk config struct (the orchestrator owns its own copy).
 type controlBackend struct {
-	o          *orchestrator.Orchestrator
-	prov       provider.Provider
-	logBus     *logbus.Bus
-	configPath string
+	o            *orchestrator.Orchestrator
+	prov         provider.Provider
+	providerName string
+	logBus       *logbus.Bus
+	configPath   string
 
 	configMu sync.RWMutex
 	cfg      *config.Config
@@ -410,6 +414,21 @@ func (b *controlBackend) ExecOnWorker(ctx context.Context, instanceID, command s
 		return nil, nil, 0, 0, 0, err
 	}
 	return r.Stdout, r.Stderr, r.ExitCode, r.TruncatedStdout, r.TruncatedStderr, nil
+}
+
+// ProviderInfo type-asserts the live provider to the optional
+// InfoProvider surface and returns its key/value map, plus the
+// configured provider slug. Providers that don't implement
+// InfoProvider answer with an empty map; the slug is always
+// populated so the operator can tell apart "provider doesn't expose
+// anything" from "wrong provider name on the wire". Keeps the
+// provider.Provider interface from growing every time we add a
+// provider-debug surface (FJB-31).
+func (b *controlBackend) ProviderInfo(ctx context.Context) (string, map[string]string) {
+	if ip, ok := b.prov.(provider.InfoProvider); ok {
+		return b.providerName, ip.Info(ctx)
+	}
+	return b.providerName, map[string]string{}
 }
 
 // CacheStatus walks the provider for cache info if it supports it (Linode

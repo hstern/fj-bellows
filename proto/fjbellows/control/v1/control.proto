@@ -110,6 +110,12 @@ service ControlService {
   // The level field is the slog level's String() form
   // ("DEBUG"/"INFO"/"WARN"/"ERROR").
   rpc StreamLogs(StreamLogsRequest) returns (stream StreamLogsResponse);
+
+  // ProviderInfo returns provider-defined operator-debug info as a free-form
+  // key/value map. Keys are stable, documented per provider in
+  // `internal/provider/<name>/README.md`. Useful for capacity-full incidents
+  // (FJB-11), account-state checks, and confirming managed-resource IDs.
+  rpc ProviderInfo(ProviderInfoRequest) returns (ProviderInfoResponse);
 }
 
 message HealthRequest {}
@@ -347,6 +353,16 @@ message StreamLogsRequest {
   // before live streaming begins. 0 = no replay. The daemon caps this at
   // its ring-buffer capacity.
   int32 history_lines = 3;
+}
+
+message ProviderInfoRequest {}
+
+message ProviderInfoResponse {
+  // provider is the provider name slug ("linode", "docker", ...).
+  string provider = 1;
+  // info is the provider's key/value map. Empty for providers that
+  // don't implement InfoProvider.
+  map<string, string> info = 2;
 }
 
 message StreamLogsResponse {

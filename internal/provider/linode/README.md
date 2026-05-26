@@ -480,6 +480,34 @@ bucket + key + cloud-init); the operator-managed shape would have to
 own all three and the lifecycle coordination is non-trivial. Use the
 fully-managed mode or none.
 
+### ProviderInfo keys (FJB-31)
+
+The Linode provider implements `provider.InfoProvider`, so a `ProviderInfo`
+RPC against a Linode-backed daemon returns the following keys. Values
+are operator-readable strings (no secrets); the call reads in-memory
+state plus one `GET /account` hit per RPC.
+
+| Key | Meaning |
+|---|---|
+| `region` | configured region |
+| `type` | configured instance type |
+| `image` | configured Linode image ID |
+| `firewall_id` | managed firewall ID, or 0 if not managed |
+| `placement_group_id` | managed PG ID, or 0 |
+| `vpc_id` | managed VPC ID, or 0 |
+| `cache_linode_id` | managed cache VM ID, or 0 |
+| `workers_in_flight` | count of in-flight Provision calls (pending) |
+| `capacity_full_count_24h` | "PG at full capacity" 400s in the last 24h |
+| `account_balance_usd` | account balance from `GET /account`, or empty if the PAT can't read it |
+
+`account_balance_usd` requires the `Account: R/W` (or read-only) scope on the
+PAT; a worker-scoped token (Linodes / Firewalls / VPCs / Object Storage only)
+gets an empty value. Other keys are always populated.
+
+`capacity_full_count_24h` is a rolling count of "Placement Group is at its
+full capacity" 400s recorded by `Provision`. Bounded; the counter degrades
+gracefully under a runaway storm.
+
 - **Provision** — `CreateInstance` with the rendered cloud-init passed as
   base64 user-data via the Linode Metadata service, the orchestrator's public
   key injected, and the pool tag stamped. Returns the instance with the
