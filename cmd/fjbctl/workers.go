@@ -125,17 +125,23 @@ func redrawWorkers(ctx context.Context, client interface {
 }
 
 // renderWorkers writes the worker table to w with tab-aligned columns.
+// BILLING / REAP_AT carry the FJB-30 billing-window snapshot so an
+// operator can see at a glance whether a worker is held warm for the
+// remainder of a paid hour or is past its idle timeout. Both columns
+// render "-" when the policy doesn't make them meaningful.
 func renderWorkers(w io.Writer, workers []*controlv1.Worker) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	outln(tw, "INSTANCE\tSTATE\tIP\tAGE\tLAST_BUSY\tJOB")
+	outln(tw, "INSTANCE\tSTATE\tIP\tAGE\tLAST_BUSY\tJOB\tBILLING\tREAP_AT")
 	for _, wk := range workers {
-		outf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		outf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			wk.InstanceId,
 			wk.State,
 			emptyDash(wk.Ip),
 			ageOrDash(wk.CreatedAt),
 			ageOrDash(wk.LastBusy),
 			emptyDash(wk.CurrentJob),
+			emptyDash(wk.BillingModel),
+			etaOrDash(wk.ReapEligibleAt),
 		)
 	}
 	_ = tw.Flush()
@@ -160,4 +166,23 @@ func ageOrDash(ts interface{ AsTime() time.Time }) string {
 		return "-"
 	}
 	return time.Since(t).Truncate(time.Second).String() + " ago"
+}
+
+// etaOrDash renders a future timestamp as "in <d>" (positive) or "<d> ago"
+// (already-elapsed), truncated to whole seconds. "-" when zero/nil — used
+// by REAP_AT to surface the policy's reap window without printing absolute
+// timestamps the operator would otherwise have to subtract in their head.
+func etaOrDash(ts interface{ AsTime() time.Time }) string {
+	if ts == nil {
+		return "-"
+	}
+	t := ts.AsTime()
+	if t.IsZero() {
+		return "-"
+	}
+	d := time.Until(t).Truncate(time.Second)
+	if d >= 0 {
+		return "in " + d.String()
+	}
+	return (-d).String() + " ago"
 }

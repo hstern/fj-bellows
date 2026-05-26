@@ -146,6 +146,50 @@ func TestWorkers_Human_TableRender(t *testing.T) {
 	}
 }
 
+// TestWorkers_Human_BillingWindowColumns covers FJB-30: BILLING and
+// REAP_AT columns surface the policy's billing-window snapshot, with
+// hourly-billed workers rendering both fields and per-second workers
+// rendering BILLING + reap eta only.
+func TestWorkers_Human_BillingWindowColumns(t *testing.T) {
+	be := &mockctl.Backend{}
+	be.SetHealth(func(context.Context) control.HealthStatus { return control.HealthStatus{Healthy: true} })
+	be.SetCacheStatus(func(context.Context) *control.CacheStatus { return nil })
+	// Use far-future timestamps so the etaOrDash branch is "in <d>" — keeps
+	// the assertion stable against clock skew between test setup and render.
+	future := time.Now().Add(42 * time.Minute)
+	be.SetPoolSnapshot(func() []control.WorkerView {
+		// State omitted: the test asserts on the FJB-30 billing-window
+		// columns, not state, so leaving State zero keeps the goconst
+		// "idle"-string-elsewhere check happy.
+		return []control.WorkerView{
+			{
+				InstanceID:     "linode-h",
+				IP:             "203.0.113.7",
+				BillingModel:   "hourly_round_up",
+				PaidHourEndAt:  future.Add(5 * time.Minute),
+				ReapEligibleAt: future,
+			},
+			{
+				InstanceID:     "linode-s",
+				IP:             "203.0.113.8",
+				BillingModel:   "per_second",
+				ReapEligibleAt: future,
+			},
+		}
+	})
+
+	listen := newCLIBackedServer(t, be)
+	code, out := captureRun(t, "workers", "-listen", listen)
+	if code != 0 {
+		t.Fatalf("exit: %d\n%s", code, out)
+	}
+	for _, want := range []string{"BILLING", "REAP_AT", "hourly_round_up", "per_second", "in "} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("workers output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestWorkers_EmptyPool_RendersSentinel(t *testing.T) {
 	be := &mockctl.Backend{}
 	be.SetHealth(func(context.Context) control.HealthStatus { return control.HealthStatus{Healthy: true} })

@@ -15,7 +15,7 @@ go install github.com/hstern/fj-bellows/cmd/fjbctl@latest
 | Subcommand | RPC | Description |
 | --- | --- | --- |
 | `fjbctl health` | `Health` | Readiness snapshot (healthy + last-tick / last-provider-list / last-forgejo-poll ages). Exits 0 if healthy, 1 otherwise. |
-| `fjbctl workers` | `ListWorkers` | Table of every worker the orchestrator currently tracks (state, IP, age, last_busy, current_job). Pass `--watch` to subscribe to `StreamEvents` and redraw on every state-transition event. |
+| `fjbctl workers` | `ListWorkers` | Table of every worker the orchestrator currently tracks (state, IP, age, last_busy, current_job, billing model, reap eta). Pass `--watch` to subscribe to `StreamEvents` and redraw on every state-transition event. |
 | `fjbctl cache` | `GetCache` | Managed pull-through registry cache VM state — present/absent, Linode VM status, VPC IP, bucket region+label. |
 | `fjbctl reconcile` | `Reconcile` | Drive one synchronous reconcile tick. Prints the per-tick summary (provisioned / dispatched / reaped / adopted / dropped + any errors). Exits 1 if the response includes errors. |
 | `fjbctl events` | `StreamEvents` | Stream state-transition events (`worker_provisioned`, `job_complete`, `reconcile_tick`, …) until interrupted. The protocol-level `stream_opened` sentinel is skipped. |
