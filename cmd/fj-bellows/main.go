@@ -20,6 +20,7 @@ import (
 	"github.com/hstern/fj-bellows/internal/bootstrap"
 	"github.com/hstern/fj-bellows/internal/config"
 	"github.com/hstern/fj-bellows/internal/control"
+	"github.com/hstern/fj-bellows/internal/control/events"
 	"github.com/hstern/fj-bellows/internal/forgejo"
 	"github.com/hstern/fj-bellows/internal/orchestrator"
 	"github.com/hstern/fj-bellows/internal/provider"
@@ -221,6 +222,25 @@ func (b controlBackend) PoolSnapshot() []control.WorkerView {
 		})
 	}
 	return out
+}
+
+func (b controlBackend) Kick(ctx context.Context) (control.ReconcileResult, error) {
+	r, err := b.o.Kick(ctx)
+	if err != nil {
+		return control.ReconcileResult{}, err
+	}
+	return control.ReconcileResult{
+		Provisioned: r.Provisioned,
+		Dispatched:  r.Dispatched,
+		Reaped:      r.Reaped,
+		Adopted:     r.Adopted,
+		Dropped:     r.Dropped,
+		Errors:      r.Errors,
+	}, nil
+}
+
+func (b controlBackend) Subscribe() (<-chan events.Event, func()) {
+	return b.o.Subscribe()
 }
 
 // CacheStatus walks the provider for cache info if it supports it (Linode

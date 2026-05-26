@@ -18,13 +18,16 @@ import (
 	mockctl "github.com/hstern/fj-bellows/internal/control/mock"
 )
 
-// newTestServer wires the same mux NewServer wires, but as an httptest.Server
-// so we can hit it without binding a real port. It returns the URL prefix
-// callers compose with /<package>.<Service>/<Method>.
+// newTestServer wires the same mux NewServer wires, behind an httptest server
+// with HTTP/2 (over TLS) enabled so Connect's server-streaming RPCs get the
+// HTTP/2 framing they need. Unary RPCs and the plain HTTP shims (/healthz)
+// work on the same URL.
 func newTestServer(t *testing.T, backend control.Backend) (*httptest.Server, controlv1connect.ControlServiceClient) {
 	t.Helper()
 	srv := control.NewServer("127.0.0.1:0", backend, nil)
-	hs := httptest.NewServer(srv.Handler())
+	hs := httptest.NewUnstartedServer(srv.Handler())
+	hs.EnableHTTP2 = true
+	hs.StartTLS()
 	t.Cleanup(hs.Close)
 	client := controlv1connect.NewControlServiceClient(hs.Client(), hs.URL)
 	return hs, client

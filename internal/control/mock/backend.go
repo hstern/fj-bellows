@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/hstern/fj-bellows/internal/control"
+	"github.com/hstern/fj-bellows/internal/control/events"
 )
 
 // Backend is a fake control.Backend. Unset func fields default to a
@@ -18,9 +19,13 @@ type Backend struct {
 	healthFn         func(ctx context.Context) control.HealthStatus
 	poolSnapshotFn   func() []control.WorkerView
 	cacheStatusFn    func(ctx context.Context) *control.CacheStatus
+	kickFn           func(ctx context.Context) (control.ReconcileResult, error)
+	subscribeFn      func() (<-chan events.Event, func())
 	healthCall       int
 	poolSnapshotCall int
 	cacheStatusCall  int
+	kickCall         int
+	subscribeCall    int
 }
 
 // SetHealth installs the response for subsequent Health calls.
@@ -85,6 +90,60 @@ func (b *Backend) CacheStatusCalls() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.cacheStatusCall
+}
+
+// SetKick installs the response for subsequent Kick calls.
+func (b *Backend) SetKick(fn func(ctx context.Context) (control.ReconcileResult, error)) {
+	b.mu.Lock()
+	b.kickFn = fn
+	b.mu.Unlock()
+}
+
+// Kick implements control.Backend.
+func (b *Backend) Kick(ctx context.Context) (control.ReconcileResult, error) {
+	b.mu.Lock()
+	fn := b.kickFn
+	b.kickCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return control.ReconcileResult{}, nil
+	}
+	return fn(ctx)
+}
+
+// KickCalls returns the number of times Kick has been invoked.
+func (b *Backend) KickCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.kickCall
+}
+
+// SetSubscribe installs the response for subsequent Subscribe calls.
+func (b *Backend) SetSubscribe(fn func() (<-chan events.Event, func())) {
+	b.mu.Lock()
+	b.subscribeFn = fn
+	b.mu.Unlock()
+}
+
+// Subscribe implements control.Backend.
+func (b *Backend) Subscribe() (<-chan events.Event, func()) {
+	b.mu.Lock()
+	fn := b.subscribeFn
+	b.subscribeCall++
+	b.mu.Unlock()
+	if fn == nil {
+		ch := make(chan events.Event)
+		close(ch)
+		return ch, func() {}
+	}
+	return fn()
+}
+
+// SubscribeCalls returns the number of times Subscribe has been invoked.
+func (b *Backend) SubscribeCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.subscribeCall
 }
 
 // HealthCalls returns the number of times Health has been invoked.
