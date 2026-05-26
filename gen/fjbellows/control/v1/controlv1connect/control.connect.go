@@ -40,6 +40,12 @@ const (
 	ControlServiceListWorkersProcedure = "/fjbellows.control.v1.ControlService/ListWorkers"
 	// ControlServiceGetCacheProcedure is the fully-qualified name of the ControlService's GetCache RPC.
 	ControlServiceGetCacheProcedure = "/fjbellows.control.v1.ControlService/GetCache"
+	// ControlServiceReconcileProcedure is the fully-qualified name of the ControlService's Reconcile
+	// RPC.
+	ControlServiceReconcileProcedure = "/fjbellows.control.v1.ControlService/Reconcile"
+	// ControlServiceStreamEventsProcedure is the fully-qualified name of the ControlService's
+	// StreamEvents RPC.
+	ControlServiceStreamEventsProcedure = "/fjbellows.control.v1.ControlService/StreamEvents"
 )
 
 // ControlServiceClient is a client for the fjbellows.control.v1.ControlService service.
@@ -58,6 +64,18 @@ type ControlServiceClient interface {
 	// when the `cache:` block is absent. Turns the e2e harness's soft
 	// "/v2/ reachable" check into a fatal "cache present + running" gate.
 	GetCache(context.Context, *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error)
+	// Reconcile drives a synchronous out-of-band reconcile pass and returns
+	// the per-tick summary (Provisioned, Dispatched, Reaped, Adopted,
+	// Dropped, Errors). The e2e harness uses this to force a second cycle
+	// without waiting on the poll interval (FJB-17 multi-cycle).
+	Reconcile(context.Context, *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error)
+	// StreamEvents emits state-transition events as they happen:
+	// worker_provisioned, worker_ready, worker_busy, worker_idle,
+	// worker_reaped, worker_adopted, worker_dropped, job_dispatched,
+	// job_complete, zombie_reaped, reconcile_tick. The stream stays open
+	// until the client disconnects or the daemon shuts down. Slow clients
+	// are dropped (channel closed) rather than blocking the producer.
+	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error)
 }
 
 // NewControlServiceClient constructs a client for the fjbellows.control.v1.ControlService service.
@@ -89,14 +107,28 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("GetCache")),
 			connect.WithClientOptions(opts...),
 		),
+		reconcile: connect.NewClient[v1.ReconcileRequest, v1.ReconcileResponse](
+			httpClient,
+			baseURL+ControlServiceReconcileProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("Reconcile")),
+			connect.WithClientOptions(opts...),
+		),
+		streamEvents: connect.NewClient[v1.StreamEventsRequest, v1.StreamEventsResponse](
+			httpClient,
+			baseURL+ControlServiceStreamEventsProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // controlServiceClient implements ControlServiceClient.
 type controlServiceClient struct {
-	health      *connect.Client[v1.HealthRequest, v1.HealthResponse]
-	listWorkers *connect.Client[v1.ListWorkersRequest, v1.ListWorkersResponse]
-	getCache    *connect.Client[v1.GetCacheRequest, v1.GetCacheResponse]
+	health       *connect.Client[v1.HealthRequest, v1.HealthResponse]
+	listWorkers  *connect.Client[v1.ListWorkersRequest, v1.ListWorkersResponse]
+	getCache     *connect.Client[v1.GetCacheRequest, v1.GetCacheResponse]
+	reconcile    *connect.Client[v1.ReconcileRequest, v1.ReconcileResponse]
+	streamEvents *connect.Client[v1.StreamEventsRequest, v1.StreamEventsResponse]
 }
 
 // Health calls fjbellows.control.v1.ControlService.Health.
@@ -112,6 +144,16 @@ func (c *controlServiceClient) ListWorkers(ctx context.Context, req *connect.Req
 // GetCache calls fjbellows.control.v1.ControlService.GetCache.
 func (c *controlServiceClient) GetCache(ctx context.Context, req *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error) {
 	return c.getCache.CallUnary(ctx, req)
+}
+
+// Reconcile calls fjbellows.control.v1.ControlService.Reconcile.
+func (c *controlServiceClient) Reconcile(ctx context.Context, req *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error) {
+	return c.reconcile.CallUnary(ctx, req)
+}
+
+// StreamEvents calls fjbellows.control.v1.ControlService.StreamEvents.
+func (c *controlServiceClient) StreamEvents(ctx context.Context, req *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error) {
+	return c.streamEvents.CallServerStream(ctx, req)
 }
 
 // ControlServiceHandler is an implementation of the fjbellows.control.v1.ControlService service.
@@ -130,6 +172,18 @@ type ControlServiceHandler interface {
 	// when the `cache:` block is absent. Turns the e2e harness's soft
 	// "/v2/ reachable" check into a fatal "cache present + running" gate.
 	GetCache(context.Context, *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error)
+	// Reconcile drives a synchronous out-of-band reconcile pass and returns
+	// the per-tick summary (Provisioned, Dispatched, Reaped, Adopted,
+	// Dropped, Errors). The e2e harness uses this to force a second cycle
+	// without waiting on the poll interval (FJB-17 multi-cycle).
+	Reconcile(context.Context, *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error)
+	// StreamEvents emits state-transition events as they happen:
+	// worker_provisioned, worker_ready, worker_busy, worker_idle,
+	// worker_reaped, worker_adopted, worker_dropped, job_dispatched,
+	// job_complete, zombie_reaped, reconcile_tick. The stream stays open
+	// until the client disconnects or the daemon shuts down. Slow clients
+	// are dropped (channel closed) rather than blocking the producer.
+	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error
 }
 
 // NewControlServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -157,6 +211,18 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("GetCache")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceReconcileHandler := connect.NewUnaryHandler(
+		ControlServiceReconcileProcedure,
+		svc.Reconcile,
+		connect.WithSchema(controlServiceMethods.ByName("Reconcile")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlServiceStreamEventsHandler := connect.NewServerStreamHandler(
+		ControlServiceStreamEventsProcedure,
+		svc.StreamEvents,
+		connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/fjbellows.control.v1.ControlService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlServiceHealthProcedure:
@@ -165,6 +231,10 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 			controlServiceListWorkersHandler.ServeHTTP(w, r)
 		case ControlServiceGetCacheProcedure:
 			controlServiceGetCacheHandler.ServeHTTP(w, r)
+		case ControlServiceReconcileProcedure:
+			controlServiceReconcileHandler.ServeHTTP(w, r)
+		case ControlServiceStreamEventsProcedure:
+			controlServiceStreamEventsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -184,4 +254,12 @@ func (UnimplementedControlServiceHandler) ListWorkers(context.Context, *connect.
 
 func (UnimplementedControlServiceHandler) GetCache(context.Context, *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.GetCache is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) Reconcile(context.Context, *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.Reconcile is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.StreamEvents is not implemented"))
 }

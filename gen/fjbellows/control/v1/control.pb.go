@@ -456,6 +456,232 @@ func (x *GetCacheResponse) GetVmState() string {
 	return ""
 }
 
+type ReconcileRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReconcileRequest) Reset() {
+	*x = ReconcileRequest{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReconcileRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReconcileRequest) ProtoMessage() {}
+
+func (x *ReconcileRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReconcileRequest.ProtoReflect.Descriptor instead.
+func (*ReconcileRequest) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{7}
+}
+
+type ReconcileResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Counts of intents started during the tick. Async work
+	// (provision/destroy goroutines) may still be in flight when this
+	// response returns.
+	Provisioned int32 `protobuf:"varint,1,opt,name=provisioned,proto3" json:"provisioned,omitempty"`
+	Dispatched  int32 `protobuf:"varint,2,opt,name=dispatched,proto3" json:"dispatched,omitempty"`
+	Reaped      int32 `protobuf:"varint,3,opt,name=reaped,proto3" json:"reaped,omitempty"`
+	Adopted     int32 `protobuf:"varint,4,opt,name=adopted,proto3" json:"adopted,omitempty"`
+	Dropped     int32 `protobuf:"varint,5,opt,name=dropped,proto3" json:"dropped,omitempty"`
+	// One entry per failing top-level step in the tick (list instances,
+	// poll waiting jobs, ...). Empty on a fully-clean tick.
+	Errors        []string `protobuf:"bytes,6,rep,name=errors,proto3" json:"errors,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReconcileResponse) Reset() {
+	*x = ReconcileResponse{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReconcileResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReconcileResponse) ProtoMessage() {}
+
+func (x *ReconcileResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReconcileResponse.ProtoReflect.Descriptor instead.
+func (*ReconcileResponse) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ReconcileResponse) GetProvisioned() int32 {
+	if x != nil {
+		return x.Provisioned
+	}
+	return 0
+}
+
+func (x *ReconcileResponse) GetDispatched() int32 {
+	if x != nil {
+		return x.Dispatched
+	}
+	return 0
+}
+
+func (x *ReconcileResponse) GetReaped() int32 {
+	if x != nil {
+		return x.Reaped
+	}
+	return 0
+}
+
+func (x *ReconcileResponse) GetAdopted() int32 {
+	if x != nil {
+		return x.Adopted
+	}
+	return 0
+}
+
+func (x *ReconcileResponse) GetDropped() int32 {
+	if x != nil {
+		return x.Dropped
+	}
+	return 0
+}
+
+func (x *ReconcileResponse) GetErrors() []string {
+	if x != nil {
+		return x.Errors
+	}
+	return nil
+}
+
+type StreamEventsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StreamEventsRequest) Reset() {
+	*x = StreamEventsRequest{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamEventsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamEventsRequest) ProtoMessage() {}
+
+func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamEventsRequest.ProtoReflect.Descriptor instead.
+func (*StreamEventsRequest) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{9}
+}
+
+type StreamEventsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// at is when the event fired in the orchestrator's clock.
+	At *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=at,proto3" json:"at,omitempty"`
+	// type is a stable slug — see the StreamEvents RPC comment for the set.
+	Type string `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	// attrs holds the per-event detail (instance id, ip, handle, counts).
+	// The set of keys depends on type; documented inline in the orchestrator
+	// emit sites.
+	Attrs         map[string]string `protobuf:"bytes,3,rep,name=attrs,proto3" json:"attrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StreamEventsResponse) Reset() {
+	*x = StreamEventsResponse{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamEventsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamEventsResponse) ProtoMessage() {}
+
+func (x *StreamEventsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamEventsResponse.ProtoReflect.Descriptor instead.
+func (*StreamEventsResponse) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *StreamEventsResponse) GetAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.At
+	}
+	return nil
+}
+
+func (x *StreamEventsResponse) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *StreamEventsResponse) GetAttrs() map[string]string {
+	if x != nil {
+		return x.Attrs
+	}
+	return nil
+}
+
 var File_fjbellows_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_fjbellows_control_v1_control_proto_rawDesc = "" +
@@ -489,11 +715,32 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\x06vpc_ip\x18\x04 \x01(\tR\x05vpcIp\x12#\n" +
 	"\rbucket_region\x18\x05 \x01(\tR\fbucketRegion\x12!\n" +
 	"\fbucket_label\x18\x06 \x01(\tR\vbucketLabel\x12\x19\n" +
-	"\bvm_state\x18\a \x01(\tR\avmState2\xa4\x02\n" +
+	"\bvm_state\x18\a \x01(\tR\avmState\"\x12\n" +
+	"\x10ReconcileRequest\"\xb9\x01\n" +
+	"\x11ReconcileResponse\x12 \n" +
+	"\vprovisioned\x18\x01 \x01(\x05R\vprovisioned\x12\x1e\n" +
+	"\n" +
+	"dispatched\x18\x02 \x01(\x05R\n" +
+	"dispatched\x12\x16\n" +
+	"\x06reaped\x18\x03 \x01(\x05R\x06reaped\x12\x18\n" +
+	"\aadopted\x18\x04 \x01(\x05R\aadopted\x12\x18\n" +
+	"\adropped\x18\x05 \x01(\x05R\adropped\x12\x16\n" +
+	"\x06errors\x18\x06 \x03(\tR\x06errors\"\x15\n" +
+	"\x13StreamEventsRequest\"\xdd\x01\n" +
+	"\x14StreamEventsResponse\x12*\n" +
+	"\x02at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x12\n" +
+	"\x04type\x18\x02 \x01(\tR\x04type\x12K\n" +
+	"\x05attrs\x18\x03 \x03(\v25.fjbellows.control.v1.StreamEventsResponse.AttrsEntryR\x05attrs\x1a8\n" +
+	"\n" +
+	"AttrsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\xeb\x03\n" +
 	"\x0eControlService\x12S\n" +
 	"\x06Health\x12#.fjbellows.control.v1.HealthRequest\x1a$.fjbellows.control.v1.HealthResponse\x12b\n" +
 	"\vListWorkers\x12(.fjbellows.control.v1.ListWorkersRequest\x1a).fjbellows.control.v1.ListWorkersResponse\x12Y\n" +
-	"\bGetCache\x12%.fjbellows.control.v1.GetCacheRequest\x1a&.fjbellows.control.v1.GetCacheResponseB\xdb\x01\n" +
+	"\bGetCache\x12%.fjbellows.control.v1.GetCacheRequest\x1a&.fjbellows.control.v1.GetCacheResponse\x12\\\n" +
+	"\tReconcile\x12&.fjbellows.control.v1.ReconcileRequest\x1a'.fjbellows.control.v1.ReconcileResponse\x12g\n" +
+	"\fStreamEvents\x12).fjbellows.control.v1.StreamEventsRequest\x1a*.fjbellows.control.v1.StreamEventsResponse0\x01B\xdb\x01\n" +
 	"\x18com.fjbellows.control.v1B\fControlProtoP\x01Z?github.com/hstern/fj-bellows/gen/fjbellows/control/v1;controlv1\xa2\x02\x03FCX\xaa\x02\x14Fjbellows.Control.V1\xca\x02\x14Fjbellows\\Control\\V1\xe2\x02 Fjbellows\\Control\\V1\\GPBMetadata\xea\x02\x16Fjbellows::Control::V1b\x06proto3"
 
 var (
@@ -508,7 +755,7 @@ func file_fjbellows_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_fjbellows_control_v1_control_proto_rawDescData
 }
 
-var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_fjbellows_control_v1_control_proto_goTypes = []any{
 	(*HealthRequest)(nil),         // 0: fjbellows.control.v1.HealthRequest
 	(*HealthResponse)(nil),        // 1: fjbellows.control.v1.HealthResponse
@@ -517,26 +764,37 @@ var file_fjbellows_control_v1_control_proto_goTypes = []any{
 	(*Worker)(nil),                // 4: fjbellows.control.v1.Worker
 	(*GetCacheRequest)(nil),       // 5: fjbellows.control.v1.GetCacheRequest
 	(*GetCacheResponse)(nil),      // 6: fjbellows.control.v1.GetCacheResponse
-	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
+	(*ReconcileRequest)(nil),      // 7: fjbellows.control.v1.ReconcileRequest
+	(*ReconcileResponse)(nil),     // 8: fjbellows.control.v1.ReconcileResponse
+	(*StreamEventsRequest)(nil),   // 9: fjbellows.control.v1.StreamEventsRequest
+	(*StreamEventsResponse)(nil),  // 10: fjbellows.control.v1.StreamEventsResponse
+	nil,                           // 11: fjbellows.control.v1.StreamEventsResponse.AttrsEntry
+	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
 }
 var file_fjbellows_control_v1_control_proto_depIdxs = []int32{
-	7, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
-	7, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
-	7, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
-	4, // 3: fjbellows.control.v1.ListWorkersResponse.workers:type_name -> fjbellows.control.v1.Worker
-	7, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
-	7, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
-	0, // 6: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
-	2, // 7: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
-	5, // 8: fjbellows.control.v1.ControlService.GetCache:input_type -> fjbellows.control.v1.GetCacheRequest
-	1, // 9: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
-	3, // 10: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
-	6, // 11: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
-	9, // [9:12] is the sub-list for method output_type
-	6, // [6:9] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	12, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
+	12, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
+	12, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
+	4,  // 3: fjbellows.control.v1.ListWorkersResponse.workers:type_name -> fjbellows.control.v1.Worker
+	12, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
+	12, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
+	12, // 6: fjbellows.control.v1.StreamEventsResponse.at:type_name -> google.protobuf.Timestamp
+	11, // 7: fjbellows.control.v1.StreamEventsResponse.attrs:type_name -> fjbellows.control.v1.StreamEventsResponse.AttrsEntry
+	0,  // 8: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
+	2,  // 9: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
+	5,  // 10: fjbellows.control.v1.ControlService.GetCache:input_type -> fjbellows.control.v1.GetCacheRequest
+	7,  // 11: fjbellows.control.v1.ControlService.Reconcile:input_type -> fjbellows.control.v1.ReconcileRequest
+	9,  // 12: fjbellows.control.v1.ControlService.StreamEvents:input_type -> fjbellows.control.v1.StreamEventsRequest
+	1,  // 13: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
+	3,  // 14: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
+	6,  // 15: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
+	8,  // 16: fjbellows.control.v1.ControlService.Reconcile:output_type -> fjbellows.control.v1.ReconcileResponse
+	10, // 17: fjbellows.control.v1.ControlService.StreamEvents:output_type -> fjbellows.control.v1.StreamEventsResponse
+	13, // [13:18] is the sub-list for method output_type
+	8,  // [8:13] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_fjbellows_control_v1_control_proto_init() }
@@ -550,7 +808,7 @@ func file_fjbellows_control_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fjbellows_control_v1_control_proto_rawDesc), len(file_fjbellows_control_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
