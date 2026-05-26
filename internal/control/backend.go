@@ -7,6 +7,8 @@ package control
 import (
 	"context"
 	"time"
+
+	"github.com/hstern/fj-bellows/internal/control/events"
 )
 
 // Backend is the slice of the orchestrator that the control plane needs.
@@ -16,6 +18,60 @@ type Backend interface {
 	// Health returns a readiness snapshot. Implementations should be cheap;
 	// the handler may call this many times per second under k8s liveness.
 	Health(ctx context.Context) HealthStatus
+
+	// PoolSnapshot returns the orchestrator's current view of the worker pool.
+	// Used by ListWorkers; cheap (one mutex acquisition + slice copy).
+	PoolSnapshot() []WorkerView
+
+	// CacheStatus returns the managed-cache snapshot for the provider that
+	// owns one (today: Linode). Returns nil for providers without a cache
+	// (docker) so the handler can answer Present=false. The Linode API
+	// may be touched for live VM status — keep this off any hot path.
+	CacheStatus(ctx context.Context) *CacheStatus
+
+	// Kick drives a synchronous out-of-band reconcile and returns the per-tick
+	// summary. Used by the Reconcile RPC.
+	Kick(ctx context.Context) (ReconcileResult, error)
+
+	// Subscribe returns a state-transition event stream + cancel func.
+	// Used by the StreamEvents RPC. The channel closes when the caller
+	// cancels OR when the bus drops the subscriber for slow consumption.
+	Subscribe() (<-chan events.Event, func())
+}
+
+// ReconcileResult is the per-tick summary returned by Kick. Counts are
+// "intents started during the tick"; downstream goroutines may still be in
+// flight when this surfaces.
+type ReconcileResult struct {
+	Provisioned int
+	Dispatched  int
+	Reaped      int
+	Adopted     int
+	Dropped     int
+	Errors      []string
+}
+
+// CacheStatus is the shape control returns from GetCache. Mirrors the
+// provider-side type one-for-one so the adapter stays trivial.
+type CacheStatus struct {
+	Present         bool
+	AdoptedExisting bool
+	LinodeID        int
+	VPCIP           string
+	BucketRegion    string
+	BucketLabel     string
+	VMState         string
+}
+
+// WorkerView is the per-node shape the control plane returns from ListWorkers.
+// Mirrors orchestrator.Node plus the in-flight job handle.
+type WorkerView struct {
+	InstanceID string
+	State      string
+	IP         string
+	CreatedAt  time.Time
+	LastBusy   time.Time
+	CurrentJob string
 }
 
 // HealthStatus is the orchestrator's view of its own readiness.

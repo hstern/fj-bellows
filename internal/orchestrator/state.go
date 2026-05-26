@@ -32,6 +32,10 @@ type Node struct {
 	// LastBusy is when the node last finished (or started) a job; it drives the
 	// per-second idle timeout.
 	LastBusy time.Time
+	// CurrentJob is the Forgejo job handle in flight on this node. The
+	// dispatch goroutine sets it on Busy and clears it on the Idle return.
+	// Empty unless State == StateBusy.
+	CurrentJob string
 }
 
 // Pool is the concurrency-safe set of nodes. The reconcile loop is the only
@@ -91,6 +95,16 @@ func (p *Pool) Touch(id string, t time.Time) {
 	defer p.mu.Unlock()
 	if n, ok := p.nodes[id]; ok {
 		n.LastBusy = t
+	}
+}
+
+// SetJob records the Forgejo job handle in flight on a node. Pass "" to
+// clear when the dispatch goroutine returns the node to Idle.
+func (p *Pool) SetJob(id, handle string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n, ok := p.nodes[id]; ok {
+		n.CurrentJob = handle
 	}
 }
 

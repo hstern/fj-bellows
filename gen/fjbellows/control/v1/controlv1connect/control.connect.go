@@ -35,6 +35,17 @@ const (
 const (
 	// ControlServiceHealthProcedure is the fully-qualified name of the ControlService's Health RPC.
 	ControlServiceHealthProcedure = "/fjbellows.control.v1.ControlService/Health"
+	// ControlServiceListWorkersProcedure is the fully-qualified name of the ControlService's
+	// ListWorkers RPC.
+	ControlServiceListWorkersProcedure = "/fjbellows.control.v1.ControlService/ListWorkers"
+	// ControlServiceGetCacheProcedure is the fully-qualified name of the ControlService's GetCache RPC.
+	ControlServiceGetCacheProcedure = "/fjbellows.control.v1.ControlService/GetCache"
+	// ControlServiceReconcileProcedure is the fully-qualified name of the ControlService's Reconcile
+	// RPC.
+	ControlServiceReconcileProcedure = "/fjbellows.control.v1.ControlService/Reconcile"
+	// ControlServiceStreamEventsProcedure is the fully-qualified name of the ControlService's
+	// StreamEvents RPC.
+	ControlServiceStreamEventsProcedure = "/fjbellows.control.v1.ControlService/StreamEvents"
 )
 
 // ControlServiceClient is a client for the fjbellows.control.v1.ControlService service.
@@ -42,6 +53,29 @@ type ControlServiceClient interface {
 	// Health returns a readiness snapshot: is the reconcile loop ticking,
 	// and have the upstream probes (provider, Forgejo) succeeded recently?
 	Health(context.Context, *connect.Request[v1.HealthRequest]) (*connect.Response[v1.HealthResponse], error)
+	// ListWorkers returns the orchestrator's current view of every worker VM
+	// in the pool: state, address, when it was created / last busy, and the
+	// current job handle if any. This is what the e2e harness will poll
+	// instead of grepping the orchestrator's stderr log for "worker ready" /
+	// "job complete" / "destroyed idle node".
+	ListWorkers(context.Context, *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error)
+	// GetCache returns the managed pull-through registry cache VM's state.
+	// Present=false for providers that don't manage a cache (docker), or
+	// when the `cache:` block is absent. Turns the e2e harness's soft
+	// "/v2/ reachable" check into a fatal "cache present + running" gate.
+	GetCache(context.Context, *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error)
+	// Reconcile drives a synchronous out-of-band reconcile pass and returns
+	// the per-tick summary (Provisioned, Dispatched, Reaped, Adopted,
+	// Dropped, Errors). The e2e harness uses this to force a second cycle
+	// without waiting on the poll interval (FJB-17 multi-cycle).
+	Reconcile(context.Context, *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error)
+	// StreamEvents emits state-transition events as they happen:
+	// worker_provisioned, worker_ready, worker_busy, worker_idle,
+	// worker_reaped, worker_adopted, worker_dropped, job_dispatched,
+	// job_complete, zombie_reaped, reconcile_tick. The stream stays open
+	// until the client disconnects or the daemon shuts down. Slow clients
+	// are dropped (channel closed) rather than blocking the producer.
+	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error)
 }
 
 // NewControlServiceClient constructs a client for the fjbellows.control.v1.ControlService service.
@@ -61,12 +95,40 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("Health")),
 			connect.WithClientOptions(opts...),
 		),
+		listWorkers: connect.NewClient[v1.ListWorkersRequest, v1.ListWorkersResponse](
+			httpClient,
+			baseURL+ControlServiceListWorkersProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("ListWorkers")),
+			connect.WithClientOptions(opts...),
+		),
+		getCache: connect.NewClient[v1.GetCacheRequest, v1.GetCacheResponse](
+			httpClient,
+			baseURL+ControlServiceGetCacheProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("GetCache")),
+			connect.WithClientOptions(opts...),
+		),
+		reconcile: connect.NewClient[v1.ReconcileRequest, v1.ReconcileResponse](
+			httpClient,
+			baseURL+ControlServiceReconcileProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("Reconcile")),
+			connect.WithClientOptions(opts...),
+		),
+		streamEvents: connect.NewClient[v1.StreamEventsRequest, v1.StreamEventsResponse](
+			httpClient,
+			baseURL+ControlServiceStreamEventsProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // controlServiceClient implements ControlServiceClient.
 type controlServiceClient struct {
-	health *connect.Client[v1.HealthRequest, v1.HealthResponse]
+	health       *connect.Client[v1.HealthRequest, v1.HealthResponse]
+	listWorkers  *connect.Client[v1.ListWorkersRequest, v1.ListWorkersResponse]
+	getCache     *connect.Client[v1.GetCacheRequest, v1.GetCacheResponse]
+	reconcile    *connect.Client[v1.ReconcileRequest, v1.ReconcileResponse]
+	streamEvents *connect.Client[v1.StreamEventsRequest, v1.StreamEventsResponse]
 }
 
 // Health calls fjbellows.control.v1.ControlService.Health.
@@ -74,11 +136,54 @@ func (c *controlServiceClient) Health(ctx context.Context, req *connect.Request[
 	return c.health.CallUnary(ctx, req)
 }
 
+// ListWorkers calls fjbellows.control.v1.ControlService.ListWorkers.
+func (c *controlServiceClient) ListWorkers(ctx context.Context, req *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error) {
+	return c.listWorkers.CallUnary(ctx, req)
+}
+
+// GetCache calls fjbellows.control.v1.ControlService.GetCache.
+func (c *controlServiceClient) GetCache(ctx context.Context, req *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error) {
+	return c.getCache.CallUnary(ctx, req)
+}
+
+// Reconcile calls fjbellows.control.v1.ControlService.Reconcile.
+func (c *controlServiceClient) Reconcile(ctx context.Context, req *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error) {
+	return c.reconcile.CallUnary(ctx, req)
+}
+
+// StreamEvents calls fjbellows.control.v1.ControlService.StreamEvents.
+func (c *controlServiceClient) StreamEvents(ctx context.Context, req *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error) {
+	return c.streamEvents.CallServerStream(ctx, req)
+}
+
 // ControlServiceHandler is an implementation of the fjbellows.control.v1.ControlService service.
 type ControlServiceHandler interface {
 	// Health returns a readiness snapshot: is the reconcile loop ticking,
 	// and have the upstream probes (provider, Forgejo) succeeded recently?
 	Health(context.Context, *connect.Request[v1.HealthRequest]) (*connect.Response[v1.HealthResponse], error)
+	// ListWorkers returns the orchestrator's current view of every worker VM
+	// in the pool: state, address, when it was created / last busy, and the
+	// current job handle if any. This is what the e2e harness will poll
+	// instead of grepping the orchestrator's stderr log for "worker ready" /
+	// "job complete" / "destroyed idle node".
+	ListWorkers(context.Context, *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error)
+	// GetCache returns the managed pull-through registry cache VM's state.
+	// Present=false for providers that don't manage a cache (docker), or
+	// when the `cache:` block is absent. Turns the e2e harness's soft
+	// "/v2/ reachable" check into a fatal "cache present + running" gate.
+	GetCache(context.Context, *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error)
+	// Reconcile drives a synchronous out-of-band reconcile pass and returns
+	// the per-tick summary (Provisioned, Dispatched, Reaped, Adopted,
+	// Dropped, Errors). The e2e harness uses this to force a second cycle
+	// without waiting on the poll interval (FJB-17 multi-cycle).
+	Reconcile(context.Context, *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error)
+	// StreamEvents emits state-transition events as they happen:
+	// worker_provisioned, worker_ready, worker_busy, worker_idle,
+	// worker_reaped, worker_adopted, worker_dropped, job_dispatched,
+	// job_complete, zombie_reaped, reconcile_tick. The stream stays open
+	// until the client disconnects or the daemon shuts down. Slow clients
+	// are dropped (channel closed) rather than blocking the producer.
+	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error
 }
 
 // NewControlServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -94,10 +199,42 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("Health")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceListWorkersHandler := connect.NewUnaryHandler(
+		ControlServiceListWorkersProcedure,
+		svc.ListWorkers,
+		connect.WithSchema(controlServiceMethods.ByName("ListWorkers")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlServiceGetCacheHandler := connect.NewUnaryHandler(
+		ControlServiceGetCacheProcedure,
+		svc.GetCache,
+		connect.WithSchema(controlServiceMethods.ByName("GetCache")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlServiceReconcileHandler := connect.NewUnaryHandler(
+		ControlServiceReconcileProcedure,
+		svc.Reconcile,
+		connect.WithSchema(controlServiceMethods.ByName("Reconcile")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlServiceStreamEventsHandler := connect.NewServerStreamHandler(
+		ControlServiceStreamEventsProcedure,
+		svc.StreamEvents,
+		connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/fjbellows.control.v1.ControlService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlServiceHealthProcedure:
 			controlServiceHealthHandler.ServeHTTP(w, r)
+		case ControlServiceListWorkersProcedure:
+			controlServiceListWorkersHandler.ServeHTTP(w, r)
+		case ControlServiceGetCacheProcedure:
+			controlServiceGetCacheHandler.ServeHTTP(w, r)
+		case ControlServiceReconcileProcedure:
+			controlServiceReconcileHandler.ServeHTTP(w, r)
+		case ControlServiceStreamEventsProcedure:
+			controlServiceStreamEventsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -109,4 +246,20 @@ type UnimplementedControlServiceHandler struct{}
 
 func (UnimplementedControlServiceHandler) Health(context.Context, *connect.Request[v1.HealthRequest]) (*connect.Response[v1.HealthResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.Health is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) ListWorkers(context.Context, *connect.Request[v1.ListWorkersRequest]) (*connect.Response[v1.ListWorkersResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ListWorkers is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) GetCache(context.Context, *connect.Request[v1.GetCacheRequest]) (*connect.Response[v1.GetCacheResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.GetCache is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) Reconcile(context.Context, *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.Reconcile is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.StreamEvents is not implemented"))
 }

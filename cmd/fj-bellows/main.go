@@ -20,6 +20,7 @@ import (
 	"github.com/hstern/fj-bellows/internal/bootstrap"
 	"github.com/hstern/fj-bellows/internal/config"
 	"github.com/hstern/fj-bellows/internal/control"
+	"github.com/hstern/fj-bellows/internal/control/events"
 	"github.com/hstern/fj-bellows/internal/forgejo"
 	"github.com/hstern/fj-bellows/internal/orchestrator"
 	"github.com/hstern/fj-bellows/internal/provider"
@@ -163,7 +164,7 @@ func run(opts runOpts, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	startControlPlane(ctx, opts.controlListen, orch, log)
+	startControlPlane(ctx, opts.controlListen, orch, prov, log)
 
 	log.Info(
 		"fj-bellows starting",
@@ -177,11 +178,11 @@ func run(opts runOpts, log *slog.Logger) error {
 
 // startControlPlane spins up the operator-facing HTTP/RPC server on a side
 // goroutine. Empty listen disables it (e.g. for tests or restricted deploys).
-func startControlPlane(ctx context.Context, listen string, orch *orchestrator.Orchestrator, log *slog.Logger) {
+func startControlPlane(ctx context.Context, listen string, orch *orchestrator.Orchestrator, prov provider.Provider, log *slog.Logger) {
 	if listen == "" {
 		return
 	}
-	srv := control.NewServer(listen, controlBackend{orch}, log)
+	srv := control.NewServer(listen, controlBackend{o: orch, prov: prov}, log)
 	go func() {
 		if err := srv.Run(ctx); err != nil {
 			log.Error("control plane", "err", err)
@@ -189,9 +190,13 @@ func startControlPlane(ctx context.Context, listen string, orch *orchestrator.Or
 	}()
 }
 
-// controlBackend adapts *orchestrator.Orchestrator to control.Backend so the
-// orchestrator package stays free of generated-protobuf coupling.
-type controlBackend struct{ o *orchestrator.Orchestrator }
+// controlBackend adapts *orchestrator.Orchestrator (and the live provider,
+// for cache-aware reports) to control.Backend so the orchestrator package
+// stays free of generated-protobuf coupling.
+type controlBackend struct {
+	o    *orchestrator.Orchestrator
+	prov provider.Provider
+}
 
 func (b controlBackend) Health(ctx context.Context) control.HealthStatus {
 	s := b.o.Health(ctx)
@@ -200,6 +205,67 @@ func (b controlBackend) Health(ctx context.Context) control.HealthStatus {
 		LastTickAt:         s.LastTickAt,
 		LastProviderListAt: s.LastProviderListAt,
 		LastForgejoPollAt:  s.LastForgejoPollAt,
+	}
+}
+
+func (b controlBackend) PoolSnapshot() []control.WorkerView {
+	in := b.o.PoolSnapshot()
+	out := make([]control.WorkerView, 0, len(in))
+	for _, w := range in {
+		out = append(out, control.WorkerView{
+			InstanceID: w.InstanceID,
+			State:      w.State,
+			IP:         w.IP,
+			CreatedAt:  w.CreatedAt,
+			LastBusy:   w.LastBusy,
+			CurrentJob: w.CurrentJob,
+		})
+	}
+	return out
+}
+
+func (b controlBackend) Kick(ctx context.Context) (control.ReconcileResult, error) {
+	r, err := b.o.Kick(ctx)
+	if err != nil {
+		return control.ReconcileResult{}, err
+	}
+	return control.ReconcileResult{
+		Provisioned: r.Provisioned,
+		Dispatched:  r.Dispatched,
+		Reaped:      r.Reaped,
+		Adopted:     r.Adopted,
+		Dropped:     r.Dropped,
+		Errors:      r.Errors,
+	}, nil
+}
+
+func (b controlBackend) Subscribe() (<-chan events.Event, func()) {
+	return b.o.Subscribe()
+}
+
+// CacheStatus walks the provider for cache info if it supports it (Linode
+// does; docker doesn't). The type-assertion keeps the orchestrator package
+// free of provider-specific imports.
+func (b controlBackend) CacheStatus(ctx context.Context) *control.CacheStatus {
+	type cacheReporter interface {
+		CacheStatus(ctx context.Context) *linodeprov.CacheStatus
+	}
+	cr, ok := b.prov.(cacheReporter)
+	if !ok {
+		return nil
+	}
+	s := cr.CacheStatus(ctx)
+	if s == nil {
+		return nil
+	}
+	return &control.CacheStatus{
+		Present:         s.Present,
+		AdoptedExisting: s.AdoptedExisting,
+		LinodeID:        s.LinodeID,
+		VPCIP:           s.VPCIP,
+		BucketRegion:    s.BucketRegion,
+		BucketLabel:     s.BucketLabel,
+		VMState:         s.VMState,
 	}
 }
 

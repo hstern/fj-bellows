@@ -25,6 +25,17 @@ CONFIG="$WORKDIR/config.yaml"
 LOG="$WORKDIR/fj-bellows.log"
 PIDF="$WORKDIR/fj-bellows.pid"
 FORGEJO_NAME="fjb-e2e-forgejo-$$"
+# Random high port for the control plane so concurrent runs (or runs that
+# race with other local services on the default 9876) don't collide.
+CTL_PORT=$((30000 + RANDOM % 30000))
+CTL_BASE="http://127.0.0.1:${CTL_PORT}/fjbellows.control.v1.ControlService"
+
+# ctl POSTs an empty JSON request to one of the control plane's RPCs. Stdout
+# is the response body (JSON). Use `jq` to extract fields.
+ctl() {
+  curl -sS --max-time 5 -X POST -H 'content-type: application/json' -d '{}' \
+       "${CTL_BASE}/$1"
+}
 
 log() { printf '[e2e] %s\n' "$*" >&2; }
 err() { printf '[e2e ERR] %s\n' "$*" >&2; }
@@ -218,15 +229,27 @@ poll:
 YAML
 chmod 600 "$CONFIG"
 
-log "launching fj-bellows"
+log "launching fj-bellows (control plane on 127.0.0.1:${CTL_PORT})"
 "$WORKDIR/fj-bellows" \
   -config "$CONFIG" \
   -lock "$WORKDIR/fj-bellows.lock" \
+  -control-listen "127.0.0.1:${CTL_PORT}" \
   -drain=false \
   -destroy-on-exit \
   >"$LOG" 2>&1 &
 echo $! > "$PIDF"
-sleep 2
+
+# Wait for the control plane to come up before we depend on it for state.
+ctl_ready=0
+for i in $(seq 1 30); do
+  if curl -sS --max-time 2 "http://127.0.0.1:${CTL_PORT}/healthz" >/dev/null 2>&1; then
+    log "control plane up after ${i}*1s"
+    ctl_ready=1
+    break
+  fi
+  sleep 1
+done
+[ "$ctl_ready" -eq 1 ] || { err "control plane never came up on :${CTL_PORT}"; exit 1; }
 
 log "polling Linode API for tag=$TAG"
 LIP=""
@@ -259,23 +282,44 @@ done
 # (internal/orchestrator/dispatch.go), so workers reach Forgejo via the
 # orchestrator's view of it. No side-car tunnel needed; see #33.
 
-# Wait for the worker's cloud-init to signal readiness (the dispatcher
-# pins on this — "worker ready" appears in the orchestrator log once
-# the readyFile is touched). The cache assertions below probe the same
-# state the dispatcher just verified.
-log "waiting for 'worker ready' in orchestrator log (up to ~6 min)"
+# Wait for a worker to reach state=idle via the control plane's ListWorkers
+# RPC (FJB-14 PR2). Replaces the prior `grep -q 'worker ready' $LOG` — the
+# pool's state transition is the load-bearing signal, not the log text.
+log "waiting for a worker to reach state=idle (up to ~6 min)"
 ready=0
 for i in $(seq 1 180); do
-  if grep -q 'worker ready' "$LOG" 2>/dev/null; then
-    log "'worker ready' after ${i}*2s"
+  if ctl ListWorkers 2>/dev/null | jq -e '.workers[]? | select(.state == "idle")' >/dev/null 2>&1; then
+    log "worker state=idle after ${i}*2s"
     ready=1
     break
   fi
   sleep 2
 done
 if [ "$ready" -ne 1 ]; then
-  err "worker did not become ready; last 30 lines:"
+  err "worker did not become idle; last 30 lines of orchestrator log:"
   tail -30 "$LOG" >&2 || true
+  err "ListWorkers snapshot:"
+  ctl ListWorkers >&2 || true
+  exit 1
+fi
+
+# Assert via GetCache that the managed cache VM is present and the Linode
+# API reports it running. Turns the prior soft-only /v2/ check (which
+# still runs as a worker-side probe below) into a fatal gate on the cache
+# stack — FJB-15 / FJB-17 expect this.
+log "asserting cache VM present + running via GetCache"
+cache_ok=0
+for i in $(seq 1 60); do
+  if ctl GetCache 2>/dev/null | jq -e '.present == true and .vmState == "running"' >/dev/null 2>&1; then
+    log "cache present + vm_state=running after ${i}*2s"
+    cache_ok=1
+    break
+  fi
+  sleep 2
+done
+if [ "$cache_ok" -ne 1 ]; then
+  err "cache VM not present/running; last GetCache response:"
+  ctl GetCache >&2 || true
   exit 1
 fi
 
@@ -410,22 +454,33 @@ if [ "$(printf '%s' "$worker_ca")" != "$(printf '%s' "$orch_ca")" ]; then
 fi
 log "  ✓ worker CA byte-identical to orchestrator's persisted CA"
 
-# With assertions green, wait for the runner to finish its job. The
-# probe ran while the runner was still processing, so this should
-# complete shortly after.
-log "waiting for 'job complete' in orchestrator log (up to ~6 min)"
+# With assertions green, wait for the runner to finish its job. Detected
+# via the control plane: the worker was busy serving the job; once that
+# returns to state=idle with an empty current_job, the dispatch goroutine
+# has finished. Replaces the prior `grep -q 'job complete' $LOG`.
+log "waiting for job completion via ListWorkers (up to ~6 min)"
 complete=0
 for i in $(seq 1 180); do
-  if grep -q 'job complete' "$LOG" 2>/dev/null; then
-    log "'job complete' after ${i}*2s"
+  resp=$(ctl ListWorkers 2>/dev/null || true)
+  # Definition of done: at least one worker exists, all workers are idle,
+  # and no worker has a non-empty current_job. (Empty pool wouldn't satisfy
+  # this — the worker has to have run, not been reaped before it ran.)
+  if [ -n "$resp" ] && echo "$resp" | jq -e '
+        (.workers | length) > 0
+        and (all(.workers[]; .state == "idle"))
+        and (all(.workers[]; (.currentJob // "") == ""))
+      ' >/dev/null 2>&1; then
+    log "job complete (all workers state=idle, current_job empty) after ${i}*2s"
     complete=1
     break
   fi
   sleep 2
 done
 if [ "$complete" -ne 1 ]; then
-  err "job did not complete; last 30 lines:"
+  err "job did not complete; last 30 lines of orchestrator log:"
   tail -30 "$LOG" >&2 || true
+  err "ListWorkers snapshot:"
+  ctl ListWorkers >&2 || true
   exit 1
 fi
 
@@ -434,11 +489,15 @@ fi
 # cycle boundary. Give it ~120s after "job complete" to fire — comfortably above
 # one cycle. Linode still bills the whole hour on its side; the trap cleanup and
 # `-destroy-on-exit` reclaim the VM regardless.
-log "waiting for idle teardown in orchestrator log (up to ~120s)"
+log "waiting for idle teardown via ListWorkers (up to ~120s)"
 teardown=0
 for i in $(seq 1 60); do
-  if grep -q 'destroyed idle node' "$LOG" 2>/dev/null; then
-    log "idle teardown observed after ${i}*2s"
+  # ListWorkers reports an empty pool once the dispatch+teardown goroutine
+  # has destroyed the last idle worker. Replaces the prior
+  # `grep -q 'destroyed idle node' $LOG`.
+  resp=$(ctl ListWorkers 2>/dev/null || true)
+  if [ -n "$resp" ] && echo "$resp" | jq -e '(.workers // []) | length == 0' >/dev/null 2>&1; then
+    log "ListWorkers empty after ${i}*2s"
     # Confirm the Linode is actually gone from the provider's view.
     body=$(linode_api GET '/linode/instances?page_size=200')
     still=$(printf '%s' "$body" | jq -r --arg t "$TAG" \
@@ -448,7 +507,7 @@ for i in $(seq 1 60); do
       teardown=1
       break
     fi
-    log "log says destroyed but $still Linode(s) still listed; retrying"
+    log "pool reports empty but $still Linode(s) still listed; retrying"
   fi
   sleep 2
 done

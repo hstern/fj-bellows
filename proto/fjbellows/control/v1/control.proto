@@ -13,6 +13,38 @@ service ControlService {
   // Health returns a readiness snapshot: is the reconcile loop ticking,
   // and have the upstream probes (provider, Forgejo) succeeded recently?
   rpc Health(HealthRequest) returns (HealthResponse);
+
+  // ListWorkers returns the orchestrator's current view of every worker VM
+  // in the pool: state, address, when it was created / last busy, and the
+  // current job handle if any. This is what the e2e harness will poll
+  // instead of grepping the orchestrator's stderr log for "worker ready" /
+  // "job complete" / "destroyed idle node".
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+
+  // GetCache returns the managed pull-through registry cache VM's state.
+  // Present=false for providers that don't manage a cache (docker), or
+  // when the `cache:` block is absent. Turns the e2e harness's soft
+  // "/v2/ reachable" check into a fatal "cache present + running" gate.
+  rpc GetCache(GetCacheRequest) returns (GetCacheResponse);
+
+  // Reconcile drives a synchronous out-of-band reconcile pass and returns
+  // the per-tick summary (Provisioned, Dispatched, Reaped, Adopted,
+  // Dropped, Errors). The e2e harness uses this to force a second cycle
+  // without waiting on the poll interval (FJB-17 multi-cycle).
+  rpc Reconcile(ReconcileRequest) returns (ReconcileResponse);
+
+  // StreamEvents emits state-transition events as they happen:
+  // worker_provisioned, worker_ready, worker_busy, worker_idle,
+  // worker_reaped, worker_adopted, worker_dropped, job_dispatched,
+  // job_complete, zombie_reaped, reconcile_tick. The stream stays open
+  // until the client disconnects or the daemon shuts down. Slow clients
+  // are dropped (channel closed) rather than blocking the producer.
+  //
+  // The first message on every stream is type="stream_opened" with empty
+  // attrs — a sentinel that makes the open call return immediately even
+  // on a quiet daemon (Connect server-streaming only writes response
+  // headers on the first Send). Clients should skip it.
+  rpc StreamEvents(StreamEventsRequest) returns (stream StreamEventsResponse);
 }
 
 message HealthRequest {}
@@ -32,4 +64,104 @@ message HealthResponse {
   // last_forgejo_poll_at is when WaitingJobs or ListRunners most recently
   // succeeded; whichever was later.
   google.protobuf.Timestamp last_forgejo_poll_at = 4;
+}
+
+message ListWorkersRequest {}
+
+message ListWorkersResponse {
+  repeated Worker workers = 1;
+}
+
+// Worker is the orchestrator's view of a single worker VM. Field shape
+// mirrors orchestrator.Node plus the active job handle (recorded by the
+// dispatch goroutine when a node transitions to Busy).
+message Worker {
+  // instance_id is the provider's identifier (Linode ID, docker container
+  // ID, etc.). Unique within a deployment's tag scope.
+  string instance_id = 1;
+
+  // state is one of: provisioning | idle | busy | draining | removing.
+  string state = 2;
+
+  // ip is the worker's reachable address; empty for providers that dispatch
+  // by container exec (docker).
+  string ip = 3;
+
+  // created_at is the provider's instance creation time. Anchors the
+  // billing-hour timer.
+  google.protobuf.Timestamp created_at = 4;
+
+  // last_busy is when the node most recently finished (or started) a job;
+  // drives the per-second idle timeout.
+  google.protobuf.Timestamp last_busy = 5;
+
+  // current_job is the Forgejo job handle in flight on this worker. Empty
+  // unless state == "busy". Goes empty again when the dispatch goroutine
+  // transitions the node back to idle.
+  string current_job = 6;
+}
+
+message GetCacheRequest {}
+
+message GetCacheResponse {
+  // present is true when a managed cache is configured AND its Linode ID is
+  // populated (ensureAtConfigure has run). False both for "no cache:
+  // block" and for "cache is being set up but not yet ready".
+  bool present = 1;
+
+  // adopted_existing is true when the cache VM was found pre-existing
+  // and adopted rather than created fresh. Daemon restart against a
+  // warm cache sets this to true.
+  bool adopted_existing = 2;
+
+  // linode_id is the provider's instance ID for the cache VM. Zero when
+  // present is false.
+  int64 linode_id = 3;
+
+  // vpc_ip is the cache VM's IPv4 on the VPC subnet. Empty until the
+  // first WorkerExtras call resolves it.
+  string vpc_ip = 4;
+
+  // bucket_region is the Linode Object Storage region holding the
+  // cache's S3-compatible bucket.
+  string bucket_region = 5;
+
+  // bucket_label is the bucket name.
+  string bucket_label = 6;
+
+  // vm_state is the Linode API's instance status field
+  // (running, booting, offline, ...). Empty when not present, or when
+  // the on-demand Linode API call failed (caller can retry).
+  string vm_state = 7;
+}
+
+message ReconcileRequest {}
+
+message ReconcileResponse {
+  // Counts of intents started during the tick. Async work
+  // (provision/destroy goroutines) may still be in flight when this
+  // response returns.
+  int32 provisioned = 1;
+  int32 dispatched = 2;
+  int32 reaped = 3;
+  int32 adopted = 4;
+  int32 dropped = 5;
+  // One entry per failing top-level step in the tick (list instances,
+  // poll waiting jobs, ...). Empty on a fully-clean tick.
+  repeated string errors = 6;
+}
+
+message StreamEventsRequest {
+  // No filtering in v1; clients see every event.
+}
+
+message StreamEventsResponse {
+  // at is when the event fired in the orchestrator's clock.
+  google.protobuf.Timestamp at = 1;
+  // type is a stable slug — see the StreamEvents RPC comment for the set.
+  string type = 2;
+  // attrs holds the per-event detail (instance id, ip, handle, counts).
+  // The set of keys depends on type; documented inline in the orchestrator
+  // emit sites.
+  map<string, string> attrs = 3;
 }

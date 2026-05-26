@@ -82,6 +82,18 @@ func (l *Linode) SetSSHAuthorizedKey(authKey string) {
 	l.sshAuthorizedKey = authKey
 }
 
+// CacheStatus returns the managed-cache snapshot consumed by the control
+// plane's GetCache RPC. Returns nil when no `cache:` block is configured;
+// the control handler then reports Present=false to the wire. The Linode
+// API is queried on demand for live VM status — cheap, not on a hot path.
+func (l *Linode) CacheStatus(ctx context.Context) *CacheStatus {
+	if l.cache == nil {
+		return nil
+	}
+	s := l.cache.Status(ctx)
+	return &s
+}
+
 func init() {
 	provider.Register("linode", func() provider.Provider { return &Linode{} })
 }

@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/hstern/fj-bellows/internal/bootstrap"
+	"github.com/hstern/fj-bellows/internal/control/events"
 	"github.com/hstern/fj-bellows/internal/forgejo"
 	"github.com/hstern/fj-bellows/internal/provider"
 )
@@ -58,12 +60,20 @@ type Config struct {
 
 // Orchestrator wires the pool, provider, job source, and dispatcher together.
 type Orchestrator struct {
-	cfg  Config
-	prov provider.Provider
-	jobs JobSource
-	disp Dispatcher
-	pool *Pool
-	log  *slog.Logger
+	cfg    Config
+	prov   provider.Provider
+	jobs   JobSource
+	disp   Dispatcher
+	pool   *Pool
+	log    *slog.Logger
+	events *events.Bus
+
+	// kick is the out-of-band reconcile-now channel. The control plane sends
+	// on this to drive a synchronous reconcile and receive the count summary
+	// without waiting on the next ticker tick. Run owns the receiver; only
+	// one reconcile ever runs at a time because the ticker and the kick share
+	// the same select.
+	kick chan kickReq
 
 	wg sync.WaitGroup // tracks in-flight dispatch/provision/teardown goroutines
 
@@ -101,6 +111,8 @@ func New(cfg Config, prov provider.Provider, jobs JobSource, disp Dispatcher, lo
 		disp:        disp,
 		pool:        NewPool(),
 		log:         log,
+		events:      events.New(),
+		kick:        make(chan kickReq),
 		dispatching: map[string]struct{}{},
 		active:      map[string]struct{}{},
 		reapSeen:    map[string]struct{}{},
@@ -111,6 +123,9 @@ func New(cfg Config, prov provider.Provider, jobs JobSource, disp Dispatcher, lo
 // Run reconciles on each tick until ctx (the shutdown signal) is cancelled,
 // then drains in-flight work. Jobs run under an independent context so a
 // shutdown can choose to let them finish (drain) rather than interrupt them.
+// The kick channel lets the control plane drive a synchronous reconcile out
+// of band — the single-writer property is preserved because the kick is
+// served from the same goroutine as the ticker.
 func (o *Orchestrator) Run(ctx context.Context) error {
 	jobCtx, cancelJobs := context.WithCancel(context.Background())
 	defer cancelJobs()
@@ -125,6 +140,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			o.Reconcile(jobCtx)
+		case req := <-o.kick:
+			req.result <- o.Reconcile(jobCtx)
 		}
 	}
 }
@@ -176,31 +193,64 @@ func (o *Orchestrator) destroyAll() {
 	}
 }
 
+// ReconcileResult summarises one convergence pass. Counts are "intents
+// started this tick" — async provisions/reaps still need their downstream
+// goroutines to finish before the world reflects them.
+type ReconcileResult struct {
+	Provisioned int      // provisionOne goroutines kicked off
+	Dispatched  int      // jobs handed to dispatch goroutines
+	Reaped      int      // applyTeardown Destroy actions kicked off
+	Adopted     int      // syncPool entries added
+	Dropped     int      // syncPool entries removed
+	Errors      []string // formatted; one per failing top-level step
+}
+
+// kickReq is the message the control plane sends on the kick channel to
+// drive a synchronous reconcile.
+type kickReq struct {
+	result chan ReconcileResult
+}
+
 // Reconcile performs one convergence pass: sync the pool to provider truth,
-// dispatch waiting jobs, provision capacity, and apply teardown.
-func (o *Orchestrator) Reconcile(ctx context.Context) {
-	defer o.markTick()
+// dispatch waiting jobs, provision capacity, and apply teardown. Returns a
+// summary the control plane's Reconcile RPC surfaces to operators.
+func (o *Orchestrator) Reconcile(ctx context.Context) ReconcileResult {
+	var r ReconcileResult
+	defer func() {
+		o.markTick()
+		o.emit("reconcile_tick", map[string]string{
+			"provisioned": strconv.Itoa(r.Provisioned),
+			"dispatched":  strconv.Itoa(r.Dispatched),
+			"reaped":      strconv.Itoa(r.Reaped),
+			"adopted":     strconv.Itoa(r.Adopted),
+			"dropped":     strconv.Itoa(r.Dropped),
+			"errors":      strconv.Itoa(len(r.Errors)),
+		})
+	}()
 
 	insts, err := o.prov.List(ctx, o.cfg.Tag)
 	if err != nil {
 		o.log.Error("list instances", "err", err)
-		return
+		r.Errors = append(r.Errors, "list instances: "+err.Error())
+		return r
 	}
 	o.markProviderList()
-	o.syncPool(insts)
+	r.Adopted, r.Dropped = o.syncPool(insts)
 
 	jobs, err := o.jobs.WaitingJobs(ctx)
 	if err != nil {
 		o.log.Error("poll waiting jobs", "err", err)
+		r.Errors = append(r.Errors, "poll waiting jobs: "+err.Error())
 		jobs = nil
 	} else {
 		o.markForgejoPoll()
 	}
 	jobs = filterServiceable(jobs, o.cfg.Labels)
 
-	o.dispatchJobs(ctx, jobs)
-	o.applyTeardown(ctx)
+	r.Dispatched, r.Provisioned = o.dispatchJobs(ctx, jobs)
+	r.Reaped = o.applyTeardown(ctx)
 	o.reapZombieRunners(ctx)
+	return r
 }
 
 // reapZombieRunners deletes runner registrations that are ours (name carries
@@ -231,6 +281,7 @@ func (o *Orchestrator) reapZombieRunners(ctx context.Context) {
 			continue
 		}
 		o.log.Info("reaped zombie runner", "uuid", r.UUID, "name", r.Name)
+		o.emit("zombie_reaped", map[string]string{attrUUID: r.UUID, attrName: r.Name})
 	}
 	// ListRunners reaching this point means the Forgejo call succeeded above;
 	// bump the freshness signal alongside WaitingJobs.
@@ -240,8 +291,9 @@ func (o *Orchestrator) reapZombieRunners(ctx context.Context) {
 
 // syncPool adopts provider instances unknown to the pool (crash recovery) and
 // drops pool nodes the provider no longer reports. Provisioning nodes are never
-// dropped: a freshly created VM may not appear in List yet.
-func (o *Orchestrator) syncPool(insts []provider.Instance) {
+// dropped: a freshly created VM may not appear in List yet. Returns the count
+// of nodes adopted and dropped this tick.
+func (o *Orchestrator) syncPool(insts []provider.Instance) (adopted, dropped int) {
 	now := o.now()
 	seen := map[string]struct{}{}
 	for _, in := range insts {
@@ -255,6 +307,8 @@ func (o *Orchestrator) syncPool(insts []provider.Instance) {
 				LastBusy:   now,
 			})
 			o.log.Info("adopted orphan instance", "id", in.ID, "ip", in.IPv4)
+			o.emit("worker_adopted", map[string]string{attrID: in.ID, attrIP: in.IPv4})
+			adopted++
 		}
 	}
 	for _, n := range o.pool.Snapshot() {
@@ -266,12 +320,16 @@ func (o *Orchestrator) syncPool(insts []provider.Instance) {
 		}
 		o.pool.Delete(n.InstanceID)
 		o.log.Info("dropped vanished instance", "id", n.InstanceID, "state", n.State)
+		o.emit("worker_dropped", map[string]string{attrID: n.InstanceID, attrState: string(n.State)})
+		dropped++
 	}
+	return adopted, dropped
 }
 
 // dispatchJobs assigns waiting jobs to idle nodes and provisions capacity for
-// the rest, bounded by MaxScale.
-func (o *Orchestrator) dispatchJobs(ctx context.Context, jobs []forgejo.WaitingJob) {
+// the rest, bounded by MaxScale. Returns the count of dispatches and
+// provisions kicked off this tick.
+func (o *Orchestrator) dispatchJobs(ctx context.Context, jobs []forgejo.WaitingJob) (dispatched, provisioned int) {
 	idle := o.pool.ByState(StateIdle)
 	next := 0
 	needProvision := 0
@@ -280,14 +338,16 @@ func (o *Orchestrator) dispatchJobs(ctx context.Context, jobs []forgejo.WaitingJ
 			continue
 		}
 		if next < len(idle) {
-			o.dispatch(ctx, idle[next], job)
+			if o.dispatch(ctx, idle[next], job) {
+				dispatched++
+			}
 			next++
 			continue
 		}
 		needProvision++
 	}
 	if needProvision == 0 {
-		return
+		return dispatched, provisioned
 	}
 	// Credit in-flight new capacity against unmet demand: nodes that are still
 	// booting (StateProvisioning) or whose Provision call has not yet landed in
@@ -298,7 +358,7 @@ func (o *Orchestrator) dispatchJobs(ctx context.Context, jobs []forgejo.WaitingJ
 	soon := len(o.pool.ByState(StateProvisioning)) + o.pendingCount()
 	needProvision -= soon
 	if needProvision <= 0 {
-		return
+		return dispatched, provisioned
 	}
 	// MaxScale stays as the final safety net; the credit above is the primary
 	// guard so we no longer rely on it to stop runaway provisioning.
@@ -306,20 +366,28 @@ func (o *Orchestrator) dispatchJobs(ctx context.Context, jobs []forgejo.WaitingJ
 	canAdd := o.cfg.MaxScale - active
 	for i := 0; i < needProvision && i < canAdd; i++ {
 		o.provisionOne(ctx)
+		provisioned++
 	}
+	return dispatched, provisioned
 }
 
-// dispatch marks a node Busy and serves the job in a goroutine.
-func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.WaitingJob) {
+// dispatch marks a node Busy and serves the job in a goroutine. Returns
+// true when a goroutine was spawned (i.e. the handle wasn't already in
+// flight); the caller increments its dispatch counter on true.
+func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.WaitingJob) bool {
 	if !o.markDispatching(job.Handle) {
-		return
+		return false
 	}
 	o.pool.SetState(node.InstanceID, StateBusy)
+	o.pool.SetJob(node.InstanceID, job.Handle)
+	o.emit("worker_busy", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle})
 	o.wg.Go(func() {
 		defer func() {
 			o.pool.SetState(node.InstanceID, StateIdle)
+			o.pool.SetJob(node.InstanceID, "")
 			o.pool.Touch(node.InstanceID, o.now())
 			o.unmarkDispatching(job.Handle)
+			o.emit("worker_idle", map[string]string{attrID: node.InstanceID, attrIP: node.IP})
 		}()
 		name := o.cfg.Tag + "-" + shortID()
 		reg, err := o.jobs.RegisterEphemeral(ctx, name, o.cfg.Labels)
@@ -329,12 +397,15 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 		}
 		o.addActive(reg.UUID)
 		defer o.removeActive(reg.UUID)
+		o.emit("job_dispatched", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle, attrRunnerUUID: reg.UUID})
 		if err := o.disp.RunJob(ctx, node.InstanceID, node.IP, reg, job); err != nil {
 			o.log.Error("run job", "handle", job.Handle, "ip", node.IP, "err", err)
 			return
 		}
 		o.log.Info("job complete", "handle", job.Handle, "ip", node.IP)
+		o.emit("job_complete", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle})
 	})
+	return true
 }
 
 // provisionOne creates a VM, adds it as Provisioning, waits for readiness, then
@@ -392,6 +463,7 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 		})
 		o.decPending() // now counted via the pool
 		o.log.Info("provisioned", "id", inst.ID, "ip", inst.IPv4)
+		o.emit("worker_provisioned", map[string]string{attrID: inst.ID, attrIP: inst.IPv4})
 
 		// Seed the pin before the first dial so WaitReady's handshake is verified.
 		if canPin {
@@ -404,12 +476,16 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 		}
 		o.pool.SetState(inst.ID, StateIdle)
 		o.log.Info("worker ready", "id", inst.ID)
+		o.emit("worker_ready", map[string]string{attrID: inst.ID, attrIP: inst.IPv4})
 	})
 }
 
-// applyTeardown destroys idle nodes the billing policy says are due.
-func (o *Orchestrator) applyTeardown(ctx context.Context) {
+// applyTeardown destroys idle nodes the billing policy says are due. Returns
+// the count of Destroy actions kicked off this tick (still in-flight when
+// applyTeardown returns; they run on background goroutines).
+func (o *Orchestrator) applyTeardown(ctx context.Context) int {
 	now := o.now()
+	reaped := 0
 	for _, n := range o.pool.ByState(StateIdle) {
 		if !o.cfg.Teardown.ShouldTeardown(n, now) {
 			continue
@@ -418,6 +494,8 @@ func (o *Orchestrator) applyTeardown(ctx context.Context) {
 			continue
 		}
 		id := n.InstanceID
+		ip := n.IP
+		reaped++
 		o.wg.Go(func() {
 			if err := o.prov.Destroy(ctx, id); err != nil {
 				o.log.Error("destroy", "id", id, "err", err)
@@ -426,8 +504,10 @@ func (o *Orchestrator) applyTeardown(ctx context.Context) {
 			}
 			o.pool.Delete(id)
 			o.log.Info("destroyed idle node", "id", id)
+			o.emit("worker_reaped", map[string]string{attrID: id, attrIP: ip})
 		})
 	}
+	return reaped
 }
 
 func (o *Orchestrator) incPending() {

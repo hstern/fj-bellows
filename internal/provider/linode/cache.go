@@ -22,6 +22,7 @@ import (
 // operations live on bucketClient (composed separately).
 type cacheClient interface {
 	ListInstances(ctx context.Context, opts *linodego.ListOptions) ([]linodego.Instance, error)
+	GetInstance(ctx context.Context, id int) (*linodego.Instance, error)
 	CreateInstance(ctx context.Context, opts linodego.InstanceCreateOptions) (*linodego.Instance, error)
 	DeleteInstance(ctx context.Context, id int) error
 	ListInstanceConfigs(ctx context.Context, linodeID int, opts *linodego.ListOptions) ([]linodego.InstanceConfig, error)
@@ -384,6 +385,45 @@ func (m *managedCache) findCacheLinode(ctx context.Context) (*linodego.Instance,
 		}
 	}
 	return nil, nil
+}
+
+// CacheStatus is the operator-facing snapshot of the managed cache state,
+// returned by the control plane's GetCache RPC. Fields are populated from
+// the in-memory managedCache plus an on-demand Linode API call for the live
+// VM status (cheap; only fired on /cache requests, not in the hot path).
+type CacheStatus struct {
+	Present         bool
+	AdoptedExisting bool
+	LinodeID        int
+	VPCIP           string
+	BucketRegion    string
+	BucketLabel     string
+	VMState         string // from Linode API; empty if no VM or lookup failed
+}
+
+// Status returns the current cache snapshot. Safe to call before / after
+// ensureAtConfigure (returns Present=false until linodeID is populated).
+func (m *managedCache) Status(ctx context.Context) CacheStatus {
+	s := CacheStatus{
+		Present:         m.linodeID != 0,
+		AdoptedExisting: m.adoptedExisting,
+		LinodeID:        m.linodeID,
+		VPCIP:           m.cacheVPCIP,
+	}
+	if m.bucket != nil {
+		s.BucketRegion = m.bucket.region
+		s.BucketLabel = m.bucket.label
+	}
+	if s.Present {
+		// Best-effort live status from Linode. Failures are non-fatal —
+		// the caller sees Present=true with VMState="" and can retry.
+		if inst, err := m.client.GetInstance(ctx, m.linodeID); err == nil && inst != nil {
+			s.VMState = string(inst.Status)
+		} else if err != nil {
+			m.log.Debug("cache status: GetInstance failed", "id", m.linodeID, "err", err)
+		}
+	}
+	return s
 }
 
 // maybeCleanupCache reaps the cache VM + the scoped bucket key. Called
