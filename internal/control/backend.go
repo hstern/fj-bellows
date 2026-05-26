@@ -7,6 +7,8 @@ package control
 import (
 	"context"
 	"time"
+
+	"github.com/hstern/fj-bellows/internal/control/events"
 )
 
 // Backend is the slice of the orchestrator that the control plane needs.
@@ -26,6 +28,27 @@ type Backend interface {
 	// (docker) so the handler can answer Present=false. The Linode API
 	// may be touched for live VM status — keep this off any hot path.
 	CacheStatus(ctx context.Context) *CacheStatus
+
+	// Kick drives a synchronous out-of-band reconcile and returns the per-tick
+	// summary. Used by the Reconcile RPC.
+	Kick(ctx context.Context) (ReconcileResult, error)
+
+	// Subscribe returns a state-transition event stream + cancel func.
+	// Used by the StreamEvents RPC. The channel closes when the caller
+	// cancels OR when the bus drops the subscriber for slow consumption.
+	Subscribe() (<-chan events.Event, func())
+}
+
+// ReconcileResult is the per-tick summary returned by Kick. Counts are
+// "intents started during the tick"; downstream goroutines may still be in
+// flight when this surfaces.
+type ReconcileResult struct {
+	Provisioned int
+	Dispatched  int
+	Reaped      int
+	Adopted     int
+	Dropped     int
+	Errors      []string
 }
 
 // CacheStatus is the shape control returns from GetCache. Mirrors the

@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"connectrpc.com/connect"
@@ -68,6 +69,67 @@ func (h *apiHandler) GetCache(
 		BucketLabel:     s.BucketLabel,
 		VmState:         s.VMState,
 	}), nil
+}
+
+func (h *apiHandler) Reconcile(
+	ctx context.Context,
+	_ *connect.Request[controlv1.ReconcileRequest],
+) (*connect.Response[controlv1.ReconcileResponse], error) {
+	r, err := h.b.Kick(ctx)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&controlv1.ReconcileResponse{
+		//nolint:gosec // counts come from in-process int counters; can't overflow int32 in practice
+		Provisioned: int32(r.Provisioned),
+		//nolint:gosec // see above
+		Dispatched: int32(r.Dispatched),
+		//nolint:gosec // see above
+		Reaped: int32(r.Reaped),
+		//nolint:gosec // see above
+		Adopted: int32(r.Adopted),
+		//nolint:gosec // see above
+		Dropped: int32(r.Dropped),
+		Errors:  r.Errors,
+	}), nil
+}
+
+func (h *apiHandler) StreamEvents(
+	ctx context.Context,
+	_ *connect.Request[controlv1.StreamEventsRequest],
+	stream *connect.ServerStream[controlv1.StreamEventsResponse],
+) error {
+	ch, cancel := h.b.Subscribe()
+	defer cancel()
+	// Send a sentinel event immediately so the client's call returns
+	// without waiting for the first real event. Connect server-streaming
+	// only writes response headers on the first Send; without this, a
+	// quiet daemon would make the client appear to hang on Open.
+	if err := stream.Send(&controlv1.StreamEventsResponse{
+		At:   tsOrNil(time.Now()),
+		Type: "stream_opened",
+	}); err != nil {
+		return err
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case ev, ok := <-ch:
+			if !ok {
+				// Bus dropped us for slow consumption.
+				return connect.NewError(connect.CodeResourceExhausted,
+					errors.New("stream subscriber dropped: client too slow"))
+			}
+			if err := stream.Send(&controlv1.StreamEventsResponse{
+				At:    tsOrNil(ev.At),
+				Type:  ev.Type,
+				Attrs: ev.Attrs,
+			}); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 // tsOrNil emits a Timestamp only for non-zero times; zero stays nil so the
