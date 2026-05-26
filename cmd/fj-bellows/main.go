@@ -250,6 +250,7 @@ func (b controlBackend) Health(ctx context.Context) control.HealthStatus {
 		LastTickAt:         s.LastTickAt,
 		LastProviderListAt: s.LastProviderListAt,
 		LastForgejoPollAt:  s.LastForgejoPollAt,
+		Paused:             s.Paused,
 	}
 }
 
@@ -302,6 +303,14 @@ func (b controlBackend) ForceReap(ctx context.Context, instanceID string) error 
 
 func (b controlBackend) ForceProvision(ctx context.Context) (string, error) {
 	return b.o.ForceProvision(ctx)
+}
+
+func (b controlBackend) Pause(ctx context.Context) {
+	b.o.Pause(ctx)
+}
+
+func (b controlBackend) Resume(ctx context.Context) {
+	b.o.Resume(ctx)
 }
 
 // CacheStatus walks the provider for cache info if it supports it (Linode

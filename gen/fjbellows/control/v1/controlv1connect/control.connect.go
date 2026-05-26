@@ -52,6 +52,10 @@ const (
 	// ControlServiceStreamEventsProcedure is the fully-qualified name of the ControlService's
 	// StreamEvents RPC.
 	ControlServiceStreamEventsProcedure = "/fjbellows.control.v1.ControlService/StreamEvents"
+	// ControlServicePauseProcedure is the fully-qualified name of the ControlService's Pause RPC.
+	ControlServicePauseProcedure = "/fjbellows.control.v1.ControlService/Pause"
+	// ControlServiceResumeProcedure is the fully-qualified name of the ControlService's Resume RPC.
+	ControlServiceResumeProcedure = "/fjbellows.control.v1.ControlService/Resume"
 	// ControlServiceStreamLogsProcedure is the fully-qualified name of the ControlService's StreamLogs
 	// RPC.
 	ControlServiceStreamLogsProcedure = "/fjbellows.control.v1.ControlService/StreamLogs"
@@ -106,6 +110,14 @@ type ControlServiceClient interface {
 	// on a quiet daemon (Connect server-streaming only writes response
 	// headers on the first Send). Clients should skip it.
 	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error)
+	// Pause stops the reconcile loop's auto-tick. In-flight work continues;
+	// explicit Reconcile / ForceReap / ForceProvision RPCs still fire.
+	// Idempotent. Audit-logged when FJB-26 caller plumbing is present.
+	// Gated by -enable-control-writes; returns CodePermissionDenied otherwise.
+	Pause(context.Context, *connect.Request[v1.PauseRequest]) (*connect.Response[v1.PauseResponse], error)
+	// Resume re-arms the auto-tick. Idempotent. Audit-logged. Gated by
+	// -enable-control-writes; returns CodePermissionDenied otherwise.
+	Resume(context.Context, *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error)
 	// StreamLogs streams structured slog records from the daemon. The first
 	// message is a stream_opened sentinel (zero `at`, empty `message`,
 	// level=""); clients should skip it (same convention as StreamEvents).
@@ -177,6 +189,18 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
 			connect.WithClientOptions(opts...),
 		),
+		pause: connect.NewClient[v1.PauseRequest, v1.PauseResponse](
+			httpClient,
+			baseURL+ControlServicePauseProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("Pause")),
+			connect.WithClientOptions(opts...),
+		),
+		resume: connect.NewClient[v1.ResumeRequest, v1.ResumeResponse](
+			httpClient,
+			baseURL+ControlServiceResumeProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("Resume")),
+			connect.WithClientOptions(opts...),
+		),
 		streamLogs: connect.NewClient[v1.StreamLogsRequest, v1.StreamLogsResponse](
 			httpClient,
 			baseURL+ControlServiceStreamLogsProcedure,
@@ -195,6 +219,8 @@ type controlServiceClient struct {
 	forceReap      *connect.Client[v1.ForceReapRequest, v1.ForceReapResponse]
 	forceProvision *connect.Client[v1.ForceProvisionRequest, v1.ForceProvisionResponse]
 	streamEvents   *connect.Client[v1.StreamEventsRequest, v1.StreamEventsResponse]
+	pause          *connect.Client[v1.PauseRequest, v1.PauseResponse]
+	resume         *connect.Client[v1.ResumeRequest, v1.ResumeResponse]
 	streamLogs     *connect.Client[v1.StreamLogsRequest, v1.StreamLogsResponse]
 }
 
@@ -231,6 +257,16 @@ func (c *controlServiceClient) ForceProvision(ctx context.Context, req *connect.
 // StreamEvents calls fjbellows.control.v1.ControlService.StreamEvents.
 func (c *controlServiceClient) StreamEvents(ctx context.Context, req *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error) {
 	return c.streamEvents.CallServerStream(ctx, req)
+}
+
+// Pause calls fjbellows.control.v1.ControlService.Pause.
+func (c *controlServiceClient) Pause(ctx context.Context, req *connect.Request[v1.PauseRequest]) (*connect.Response[v1.PauseResponse], error) {
+	return c.pause.CallUnary(ctx, req)
+}
+
+// Resume calls fjbellows.control.v1.ControlService.Resume.
+func (c *controlServiceClient) Resume(ctx context.Context, req *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error) {
+	return c.resume.CallUnary(ctx, req)
 }
 
 // StreamLogs calls fjbellows.control.v1.ControlService.StreamLogs.
@@ -287,6 +323,14 @@ type ControlServiceHandler interface {
 	// on a quiet daemon (Connect server-streaming only writes response
 	// headers on the first Send). Clients should skip it.
 	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error
+	// Pause stops the reconcile loop's auto-tick. In-flight work continues;
+	// explicit Reconcile / ForceReap / ForceProvision RPCs still fire.
+	// Idempotent. Audit-logged when FJB-26 caller plumbing is present.
+	// Gated by -enable-control-writes; returns CodePermissionDenied otherwise.
+	Pause(context.Context, *connect.Request[v1.PauseRequest]) (*connect.Response[v1.PauseResponse], error)
+	// Resume re-arms the auto-tick. Idempotent. Audit-logged. Gated by
+	// -enable-control-writes; returns CodePermissionDenied otherwise.
+	Resume(context.Context, *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error)
 	// StreamLogs streams structured slog records from the daemon. The first
 	// message is a stream_opened sentinel (zero `at`, empty `message`,
 	// level=""); clients should skip it (same convention as StreamEvents).
@@ -354,6 +398,18 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServicePauseHandler := connect.NewUnaryHandler(
+		ControlServicePauseProcedure,
+		svc.Pause,
+		connect.WithSchema(controlServiceMethods.ByName("Pause")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlServiceResumeHandler := connect.NewUnaryHandler(
+		ControlServiceResumeProcedure,
+		svc.Resume,
+		connect.WithSchema(controlServiceMethods.ByName("Resume")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlServiceStreamLogsHandler := connect.NewServerStreamHandler(
 		ControlServiceStreamLogsProcedure,
 		svc.StreamLogs,
@@ -376,6 +432,10 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 			controlServiceForceProvisionHandler.ServeHTTP(w, r)
 		case ControlServiceStreamEventsProcedure:
 			controlServiceStreamEventsHandler.ServeHTTP(w, r)
+		case ControlServicePauseProcedure:
+			controlServicePauseHandler.ServeHTTP(w, r)
+		case ControlServiceResumeProcedure:
+			controlServiceResumeHandler.ServeHTTP(w, r)
 		case ControlServiceStreamLogsProcedure:
 			controlServiceStreamLogsHandler.ServeHTTP(w, r)
 		default:
@@ -413,6 +473,14 @@ func (UnimplementedControlServiceHandler) ForceProvision(context.Context, *conne
 
 func (UnimplementedControlServiceHandler) StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.StreamEvents is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) Pause(context.Context, *connect.Request[v1.PauseRequest]) (*connect.Response[v1.PauseResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.Pause is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) Resume(context.Context, *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.Resume is not implemented"))
 }
 
 func (UnimplementedControlServiceHandler) StreamLogs(context.Context, *connect.Request[v1.StreamLogsRequest], *connect.ServerStream[v1.StreamLogsResponse]) error {

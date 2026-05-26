@@ -47,6 +47,7 @@ func (h *apiHandler) Health(
 		LastTickAt:         tsOrNil(s.LastTickAt),
 		LastProviderListAt: tsOrNil(s.LastProviderListAt),
 		LastForgejoPollAt:  tsOrNil(s.LastForgejoPollAt),
+		Paused:             s.Paused,
 	}), nil
 }
 
@@ -251,6 +252,30 @@ func (h *apiHandler) ForceProvision(
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&controlv1.ForceProvisionResponse{InstanceId: id}), nil
+}
+
+func (h *apiHandler) Pause(
+	ctx context.Context,
+	req *connect.Request[controlv1.PauseRequest],
+) (*connect.Response[controlv1.PauseResponse], error) {
+	if !h.enableWrites {
+		return nil, connect.NewError(connect.CodePermissionDenied, errWritesDisabled)
+	}
+	ctx = orchestrator.WithAuditCaller(ctx, auditCaller(req))
+	h.b.Pause(ctx)
+	return connect.NewResponse(&controlv1.PauseResponse{}), nil
+}
+
+func (h *apiHandler) Resume(
+	ctx context.Context,
+	req *connect.Request[controlv1.ResumeRequest],
+) (*connect.Response[controlv1.ResumeResponse], error) {
+	if !h.enableWrites {
+		return nil, connect.NewError(connect.CodePermissionDenied, errWritesDisabled)
+	}
+	ctx = orchestrator.WithAuditCaller(ctx, auditCaller(req))
+	h.b.Resume(ctx)
+	return connect.NewResponse(&controlv1.ResumeResponse{}), nil
 }
 
 // auditCaller builds a short, log-safe identity string from the Connect

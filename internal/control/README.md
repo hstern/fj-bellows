@@ -30,8 +30,9 @@ shim. Subsequent PRs widen the proto + handler with:
 | PR5 | plain `/metrics` |
 | FJB-25 | `StreamLogs` (server-streaming structured slog records) |
 | FJB-26 | `ForceReap`, `ForceProvision` (admin verbs; gated by `-enable-control-writes`) |
+| FJB-27 | `Pause`, `Resume` (reconciler-quiesce verbs; same gate) |
 
-Deferred to follow-up tickets: pause/resume reconciler, config dump+reload,
+Deferred to follow-up tickets: config dump+reload,
 SSH-proxy, billing-window view, provider-passthrough. v1 leans on
 loopback-binding as the default auth boundary; the bearer-token interceptor
 (FJB-33, below) is what binds a non-loopback deployment.
@@ -136,6 +137,44 @@ The bearer-token gate and the writes gate are independent: a non-loopback
 deployment that wants read-only mirror access (Health, ListWorkers,
 GetCache, Reconcile, StreamEvents) over tailscale can leave
 `-enable-control-writes` off and still hand out the token.
+
+## Pause / Resume (FJB-27)
+
+`Pause` and `Resume` are operator verbs for quiescing the reconcile loop —
+useful during maintenance windows, capacity-full debugging, or when attaching
+a debugger. Both share the FJB-26 `-enable-control-writes` gate; the daemon
+returns `CodePermissionDenied` when the flag is unset.
+
+- `Pause()` — stops the reconcile loop's auto-tick. Subsequent ticker ticks
+  become no-ops. In-flight dispatch / provision / teardown goroutines keep
+  running until they complete on their own; only new work is paused.
+- `Resume()` — re-arms the auto-tick. Idempotent.
+
+Explicit `Reconcile`, `ForceReap`, and `ForceProvision` RPCs **still fire**
+while paused — an operator asking for a tick gets one. This is the contract
+that lets you pause for debugging and then drive a single observed tick
+without flipping resume → pause again.
+
+The freshness counters (`last_tick_at`, ...) only advance on real reconciles,
+so a long-paused daemon will report `healthy=false` even though it's
+deliberately quiet. The new `paused` field on `HealthResponse` is the
+operator's signal that this is intentional rather than a stuck upstream:
+
+```
+{ "healthy": false, "paused": true, "lastTickAt": "2026-05-25T12:00:00Z", ... }
+```
+
+Both verbs are audit-logged with the caller identity threaded from the
+handler (same convention as FJB-26 force verbs):
+
+```
+paused caller="peer=10.0.0.5:54312 token"
+resumed caller="peer=127.0.0.1:54312"
+```
+
+A `reconciler_paused` / `reconciler_resumed` event is also published on the
+`StreamEvents` stream on each real transition (idempotent re-pauses /
+re-resumes are silent on both the log and the event stream).
 
 ## Wire format for ad-hoc / e2e clients
 

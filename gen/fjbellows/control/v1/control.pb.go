@@ -71,8 +71,15 @@ type HealthResponse struct {
 	// last_forgejo_poll_at is when WaitingJobs or ListRunners most recently
 	// succeeded; whichever was later.
 	LastForgejoPollAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=last_forgejo_poll_at,json=lastForgejoPollAt,proto3" json:"last_forgejo_poll_at,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// paused is true when the reconcile loop's auto-tick is suppressed by a
+	// prior Pause RPC. Explicit Reconcile / ForceReap / ForceProvision still
+	// fire while paused; in-flight dispatch/teardown goroutines also keep
+	// running. A long-paused daemon will report healthy=false because the
+	// freshness counters (last_tick_at, ...) only advance on a real reconcile;
+	// the `paused` flag is the operator's signal that this is intentional.
+	Paused        bool `protobuf:"varint,5,opt,name=paused,proto3" json:"paused,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HealthResponse) Reset() {
@@ -131,6 +138,13 @@ func (x *HealthResponse) GetLastForgejoPollAt() *timestamppb.Timestamp {
 		return x.LastForgejoPollAt
 	}
 	return nil
+}
+
+func (x *HealthResponse) GetPaused() bool {
+	if x != nil {
+		return x.Paused
+	}
+	return false
 }
 
 type ListWorkersRequest struct {
@@ -749,6 +763,156 @@ func (x *ForceProvisionResponse) GetInstanceId() string {
 	return ""
 }
 
+// PauseRequest is empty: pause is a global toggle, no parameters in v1.
+type PauseRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PauseRequest) Reset() {
+	*x = PauseRequest{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PauseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PauseRequest) ProtoMessage() {}
+
+func (x *PauseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PauseRequest.ProtoReflect.Descriptor instead.
+func (*PauseRequest) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{13}
+}
+
+// PauseResponse is intentionally empty — success means "auto-tick is now
+// suppressed." Idempotent: pausing an already-paused daemon returns OK.
+type PauseResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PauseResponse) Reset() {
+	*x = PauseResponse{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PauseResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PauseResponse) ProtoMessage() {}
+
+func (x *PauseResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PauseResponse.ProtoReflect.Descriptor instead.
+func (*PauseResponse) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{14}
+}
+
+// ResumeRequest is empty: resume is a global toggle, no parameters in v1.
+type ResumeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResumeRequest) Reset() {
+	*x = ResumeRequest{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResumeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResumeRequest) ProtoMessage() {}
+
+func (x *ResumeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResumeRequest.ProtoReflect.Descriptor instead.
+func (*ResumeRequest) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{15}
+}
+
+// ResumeResponse is intentionally empty — success means "auto-tick is now
+// armed." Idempotent: resuming an unpaused daemon returns OK.
+type ResumeResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResumeResponse) Reset() {
+	*x = ResumeResponse{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResumeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResumeResponse) ProtoMessage() {}
+
+func (x *ResumeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResumeResponse.ProtoReflect.Descriptor instead.
+func (*ResumeResponse) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{16}
+}
+
 type StreamEventsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -757,7 +921,7 @@ type StreamEventsRequest struct {
 
 func (x *StreamEventsRequest) Reset() {
 	*x = StreamEventsRequest{}
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[13]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -769,7 +933,7 @@ func (x *StreamEventsRequest) String() string {
 func (*StreamEventsRequest) ProtoMessage() {}
 
 func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[13]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -782,7 +946,7 @@ func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamEventsRequest.ProtoReflect.Descriptor instead.
 func (*StreamEventsRequest) Descriptor() ([]byte, []int) {
-	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{13}
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{17}
 }
 
 type StreamEventsResponse struct {
@@ -801,7 +965,7 @@ type StreamEventsResponse struct {
 
 func (x *StreamEventsResponse) Reset() {
 	*x = StreamEventsResponse{}
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[14]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -813,7 +977,7 @@ func (x *StreamEventsResponse) String() string {
 func (*StreamEventsResponse) ProtoMessage() {}
 
 func (x *StreamEventsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[14]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -826,7 +990,7 @@ func (x *StreamEventsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamEventsResponse.ProtoReflect.Descriptor instead.
 func (*StreamEventsResponse) Descriptor() ([]byte, []int) {
-	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{14}
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *StreamEventsResponse) GetAt() *timestamppb.Timestamp {
@@ -868,7 +1032,7 @@ type StreamLogsRequest struct {
 
 func (x *StreamLogsRequest) Reset() {
 	*x = StreamLogsRequest{}
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[15]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -880,7 +1044,7 @@ func (x *StreamLogsRequest) String() string {
 func (*StreamLogsRequest) ProtoMessage() {}
 
 func (x *StreamLogsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[15]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -893,7 +1057,7 @@ func (x *StreamLogsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamLogsRequest.ProtoReflect.Descriptor instead.
 func (*StreamLogsRequest) Descriptor() ([]byte, []int) {
-	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{15}
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *StreamLogsRequest) GetInstanceId() string {
@@ -936,7 +1100,7 @@ type StreamLogsResponse struct {
 
 func (x *StreamLogsResponse) Reset() {
 	*x = StreamLogsResponse{}
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[16]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -948,7 +1112,7 @@ func (x *StreamLogsResponse) String() string {
 func (*StreamLogsResponse) ProtoMessage() {}
 
 func (x *StreamLogsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[16]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -961,7 +1125,7 @@ func (x *StreamLogsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamLogsResponse.ProtoReflect.Descriptor instead.
 func (*StreamLogsResponse) Descriptor() ([]byte, []int) {
-	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{16}
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *StreamLogsResponse) GetAt() *timestamppb.Timestamp {
@@ -997,13 +1161,14 @@ var File_fjbellows_control_v1_control_proto protoreflect.FileDescriptor
 const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"\"fjbellows/control/v1/control.proto\x12\x14fjbellows.control.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x0f\n" +
-	"\rHealthRequest\"\x84\x02\n" +
+	"\rHealthRequest\"\x9c\x02\n" +
 	"\x0eHealthResponse\x12\x18\n" +
 	"\ahealthy\x18\x01 \x01(\bR\ahealthy\x12<\n" +
 	"\flast_tick_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"lastTickAt\x12M\n" +
 	"\x15last_provider_list_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x12lastProviderListAt\x12K\n" +
-	"\x14last_forgejo_poll_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x11lastForgejoPollAt\"\x14\n" +
+	"\x14last_forgejo_poll_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x11lastForgejoPollAt\x12\x16\n" +
+	"\x06paused\x18\x05 \x01(\bR\x06paused\"\x14\n" +
 	"\x12ListWorkersRequest\"M\n" +
 	"\x13ListWorkersResponse\x126\n" +
 	"\aworkers\x18\x01 \x03(\v2\x1c.fjbellows.control.v1.WorkerR\aworkers\"\xe4\x01\n" +
@@ -1043,7 +1208,11 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\x15ForceProvisionRequest\"9\n" +
 	"\x16ForceProvisionResponse\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
-	"instanceId\"\x15\n" +
+	"instanceId\"\x0e\n" +
+	"\fPauseRequest\"\x0f\n" +
+	"\rPauseResponse\"\x0f\n" +
+	"\rResumeRequest\"\x10\n" +
+	"\x0eResumeResponse\"\x15\n" +
 	"\x13StreamEventsRequest\"\xdd\x01\n" +
 	"\x14StreamEventsResponse\x12*\n" +
 	"\x02at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x12\n" +
@@ -1066,7 +1235,7 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"AttrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\x99\x06\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\xc0\a\n" +
 	"\x0eControlService\x12S\n" +
 	"\x06Health\x12#.fjbellows.control.v1.HealthRequest\x1a$.fjbellows.control.v1.HealthResponse\x12b\n" +
 	"\vListWorkers\x12(.fjbellows.control.v1.ListWorkersRequest\x1a).fjbellows.control.v1.ListWorkersResponse\x12Y\n" +
@@ -1074,7 +1243,9 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\tReconcile\x12&.fjbellows.control.v1.ReconcileRequest\x1a'.fjbellows.control.v1.ReconcileResponse\x12\\\n" +
 	"\tForceReap\x12&.fjbellows.control.v1.ForceReapRequest\x1a'.fjbellows.control.v1.ForceReapResponse\x12k\n" +
 	"\x0eForceProvision\x12+.fjbellows.control.v1.ForceProvisionRequest\x1a,.fjbellows.control.v1.ForceProvisionResponse\x12g\n" +
-	"\fStreamEvents\x12).fjbellows.control.v1.StreamEventsRequest\x1a*.fjbellows.control.v1.StreamEventsResponse0\x01\x12a\n" +
+	"\fStreamEvents\x12).fjbellows.control.v1.StreamEventsRequest\x1a*.fjbellows.control.v1.StreamEventsResponse0\x01\x12P\n" +
+	"\x05Pause\x12\".fjbellows.control.v1.PauseRequest\x1a#.fjbellows.control.v1.PauseResponse\x12S\n" +
+	"\x06Resume\x12#.fjbellows.control.v1.ResumeRequest\x1a$.fjbellows.control.v1.ResumeResponse\x12a\n" +
 	"\n" +
 	"StreamLogs\x12'.fjbellows.control.v1.StreamLogsRequest\x1a(.fjbellows.control.v1.StreamLogsResponse0\x01B\xdb\x01\n" +
 	"\x18com.fjbellows.control.v1B\fControlProtoP\x01Z?github.com/hstern/fj-bellows/gen/fjbellows/control/v1;controlv1\xa2\x02\x03FCX\xaa\x02\x14Fjbellows.Control.V1\xca\x02\x14Fjbellows\\Control\\V1\xe2\x02 Fjbellows\\Control\\V1\\GPBMetadata\xea\x02\x16Fjbellows::Control::V1b\x06proto3"
@@ -1091,7 +1262,7 @@ func file_fjbellows_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_fjbellows_control_v1_control_proto_rawDescData
 }
 
-var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_fjbellows_control_v1_control_proto_goTypes = []any{
 	(*HealthRequest)(nil),          // 0: fjbellows.control.v1.HealthRequest
 	(*HealthResponse)(nil),         // 1: fjbellows.control.v1.HealthResponse
@@ -1106,43 +1277,51 @@ var file_fjbellows_control_v1_control_proto_goTypes = []any{
 	(*ForceReapResponse)(nil),      // 10: fjbellows.control.v1.ForceReapResponse
 	(*ForceProvisionRequest)(nil),  // 11: fjbellows.control.v1.ForceProvisionRequest
 	(*ForceProvisionResponse)(nil), // 12: fjbellows.control.v1.ForceProvisionResponse
-	(*StreamEventsRequest)(nil),    // 13: fjbellows.control.v1.StreamEventsRequest
-	(*StreamEventsResponse)(nil),   // 14: fjbellows.control.v1.StreamEventsResponse
-	(*StreamLogsRequest)(nil),      // 15: fjbellows.control.v1.StreamLogsRequest
-	(*StreamLogsResponse)(nil),     // 16: fjbellows.control.v1.StreamLogsResponse
-	nil,                            // 17: fjbellows.control.v1.StreamEventsResponse.AttrsEntry
-	nil,                            // 18: fjbellows.control.v1.StreamLogsResponse.AttrsEntry
-	(*timestamppb.Timestamp)(nil),  // 19: google.protobuf.Timestamp
+	(*PauseRequest)(nil),           // 13: fjbellows.control.v1.PauseRequest
+	(*PauseResponse)(nil),          // 14: fjbellows.control.v1.PauseResponse
+	(*ResumeRequest)(nil),          // 15: fjbellows.control.v1.ResumeRequest
+	(*ResumeResponse)(nil),         // 16: fjbellows.control.v1.ResumeResponse
+	(*StreamEventsRequest)(nil),    // 17: fjbellows.control.v1.StreamEventsRequest
+	(*StreamEventsResponse)(nil),   // 18: fjbellows.control.v1.StreamEventsResponse
+	(*StreamLogsRequest)(nil),      // 19: fjbellows.control.v1.StreamLogsRequest
+	(*StreamLogsResponse)(nil),     // 20: fjbellows.control.v1.StreamLogsResponse
+	nil,                            // 21: fjbellows.control.v1.StreamEventsResponse.AttrsEntry
+	nil,                            // 22: fjbellows.control.v1.StreamLogsResponse.AttrsEntry
+	(*timestamppb.Timestamp)(nil),  // 23: google.protobuf.Timestamp
 }
 var file_fjbellows_control_v1_control_proto_depIdxs = []int32{
-	19, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
-	19, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
-	19, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
+	23, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
+	23, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
+	23, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
 	4,  // 3: fjbellows.control.v1.ListWorkersResponse.workers:type_name -> fjbellows.control.v1.Worker
-	19, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
-	19, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
-	19, // 6: fjbellows.control.v1.StreamEventsResponse.at:type_name -> google.protobuf.Timestamp
-	17, // 7: fjbellows.control.v1.StreamEventsResponse.attrs:type_name -> fjbellows.control.v1.StreamEventsResponse.AttrsEntry
-	19, // 8: fjbellows.control.v1.StreamLogsResponse.at:type_name -> google.protobuf.Timestamp
-	18, // 9: fjbellows.control.v1.StreamLogsResponse.attrs:type_name -> fjbellows.control.v1.StreamLogsResponse.AttrsEntry
+	23, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
+	23, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
+	23, // 6: fjbellows.control.v1.StreamEventsResponse.at:type_name -> google.protobuf.Timestamp
+	21, // 7: fjbellows.control.v1.StreamEventsResponse.attrs:type_name -> fjbellows.control.v1.StreamEventsResponse.AttrsEntry
+	23, // 8: fjbellows.control.v1.StreamLogsResponse.at:type_name -> google.protobuf.Timestamp
+	22, // 9: fjbellows.control.v1.StreamLogsResponse.attrs:type_name -> fjbellows.control.v1.StreamLogsResponse.AttrsEntry
 	0,  // 10: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
 	2,  // 11: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
 	5,  // 12: fjbellows.control.v1.ControlService.GetCache:input_type -> fjbellows.control.v1.GetCacheRequest
 	7,  // 13: fjbellows.control.v1.ControlService.Reconcile:input_type -> fjbellows.control.v1.ReconcileRequest
 	9,  // 14: fjbellows.control.v1.ControlService.ForceReap:input_type -> fjbellows.control.v1.ForceReapRequest
 	11, // 15: fjbellows.control.v1.ControlService.ForceProvision:input_type -> fjbellows.control.v1.ForceProvisionRequest
-	13, // 16: fjbellows.control.v1.ControlService.StreamEvents:input_type -> fjbellows.control.v1.StreamEventsRequest
-	15, // 17: fjbellows.control.v1.ControlService.StreamLogs:input_type -> fjbellows.control.v1.StreamLogsRequest
-	1,  // 18: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
-	3,  // 19: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
-	6,  // 20: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
-	8,  // 21: fjbellows.control.v1.ControlService.Reconcile:output_type -> fjbellows.control.v1.ReconcileResponse
-	10, // 22: fjbellows.control.v1.ControlService.ForceReap:output_type -> fjbellows.control.v1.ForceReapResponse
-	12, // 23: fjbellows.control.v1.ControlService.ForceProvision:output_type -> fjbellows.control.v1.ForceProvisionResponse
-	14, // 24: fjbellows.control.v1.ControlService.StreamEvents:output_type -> fjbellows.control.v1.StreamEventsResponse
-	16, // 25: fjbellows.control.v1.ControlService.StreamLogs:output_type -> fjbellows.control.v1.StreamLogsResponse
-	18, // [18:26] is the sub-list for method output_type
-	10, // [10:18] is the sub-list for method input_type
+	17, // 16: fjbellows.control.v1.ControlService.StreamEvents:input_type -> fjbellows.control.v1.StreamEventsRequest
+	13, // 17: fjbellows.control.v1.ControlService.Pause:input_type -> fjbellows.control.v1.PauseRequest
+	15, // 18: fjbellows.control.v1.ControlService.Resume:input_type -> fjbellows.control.v1.ResumeRequest
+	19, // 19: fjbellows.control.v1.ControlService.StreamLogs:input_type -> fjbellows.control.v1.StreamLogsRequest
+	1,  // 20: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
+	3,  // 21: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
+	6,  // 22: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
+	8,  // 23: fjbellows.control.v1.ControlService.Reconcile:output_type -> fjbellows.control.v1.ReconcileResponse
+	10, // 24: fjbellows.control.v1.ControlService.ForceReap:output_type -> fjbellows.control.v1.ForceReapResponse
+	12, // 25: fjbellows.control.v1.ControlService.ForceProvision:output_type -> fjbellows.control.v1.ForceProvisionResponse
+	18, // 26: fjbellows.control.v1.ControlService.StreamEvents:output_type -> fjbellows.control.v1.StreamEventsResponse
+	14, // 27: fjbellows.control.v1.ControlService.Pause:output_type -> fjbellows.control.v1.PauseResponse
+	16, // 28: fjbellows.control.v1.ControlService.Resume:output_type -> fjbellows.control.v1.ResumeResponse
+	20, // 29: fjbellows.control.v1.ControlService.StreamLogs:output_type -> fjbellows.control.v1.StreamLogsResponse
+	20, // [20:30] is the sub-list for method output_type
+	10, // [10:20] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name
 	10, // [10:10] is the sub-list for extension extendee
 	0,  // [0:10] is the sub-list for field type_name
@@ -1159,7 +1338,7 @@ func file_fjbellows_control_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fjbellows_control_v1_control_proto_rawDesc), len(file_fjbellows_control_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   19,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

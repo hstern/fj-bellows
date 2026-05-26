@@ -60,6 +60,14 @@ type Backend interface {
 	// this single tick. Returns the new worker's instance ID on success;
 	// async readiness errors surface later via the event stream.
 	ForceProvision(ctx context.Context) (string, error)
+
+	// Pause stops the reconcile loop's auto-tick. In-flight work
+	// continues; explicit Reconcile / ForceReap / ForceProvision still
+	// fire while paused. Idempotent.
+	Pause(ctx context.Context)
+
+	// Resume re-arms the auto-tick. Idempotent.
+	Resume(ctx context.Context)
 }
 
 // ReconcileResult is the per-tick summary returned by Kick. Counts are
@@ -113,4 +121,8 @@ type HealthStatus struct {
 	// LastForgejoPollAt is when WaitingJobs or ListRunners most recently
 	// succeeded; whichever was later.
 	LastForgejoPollAt time.Time
+
+	// Paused reports whether the reconciler's auto-tick has been
+	// suppressed by a Pause RPC. Independent of Healthy.
+	Paused bool
 }

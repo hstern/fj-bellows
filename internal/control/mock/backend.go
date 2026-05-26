@@ -26,6 +26,8 @@ type Backend struct {
 	logHistoryFn       func(n int, filter logbus.Filter) []logbus.Record
 	forceReapFn        func(ctx context.Context, instanceID string) error
 	forceProvisionFn   func(ctx context.Context) (string, error)
+	pauseFn            func(ctx context.Context)
+	resumeFn           func(ctx context.Context)
 	healthCall         int
 	poolSnapshotCall   int
 	cacheStatusCall    int
@@ -35,6 +37,8 @@ type Backend struct {
 	logHistoryCall     int
 	forceReapCall      int
 	forceProvisionCall int
+	pauseCall          int
+	resumeCall         int
 }
 
 // SetHealth installs the response for subsequent Health calls.
@@ -259,6 +263,58 @@ func (b *Backend) ForceProvisionCalls() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.forceProvisionCall
+}
+
+// SetPause installs the response for subsequent Pause calls.
+func (b *Backend) SetPause(fn func(ctx context.Context)) {
+	b.mu.Lock()
+	b.pauseFn = fn
+	b.mu.Unlock()
+}
+
+// Pause implements control.Backend.
+func (b *Backend) Pause(ctx context.Context) {
+	b.mu.Lock()
+	fn := b.pauseFn
+	b.pauseCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(ctx)
+}
+
+// PauseCalls returns the number of times Pause has been invoked.
+func (b *Backend) PauseCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.pauseCall
+}
+
+// SetResume installs the response for subsequent Resume calls.
+func (b *Backend) SetResume(fn func(ctx context.Context)) {
+	b.mu.Lock()
+	b.resumeFn = fn
+	b.mu.Unlock()
+}
+
+// Resume implements control.Backend.
+func (b *Backend) Resume(ctx context.Context) {
+	b.mu.Lock()
+	fn := b.resumeFn
+	b.resumeCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(ctx)
+}
+
+// ResumeCalls returns the number of times Resume has been invoked.
+func (b *Backend) ResumeCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.resumeCall
 }
 
 // HealthCalls returns the number of times Health has been invoked.

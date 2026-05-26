@@ -18,6 +18,7 @@ const (
 	attrRunnerUUID = "runner_uuid"
 	attrName       = "name"
 	attrUUID       = "uuid"
+	attrCaller     = "caller"
 )
 
 // emit publishes a state-transition event to the orchestrator's event bus

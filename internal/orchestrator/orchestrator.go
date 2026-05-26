@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -77,6 +78,12 @@ type Orchestrator struct {
 	kick chan kickReq
 
 	wg sync.WaitGroup // tracks in-flight dispatch/provision/teardown goroutines
+
+	// paused suppresses the auto-tick path in Run when true. The kick channel
+	// (Reconcile RPC, ForceReap, ForceProvision) ignores this flag — an
+	// operator explicitly asking for a tick gets one. Atomic so Pause/Resume
+	// don't have to serialise behind Run's mutex.
+	paused atomic.Bool
 
 	mu          sync.Mutex
 	pending     int                 // in-flight provisions not yet in the pool
@@ -140,6 +147,16 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			o.shutdown(cancelJobs)
 			return nil
 		case <-t.C:
+			// While paused the auto-tick is a no-op: the tick is consumed
+			// (otherwise the ticker would buffer ticks and burst on resume)
+			// but Reconcile is skipped. Kick / ForceReap / ForceProvision
+			// still drive a tick when an operator explicitly asks. The
+			// freshness counters (LastTickAt, ...) stop advancing so a
+			// long-paused daemon's Health goes unhealthy; the `paused`
+			// flag on HealthResponse is the signal that this is intentional.
+			if o.paused.Load() {
+				continue
+			}
 			o.Reconcile(jobCtx)
 		case req := <-o.kick:
 			o.serveKick(jobCtx, req)
@@ -355,6 +372,36 @@ func (o *Orchestrator) ForceProvision(ctx context.Context) (string, error) {
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
+}
+
+// Pause stops the reconcile loop from auto-ticking. In-flight dispatch /
+// provision / teardown goroutines continue. Subsequent ticker ticks become
+// no-ops; explicit Kick / ForceReap / ForceProvision requests still run.
+// Idempotent: pausing an already-paused orchestrator is a no-op.
+//
+// Audit-logged with the caller identity threaded via WithAuditCaller; the
+// control plane handler builds the identity from the Connect request peer
+// (and bearer-token presence) before invoking this.
+func (o *Orchestrator) Pause(ctx context.Context) {
+	// CompareAndSwap so the log line only fires on the actual transition;
+	// idempotent re-pauses stay silent.
+	if o.paused.CompareAndSwap(false, true) {
+		o.log.Info("paused", "caller", auditCallerFromCtx(ctx))
+		o.emit("reconciler_paused", map[string]string{attrCaller: auditCallerFromCtx(ctx)})
+	}
+}
+
+// Resume re-arms the auto-ticker. Idempotent. Audit-logged.
+func (o *Orchestrator) Resume(ctx context.Context) {
+	if o.paused.CompareAndSwap(true, false) {
+		o.log.Info("resumed", "caller", auditCallerFromCtx(ctx))
+		o.emit("reconciler_resumed", map[string]string{attrCaller: auditCallerFromCtx(ctx)})
+	}
+}
+
+// IsPaused reports the current pause flag.
+func (o *Orchestrator) IsPaused() bool {
+	return o.paused.Load()
 }
 
 // doForceReap runs the synchronous Destroy from the Run goroutine. The

@@ -64,6 +64,16 @@ service ControlService {
   // headers on the first Send). Clients should skip it.
   rpc StreamEvents(StreamEventsRequest) returns (stream StreamEventsResponse);
 
+  // Pause stops the reconcile loop's auto-tick. In-flight work continues;
+  // explicit Reconcile / ForceReap / ForceProvision RPCs still fire.
+  // Idempotent. Audit-logged when FJB-26 caller plumbing is present.
+  // Gated by -enable-control-writes; returns CodePermissionDenied otherwise.
+  rpc Pause(PauseRequest) returns (PauseResponse);
+
+  // Resume re-arms the auto-tick. Idempotent. Audit-logged. Gated by
+  // -enable-control-writes; returns CodePermissionDenied otherwise.
+  rpc Resume(ResumeRequest) returns (ResumeResponse);
+
   // StreamLogs streams structured slog records from the daemon. The first
   // message is a stream_opened sentinel (zero `at`, empty `message`,
   // level=""); clients should skip it (same convention as StreamEvents).
@@ -99,6 +109,14 @@ message HealthResponse {
   // last_forgejo_poll_at is when WaitingJobs or ListRunners most recently
   // succeeded; whichever was later.
   google.protobuf.Timestamp last_forgejo_poll_at = 4;
+
+  // paused is true when the reconcile loop's auto-tick is suppressed by a
+  // prior Pause RPC. Explicit Reconcile / ForceReap / ForceProvision still
+  // fire while paused; in-flight dispatch/teardown goroutines also keep
+  // running. A long-paused daemon will report healthy=false because the
+  // freshness counters (last_tick_at, ...) only advance on a real reconcile;
+  // the `paused` flag is the operator's signal that this is intentional.
+  bool paused = 5;
 }
 
 message ListWorkersRequest {}
@@ -205,6 +223,20 @@ message ForceProvisionResponse {
   // when this returns (WaitReady runs asynchronously).
   string instance_id = 1;
 }
+
+// PauseRequest is empty: pause is a global toggle, no parameters in v1.
+message PauseRequest {}
+
+// PauseResponse is intentionally empty — success means "auto-tick is now
+// suppressed." Idempotent: pausing an already-paused daemon returns OK.
+message PauseResponse {}
+
+// ResumeRequest is empty: resume is a global toggle, no parameters in v1.
+message ResumeRequest {}
+
+// ResumeResponse is intentionally empty — success means "auto-tick is now
+// armed." Idempotent: resuming an unpaused daemon returns OK.
+message ResumeResponse {}
 
 message StreamEventsRequest {
   // No filtering in v1; clients see every event.

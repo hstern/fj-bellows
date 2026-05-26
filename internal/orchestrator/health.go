@@ -13,6 +13,12 @@ type HealthStatus struct {
 	LastTickAt         time.Time
 	LastProviderListAt time.Time
 	LastForgejoPollAt  time.Time
+	// Paused reflects the reconciler's auto-tick suppression flag (FJB-27).
+	// Operator-visible signal: when true, the freshness counters will go
+	// stale because no real reconcile is firing, so Healthy will flip to
+	// false on its own. The flag distinguishes "intentionally quiesced"
+	// from "stuck upstream".
+	Paused bool
 }
 
 // WorkerView is the per-node shape returned by PoolSnapshot. Stable,
@@ -67,6 +73,7 @@ func (o *Orchestrator) Health(_ context.Context) HealthStatus {
 		LastTickAt:         tick,
 		LastProviderListAt: prov,
 		LastForgejoPollAt:  fj,
+		Paused:             o.paused.Load(),
 	}
 }
 
