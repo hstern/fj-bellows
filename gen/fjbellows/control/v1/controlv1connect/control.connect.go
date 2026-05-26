@@ -46,6 +46,9 @@ const (
 	// ControlServiceStreamEventsProcedure is the fully-qualified name of the ControlService's
 	// StreamEvents RPC.
 	ControlServiceStreamEventsProcedure = "/fjbellows.control.v1.ControlService/StreamEvents"
+	// ControlServiceStreamLogsProcedure is the fully-qualified name of the ControlService's StreamLogs
+	// RPC.
+	ControlServiceStreamLogsProcedure = "/fjbellows.control.v1.ControlService/StreamLogs"
 )
 
 // ControlServiceClient is a client for the fjbellows.control.v1.ControlService service.
@@ -75,7 +78,28 @@ type ControlServiceClient interface {
 	// job_complete, zombie_reaped, reconcile_tick. The stream stays open
 	// until the client disconnects or the daemon shuts down. Slow clients
 	// are dropped (channel closed) rather than blocking the producer.
+	//
+	// The first message on every stream is type="stream_opened" with empty
+	// attrs — a sentinel that makes the open call return immediately even
+	// on a quiet daemon (Connect server-streaming only writes response
+	// headers on the first Send). Clients should skip it.
 	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error)
+	// StreamLogs streams structured slog records from the daemon. The first
+	// message is a stream_opened sentinel (zero `at`, empty `message`,
+	// level=""); clients should skip it (same convention as StreamEvents).
+	//
+	// Optional filters scope the stream to one worker (instance_id, matched
+	// against attrs["id"]) or one job (handle, matched against
+	// attrs["handle"]). Empty fields mean no filter on that dimension; an
+	// empty request streams every record.
+	//
+	// On connect, the daemon replays up to history_lines previous records
+	// (capped at the daemon's ring-buffer capacity), then streams live
+	// records as they happen. history_lines=0 means "no replay, only new".
+	//
+	// The level field is the slog level's String() form
+	// ("DEBUG"/"INFO"/"WARN"/"ERROR").
+	StreamLogs(context.Context, *connect.Request[v1.StreamLogsRequest]) (*connect.ServerStreamForClient[v1.StreamLogsResponse], error)
 }
 
 // NewControlServiceClient constructs a client for the fjbellows.control.v1.ControlService service.
@@ -119,6 +143,12 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
 			connect.WithClientOptions(opts...),
 		),
+		streamLogs: connect.NewClient[v1.StreamLogsRequest, v1.StreamLogsResponse](
+			httpClient,
+			baseURL+ControlServiceStreamLogsProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("StreamLogs")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -129,6 +159,7 @@ type controlServiceClient struct {
 	getCache     *connect.Client[v1.GetCacheRequest, v1.GetCacheResponse]
 	reconcile    *connect.Client[v1.ReconcileRequest, v1.ReconcileResponse]
 	streamEvents *connect.Client[v1.StreamEventsRequest, v1.StreamEventsResponse]
+	streamLogs   *connect.Client[v1.StreamLogsRequest, v1.StreamLogsResponse]
 }
 
 // Health calls fjbellows.control.v1.ControlService.Health.
@@ -154,6 +185,11 @@ func (c *controlServiceClient) Reconcile(ctx context.Context, req *connect.Reque
 // StreamEvents calls fjbellows.control.v1.ControlService.StreamEvents.
 func (c *controlServiceClient) StreamEvents(ctx context.Context, req *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error) {
 	return c.streamEvents.CallServerStream(ctx, req)
+}
+
+// StreamLogs calls fjbellows.control.v1.ControlService.StreamLogs.
+func (c *controlServiceClient) StreamLogs(ctx context.Context, req *connect.Request[v1.StreamLogsRequest]) (*connect.ServerStreamForClient[v1.StreamLogsResponse], error) {
+	return c.streamLogs.CallServerStream(ctx, req)
 }
 
 // ControlServiceHandler is an implementation of the fjbellows.control.v1.ControlService service.
@@ -183,7 +219,28 @@ type ControlServiceHandler interface {
 	// job_complete, zombie_reaped, reconcile_tick. The stream stays open
 	// until the client disconnects or the daemon shuts down. Slow clients
 	// are dropped (channel closed) rather than blocking the producer.
+	//
+	// The first message on every stream is type="stream_opened" with empty
+	// attrs — a sentinel that makes the open call return immediately even
+	// on a quiet daemon (Connect server-streaming only writes response
+	// headers on the first Send). Clients should skip it.
 	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error
+	// StreamLogs streams structured slog records from the daemon. The first
+	// message is a stream_opened sentinel (zero `at`, empty `message`,
+	// level=""); clients should skip it (same convention as StreamEvents).
+	//
+	// Optional filters scope the stream to one worker (instance_id, matched
+	// against attrs["id"]) or one job (handle, matched against
+	// attrs["handle"]). Empty fields mean no filter on that dimension; an
+	// empty request streams every record.
+	//
+	// On connect, the daemon replays up to history_lines previous records
+	// (capped at the daemon's ring-buffer capacity), then streams live
+	// records as they happen. history_lines=0 means "no replay, only new".
+	//
+	// The level field is the slog level's String() form
+	// ("DEBUG"/"INFO"/"WARN"/"ERROR").
+	StreamLogs(context.Context, *connect.Request[v1.StreamLogsRequest], *connect.ServerStream[v1.StreamLogsResponse]) error
 }
 
 // NewControlServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -223,6 +280,12 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceStreamLogsHandler := connect.NewServerStreamHandler(
+		ControlServiceStreamLogsProcedure,
+		svc.StreamLogs,
+		connect.WithSchema(controlServiceMethods.ByName("StreamLogs")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/fjbellows.control.v1.ControlService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlServiceHealthProcedure:
@@ -235,6 +298,8 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 			controlServiceReconcileHandler.ServeHTTP(w, r)
 		case ControlServiceStreamEventsProcedure:
 			controlServiceStreamEventsHandler.ServeHTTP(w, r)
+		case ControlServiceStreamLogsProcedure:
+			controlServiceStreamLogsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -262,4 +327,8 @@ func (UnimplementedControlServiceHandler) Reconcile(context.Context, *connect.Re
 
 func (UnimplementedControlServiceHandler) StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.StreamEvents is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) StreamLogs(context.Context, *connect.Request[v1.StreamLogsRequest], *connect.ServerStream[v1.StreamLogsResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.StreamLogs is not implemented"))
 }

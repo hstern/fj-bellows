@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hstern/fj-bellows/internal/control/events"
+	"github.com/hstern/fj-bellows/internal/control/logbus"
 )
 
 // Backend is the slice of the orchestrator that the control plane needs.
@@ -37,6 +38,17 @@ type Backend interface {
 	// Used by the StreamEvents RPC. The channel closes when the caller
 	// cancels OR when the bus drops the subscriber for slow consumption.
 	Subscribe() (<-chan events.Event, func())
+
+	// SubscribeLogs returns a structured-log stream + cancel func, scoped
+	// to records that match filter (empty filter = every record). Used by
+	// the StreamLogs RPC. The channel closes when the caller cancels OR
+	// when the bus drops the subscriber for slow consumption.
+	SubscribeLogs(filter logbus.Filter) (<-chan logbus.Record, func())
+
+	// LogHistory returns up to n previously-buffered log records that
+	// match filter, in chronological order (oldest first). Used by
+	// StreamLogs to replay recent history before live streaming.
+	LogHistory(n int, filter logbus.Filter) []logbus.Record
 }
 
 // ReconcileResult is the per-tick summary returned by Kick. Counts are

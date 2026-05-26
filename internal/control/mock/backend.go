@@ -9,23 +9,28 @@ import (
 
 	"github.com/hstern/fj-bellows/internal/control"
 	"github.com/hstern/fj-bellows/internal/control/events"
+	"github.com/hstern/fj-bellows/internal/control/logbus"
 )
 
 // Backend is a fake control.Backend. Unset func fields default to a
 // zero-value response so a forgotten wire-up still produces valid (empty)
 // data without panicking.
 type Backend struct {
-	mu               sync.Mutex
-	healthFn         func(ctx context.Context) control.HealthStatus
-	poolSnapshotFn   func() []control.WorkerView
-	cacheStatusFn    func(ctx context.Context) *control.CacheStatus
-	kickFn           func(ctx context.Context) (control.ReconcileResult, error)
-	subscribeFn      func() (<-chan events.Event, func())
-	healthCall       int
-	poolSnapshotCall int
-	cacheStatusCall  int
-	kickCall         int
-	subscribeCall    int
+	mu                sync.Mutex
+	healthFn          func(ctx context.Context) control.HealthStatus
+	poolSnapshotFn    func() []control.WorkerView
+	cacheStatusFn     func(ctx context.Context) *control.CacheStatus
+	kickFn            func(ctx context.Context) (control.ReconcileResult, error)
+	subscribeFn       func() (<-chan events.Event, func())
+	subscribeLogsFn   func(filter logbus.Filter) (<-chan logbus.Record, func())
+	logHistoryFn      func(n int, filter logbus.Filter) []logbus.Record
+	healthCall        int
+	poolSnapshotCall  int
+	cacheStatusCall   int
+	kickCall          int
+	subscribeCall     int
+	subscribeLogsCall int
+	logHistoryCall    int
 }
 
 // SetHealth installs the response for subsequent Health calls.
@@ -144,6 +149,60 @@ func (b *Backend) SubscribeCalls() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.subscribeCall
+}
+
+// SetSubscribeLogs installs the response for subsequent SubscribeLogs calls.
+func (b *Backend) SetSubscribeLogs(fn func(filter logbus.Filter) (<-chan logbus.Record, func())) {
+	b.mu.Lock()
+	b.subscribeLogsFn = fn
+	b.mu.Unlock()
+}
+
+// SubscribeLogs implements control.Backend.
+func (b *Backend) SubscribeLogs(filter logbus.Filter) (<-chan logbus.Record, func()) {
+	b.mu.Lock()
+	fn := b.subscribeLogsFn
+	b.subscribeLogsCall++
+	b.mu.Unlock()
+	if fn == nil {
+		ch := make(chan logbus.Record)
+		close(ch)
+		return ch, func() {}
+	}
+	return fn(filter)
+}
+
+// SubscribeLogsCalls returns the number of times SubscribeLogs has been invoked.
+func (b *Backend) SubscribeLogsCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.subscribeLogsCall
+}
+
+// SetLogHistory installs the response for subsequent LogHistory calls.
+func (b *Backend) SetLogHistory(fn func(n int, filter logbus.Filter) []logbus.Record) {
+	b.mu.Lock()
+	b.logHistoryFn = fn
+	b.mu.Unlock()
+}
+
+// LogHistory implements control.Backend.
+func (b *Backend) LogHistory(n int, filter logbus.Filter) []logbus.Record {
+	b.mu.Lock()
+	fn := b.logHistoryFn
+	b.logHistoryCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	return fn(n, filter)
+}
+
+// LogHistoryCalls returns the number of times LogHistory has been invoked.
+func (b *Backend) LogHistoryCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.logHistoryCall
 }
 
 // HealthCalls returns the number of times Health has been invoked.

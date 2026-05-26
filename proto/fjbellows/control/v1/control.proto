@@ -45,6 +45,23 @@ service ControlService {
   // on a quiet daemon (Connect server-streaming only writes response
   // headers on the first Send). Clients should skip it.
   rpc StreamEvents(StreamEventsRequest) returns (stream StreamEventsResponse);
+
+  // StreamLogs streams structured slog records from the daemon. The first
+  // message is a stream_opened sentinel (zero `at`, empty `message`,
+  // level=""); clients should skip it (same convention as StreamEvents).
+  //
+  // Optional filters scope the stream to one worker (instance_id, matched
+  // against attrs["id"]) or one job (handle, matched against
+  // attrs["handle"]). Empty fields mean no filter on that dimension; an
+  // empty request streams every record.
+  //
+  // On connect, the daemon replays up to history_lines previous records
+  // (capped at the daemon's ring-buffer capacity), then streams live
+  // records as they happen. history_lines=0 means "no replay, only new".
+  //
+  // The level field is the slog level's String() form
+  // ("DEBUG"/"INFO"/"WARN"/"ERROR").
+  rpc StreamLogs(StreamLogsRequest) returns (stream StreamLogsResponse);
 }
 
 message HealthRequest {}
@@ -164,4 +181,36 @@ message StreamEventsResponse {
   // The set of keys depends on type; documented inline in the orchestrator
   // emit sites.
   map<string, string> attrs = 3;
+}
+
+message StreamLogsRequest {
+  // instance_id scopes the stream to records whose attrs["id"] matches.
+  // Empty = no filter on this dimension.
+  string instance_id = 1;
+
+  // handle scopes the stream to records whose attrs["handle"] matches.
+  // Empty = no filter on this dimension.
+  string handle = 2;
+
+  // history_lines is the number of previously buffered records to replay
+  // before live streaming begins. 0 = no replay. The daemon caps this at
+  // its ring-buffer capacity.
+  int32 history_lines = 3;
+}
+
+message StreamLogsResponse {
+  // at is when the record was emitted, in the daemon's clock.
+  google.protobuf.Timestamp at = 1;
+
+  // level is the slog level's String() form: "DEBUG", "INFO", "WARN", or
+  // "ERROR". Empty on the stream_opened sentinel.
+  string level = 2;
+
+  // message is the slog record's message.
+  string message = 3;
+
+  // attrs holds the slog record's flattened attributes. Group attributes
+  // are flattened with dot-separated keys (`group.key`); non-string scalar
+  // values use slog.Value.String().
+  map<string, string> attrs = 4;
 }

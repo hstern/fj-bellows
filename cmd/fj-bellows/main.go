@@ -21,6 +21,7 @@ import (
 	"github.com/hstern/fj-bellows/internal/config"
 	"github.com/hstern/fj-bellows/internal/control"
 	"github.com/hstern/fj-bellows/internal/control/events"
+	"github.com/hstern/fj-bellows/internal/control/logbus"
 	"github.com/hstern/fj-bellows/internal/forgejo"
 	"github.com/hstern/fj-bellows/internal/orchestrator"
 	"github.com/hstern/fj-bellows/internal/provider"
@@ -41,7 +42,13 @@ func main() {
 	controlTokenFile := flag.String("control-token-file", "", "bearer-token file for the control plane (required for non-loopback binds; mode 0600)")
 	flag.Parse()
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Wrap the stderr text handler with a logbus tee so the control plane's
+	// StreamLogs RPC can fan structured records out to subscribers without
+	// disturbing stderr output. The bus also keeps a ring buffer of the
+	// most recent records so a new operator can replay history.
+	logBus := logbus.New()
+	textHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
+	log := slog.New(logbus.NewHandler(textHandler, logBus))
 
 	opts := runOpts{
 		configPath:       *configPath,
@@ -53,7 +60,7 @@ func main() {
 		controlListen:    *controlListen,
 		controlTokenFile: *controlTokenFile,
 	}
-	if err := run(opts, log); err != nil {
+	if err := run(opts, log, logBus); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
@@ -70,7 +77,7 @@ type runOpts struct {
 	controlTokenFile string
 }
 
-func run(opts runOpts, log *slog.Logger) error {
+func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 	cfg, err := config.Load(opts.configPath)
 	if err != nil {
 		return err
@@ -154,7 +161,7 @@ func run(opts runOpts, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := startControlPlane(ctx, opts.controlListen, opts.controlTokenFile, orch, prov, log); err != nil {
+	if err := startControlPlane(ctx, opts.controlListen, opts.controlTokenFile, orch, prov, logBus, log); err != nil {
 		return err
 	}
 
@@ -175,7 +182,7 @@ func run(opts runOpts, log *slog.Logger) error {
 // stay open. Returns an error only on bad operator config (missing token
 // file, unreadable token, or a non-loopback bind with no token) — once it
 // successfully arms the goroutine, runtime listen errors are logged.
-func startControlPlane(ctx context.Context, listen, tokenFile string, orch *orchestrator.Orchestrator, prov provider.Provider, log *slog.Logger) error {
+func startControlPlane(ctx context.Context, listen, tokenFile string, orch *orchestrator.Orchestrator, prov provider.Provider, logBus *logbus.Bus, log *slog.Logger) error {
 	if listen == "" {
 		return nil
 	}
@@ -191,7 +198,7 @@ func startControlPlane(ctx context.Context, listen, tokenFile string, orch *orch
 		return fmt.Errorf("control-listen %q is not loopback but -control-token-file is unset; "+
 			"either bind 127.0.0.1 or provide a token file", listen)
 	}
-	srv := control.NewServer(listen, controlBackend{o: orch, prov: prov}, log,
+	srv := control.NewServer(listen, controlBackend{o: orch, prov: prov, logBus: logBus}, log,
 		control.WithBearerToken(token))
 	go func() {
 		if err := srv.Run(ctx); err != nil {
@@ -205,8 +212,9 @@ func startControlPlane(ctx context.Context, listen, tokenFile string, orch *orch
 // for cache-aware reports) to control.Backend so the orchestrator package
 // stays free of generated-protobuf coupling.
 type controlBackend struct {
-	o    *orchestrator.Orchestrator
-	prov provider.Provider
+	o      *orchestrator.Orchestrator
+	prov   provider.Provider
+	logBus *logbus.Bus
 }
 
 func (b controlBackend) Health(ctx context.Context) control.HealthStatus {
@@ -252,6 +260,14 @@ func (b controlBackend) Kick(ctx context.Context) (control.ReconcileResult, erro
 
 func (b controlBackend) Subscribe() (<-chan events.Event, func()) {
 	return b.o.Subscribe()
+}
+
+func (b controlBackend) SubscribeLogs(filter logbus.Filter) (<-chan logbus.Record, func()) {
+	return b.logBus.SubscribeFiltered(filter)
+}
+
+func (b controlBackend) LogHistory(n int, filter logbus.Filter) []logbus.Record {
+	return b.logBus.History(n, filter)
 }
 
 // CacheStatus walks the provider for cache info if it supports it (Linode
