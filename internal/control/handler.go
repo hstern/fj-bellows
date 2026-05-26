@@ -10,7 +10,13 @@ import (
 
 	controlv1 "github.com/hstern/fj-bellows/gen/fjbellows/control/v1"
 	"github.com/hstern/fj-bellows/gen/fjbellows/control/v1/controlv1connect"
+	"github.com/hstern/fj-bellows/internal/control/logbus"
 )
+
+// defaultLogHistoryLines is the replay-on-connect size when a StreamLogs
+// client doesn't ask for a specific count. A few hundred lines is enough
+// for "what just happened?" without dumping the whole ring buffer.
+const defaultLogHistoryLines = 100
 
 // apiHandler adapts a Backend to the generated ConnectRPC service surface.
 // Keeping protobuf imports in this file (and not in the orchestrator package)
@@ -129,6 +135,72 @@ func (h *apiHandler) StreamEvents(
 				return err
 			}
 		}
+	}
+}
+
+func (h *apiHandler) StreamLogs(
+	ctx context.Context,
+	req *connect.Request[controlv1.StreamLogsRequest],
+	stream *connect.ServerStream[controlv1.StreamLogsResponse],
+) error {
+	filter := logbus.Filter{
+		InstanceID: req.Msg.InstanceId,
+		Handle:     req.Msg.Handle,
+	}
+	// Pick replay size: explicit request wins (capped at ring capacity);
+	// otherwise replay defaultLogHistoryLines.
+	history := int(req.Msg.HistoryLines)
+	history = max(history, 0)
+	if req.Msg.HistoryLines == 0 {
+		history = defaultLogHistoryLines
+	}
+	history = min(history, logbus.HistoryCapacity)
+
+	// Subscribe BEFORE fetching history so any record published between
+	// the history snapshot and the first Recv lands in the subscriber
+	// buffer rather than being dropped.
+	ch, cancel := h.b.SubscribeLogs(filter)
+	defer cancel()
+
+	// Sentinel: makes the open call return immediately on a quiet daemon
+	// (Connect server-streaming only writes response headers on first
+	// Send). Same convention as StreamEvents.
+	if err := stream.Send(&controlv1.StreamLogsResponse{
+		At: tsOrNil(time.Now()),
+	}); err != nil {
+		return err
+	}
+
+	if history > 0 {
+		for _, r := range h.b.LogHistory(history, filter) {
+			if err := stream.Send(logRecordToResponse(r)); err != nil {
+				return err
+			}
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case r, ok := <-ch:
+			if !ok {
+				return connect.NewError(connect.CodeResourceExhausted,
+					errors.New("stream subscriber dropped: client too slow"))
+			}
+			if err := stream.Send(logRecordToResponse(r)); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func logRecordToResponse(r logbus.Record) *controlv1.StreamLogsResponse {
+	return &controlv1.StreamLogsResponse{
+		At:      tsOrNil(r.At),
+		Level:   r.Level.String(),
+		Message: r.Message,
+		Attrs:   r.Attrs,
 	}
 }
 

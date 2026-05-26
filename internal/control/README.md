@@ -28,8 +28,9 @@ shim. Subsequent PRs widen the proto + handler with:
 | PR3 | `GetCache` |
 | PR4 | `Reconcile` (unary), `StreamEvents` (server-streaming) |
 | PR5 | plain `/metrics` |
+| FJB-25 | `StreamLogs` (server-streaming structured slog records) |
 
-Deferred to follow-up tickets: logs streaming, force-reap/force-provision,
+Deferred to follow-up tickets: force-reap/force-provision,
 pause/resume reconciler, config dump+reload, SSH-proxy, billing-window view,
 provider-passthrough, the `fjbctl` companion CLI. v1 leans on
 loopback-binding as the default auth boundary; the bearer-token interceptor
@@ -90,6 +91,54 @@ The plain HTTP shims are even simpler:
 ```sh
 curl http://127.0.0.1:9876/healthz
 ```
+
+For the server-streaming RPCs (`StreamEvents`, `StreamLogs`), the Connect
+protocol uses HTTP/1.1 chunked transfer-encoding so plain `curl` works:
+
+```sh
+curl -N -sS -X POST \
+  -H 'content-type: application/json' \
+  -d '{"history_lines": 50, "instance_id": "vm-1"}' \
+  http://127.0.0.1:9876/fjbellows.control.v1.ControlService/StreamLogs
+```
+
+## StreamLogs (FJB-25)
+
+`StreamLogs` is a server-streaming RPC that fans the daemon's structured
+slog records out to operator clients. Implementation lives in the sibling
+[`logbus/`](logbus/README.md) package: the daemon's `slog.Logger` is built
+around a `logbus.Handler` wrapper, so every `log.Info(...)` / `log.Warn(...)`
+the orchestrator emits reaches both stderr (the wrapped text handler) AND
+the bus.
+
+Request shape:
+
+- `instance_id` (optional): only deliver records whose `attrs["id"]`
+  matches. Empty means no filter on this dimension.
+- `handle` (optional): only deliver records whose `attrs["handle"]`
+  matches. Empty means no filter on this dimension.
+- `history_lines` (optional): number of recently-buffered records to
+  replay before live streaming. `0` (the default) replays 100 lines; the
+  daemon caps the replay at the bus's ring-buffer capacity
+  (`logbus.HistoryCapacity = 1000`). To opt out of replay entirely, send a
+  negative value (clamped to 0 → no replay).
+
+Stream shape:
+
+1. **Sentinel** — first message has empty `level`/`message` and a `now`
+   timestamp. Connect server-streaming only writes response headers on
+   the first Send, so the sentinel makes the client's `Open` return
+   immediately even on a quiet daemon. Clients should skip it (same
+   convention as StreamEvents).
+2. **History replay** — up to `history_lines` previously-buffered records
+   in chronological order.
+3. **Live** — records as the daemon emits them, until the client
+   disconnects or the bus drops the subscriber for slow consumption (in
+   which case the server returns `CodeResourceExhausted`).
+
+Each `StreamLogsResponse` carries `at`, `level` (slog's String form:
+`"DEBUG"` / `"INFO"` / `"WARN"` / `"ERROR"`), `message`, and an `attrs`
+map.
 
 ## Backend abstraction
 
