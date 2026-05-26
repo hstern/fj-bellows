@@ -81,6 +81,16 @@ type Backend interface {
 	// field" — the daemon refuses to partially apply and the caller maps
 	// the error to CodeFailedPrecondition.
 	ReloadConfig(ctx context.Context) (changedFields []string, err error)
+
+	// ExecOnWorker runs command on the worker identified by instanceID
+	// via the orchestrator's existing SSH dispatcher. Returns the
+	// captured stdout/stderr (truncated per the orchestrator's bound,
+	// with the original byte counts carried in truncatedStdout /
+	// truncatedStderr), the remote exit code, and any orchestrator-level
+	// error (pool miss, wrong state, dispatcher mismatch, SSH failure).
+	// A remote non-zero exit is NOT an error — it lands in exitCode.
+	// Audit-logged with the caller identity threaded through ctx.
+	ExecOnWorker(ctx context.Context, instanceID, command string) (stdout, stderr []byte, exitCode int32, truncatedStdout, truncatedStderr int64, err error)
 }
 
 // ReconcileResult is the per-tick summary returned by Kick. Counts are

@@ -323,6 +323,58 @@ func (h *apiHandler) Resume(
 	return connect.NewResponse(&controlv1.ResumeResponse{}), nil
 }
 
+// execCommandLimit mirrors orchestrator.execCommandLimit (64 KiB). Kept
+// here as a local constant so the handler can reject early without
+// reaching for the orchestrator package's internal limits.
+const execCommandLimit = 64 * 1024
+
+func (h *apiHandler) ExecOnWorker(
+	ctx context.Context,
+	req *connect.Request[controlv1.ExecOnWorkerRequest],
+) (*connect.Response[controlv1.ExecOnWorkerResponse], error) {
+	if !h.enableWrites {
+		return nil, connect.NewError(connect.CodePermissionDenied, errWritesDisabled)
+	}
+	id := req.Msg.InstanceId
+	if id == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("instance_id is required"))
+	}
+	cmd := req.Msg.Command
+	if cmd == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("command is required"))
+	}
+	if len(cmd) > execCommandLimit {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("command too long"))
+	}
+	ctx = orchestrator.WithAuditCaller(ctx, auditCaller(req))
+	stdout, stderr, exitCode, truncStdout, truncStderr, err := h.b.ExecOnWorker(ctx, id, cmd)
+	if err != nil {
+		// "not in pool" / "vanished from pool" → CodeNotFound.
+		// "exec is not supported" (docker provider) → CodeUnimplemented.
+		// "instance in state ... exec requires idle or busy" →
+		// CodeFailedPrecondition (caller named a real but transitional node).
+		// Everything else (SSH dial, transport, ...) → CodeInternal.
+		if errors.Is(err, orchestrator.ErrExecNotSupported) {
+			return nil, connect.NewError(connect.CodeUnimplemented, err)
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "not in pool") || strings.Contains(msg, "vanished from pool") {
+			return nil, connect.NewError(connect.CodeNotFound, err)
+		}
+		if strings.Contains(msg, "exec requires idle or busy") {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+		}
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&controlv1.ExecOnWorkerResponse{
+		Stdout:          stdout,
+		Stderr:          stderr,
+		ExitCode:        exitCode,
+		TruncatedStdout: truncStdout,
+		TruncatedStderr: truncStderr,
+	}), nil
+}
+
 // auditCaller builds a short, log-safe identity string from the Connect
 // request: the peer address always, plus a "token" marker when the
 // Authorization header carries a bearer token (we don't decode it — the

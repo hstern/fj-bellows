@@ -32,10 +32,11 @@ shim. Subsequent PRs widen the proto + handler with:
 | FJB-26 | `ForceReap`, `ForceProvision` (admin verbs; gated by `-enable-control-writes`) |
 | FJB-27 | `Pause`, `Resume` (reconciler-quiesce verbs; same gate) |
 | FJB-28 | `GetConfig` (read-only redacted YAML dump), `ReloadConfig` (hot-swap a subset; gated by `-enable-control-writes`) |
+| FJB-29 | `ExecOnWorker` (one-shot debug exec over the orchestrator's SSH path) |
 | FJB-30 | `ListWorkers` billing-window fields (`paid_hour_end_at`, `reap_eligible_at`, `billing_model`) |
 
-Deferred to follow-up tickets: SSH-proxy, provider-passthrough. v1 leans
-on loopback-binding as the default auth boundary; the bearer-token
+Deferred to follow-up tickets: provider-passthrough. v1 leans on
+loopback-binding as the default auth boundary; the bearer-token
 interceptor (FJB-33, below) is what binds a non-loopback deployment.
 
 ## Auth on non-loopback binds (FJB-33)
@@ -176,6 +177,49 @@ resumed caller="peer=127.0.0.1:54312"
 A `reconciler_paused` / `reconciler_resumed` event is also published on the
 `StreamEvents` stream on each real transition (idempotent re-pauses /
 re-resumes are silent on both the log and the event stream).
+
+## ExecOnWorker (FJB-29)
+
+`ExecOnWorker(instance_id, command)` runs a single shell command on the
+named worker over the orchestrator's existing SSH dispatcher. The
+orchestrator already holds every worker's host key and signer, so the
+RPC needs no new credentials — it's a thin operator convenience for
+"poke at this specific VM" without rediscovering its address + key
+file.
+
+- Gated by `-enable-control-writes`; an exec is a write-equivalent
+  verb. `CodePermissionDenied` when the flag is unset.
+- The command is `sh -c <command>` on the worker; `shellQuote` keeps
+  attacker-influenced bytes from breaking out of the quoting. No
+  interactive TTY.
+- Command size is capped at 64 KiB; oversize requests are
+  `CodeInvalidArgument`.
+- Each output stream (stdout, stderr) is truncated to 1 MiB. The
+  response carries `truncated_stdout` / `truncated_stderr` with the
+  original byte count when truncation happened, so the operator can
+  tell when output was clipped (default 0 means "not truncated").
+- A non-zero remote exit is NOT an error — it lands in `exit_code` so
+  the operator sees the same signal as a local shell.
+- The orchestrator refuses to exec on a `provisioning` (SSH may not be
+  up yet) or `removing` (Destroy in flight) worker —
+  `CodeFailedPrecondition`. `idle` and `busy` are both fine; an exec on
+  a busy worker is an out-of-band debug poke and does not interfere
+  with the dispatch session.
+- Unknown instance → `CodeNotFound`.
+- SSH dial / transport failures → `CodeInternal`.
+- The docker provider has no SSH path; calling `ExecOnWorker` against
+  it returns `CodeUnimplemented` (a docker-exec variant is a separate
+  future RPC, not handled here — sorry).
+- Every call emits an `Info` audit line carrying the caller identity
+  threaded from the handler:
+
+```
+exec-on-worker requested id=100 caller="peer=10.0.0.5:54312 token"
+```
+
+The session is bound by the caller's context deadline; if none is
+set, the daemon imposes a 60-second default so a hung remote command
+can't pin the dispatch goroutine forever.
 
 ## Wire format for ad-hoc / e2e clients
 

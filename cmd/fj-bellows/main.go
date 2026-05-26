@@ -401,6 +401,17 @@ func (b *controlBackend) ReloadConfig(_ context.Context) ([]string, error) {
 	return changed, nil
 }
 
+// ExecOnWorker forwards to the orchestrator and unpacks ExecResult into
+// the flat shape the control.Backend interface expects (so the control
+// package stays free of orchestrator-side types).
+func (b *controlBackend) ExecOnWorker(ctx context.Context, instanceID, command string) ([]byte, []byte, int32, int64, int64, error) {
+	r, err := b.o.ExecOnWorker(ctx, instanceID, command)
+	if err != nil {
+		return nil, nil, 0, 0, 0, err
+	}
+	return r.Stdout, r.Stderr, r.ExitCode, r.TruncatedStdout, r.TruncatedStderr, nil
+}
+
 // CacheStatus walks the provider for cache info if it supports it (Linode
 // does; docker doesn't). The type-assertion keeps the orchestrator package
 // free of provider-specific imports.
