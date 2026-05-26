@@ -59,12 +59,15 @@ func (h *apiHandler) ListWorkers(
 	workers := make([]*controlv1.Worker, 0, len(view))
 	for _, w := range view {
 		workers = append(workers, &controlv1.Worker{
-			InstanceId: w.InstanceID,
-			State:      w.State,
-			Ip:         w.IP,
-			CreatedAt:  tsOrNil(w.CreatedAt),
-			LastBusy:   tsOrNil(w.LastBusy),
-			CurrentJob: w.CurrentJob,
+			InstanceId:     w.InstanceID,
+			State:          w.State,
+			Ip:             w.IP,
+			CreatedAt:      tsOrNil(w.CreatedAt),
+			LastBusy:       tsOrNil(w.LastBusy),
+			CurrentJob:     w.CurrentJob,
+			PaidHourEndAt:  tsOrNil(w.PaidHourEndAt),
+			ReapEligibleAt: tsOrNil(w.ReapEligibleAt),
+			BillingModel:   w.BillingModel,
 		})
 	}
 	return connect.NewResponse(&controlv1.ListWorkersResponse{Workers: workers}), nil

@@ -259,12 +259,15 @@ func (b controlBackend) PoolSnapshot() []control.WorkerView {
 	out := make([]control.WorkerView, 0, len(in))
 	for _, w := range in {
 		out = append(out, control.WorkerView{
-			InstanceID: w.InstanceID,
-			State:      w.State,
-			IP:         w.IP,
-			CreatedAt:  w.CreatedAt,
-			LastBusy:   w.LastBusy,
-			CurrentJob: w.CurrentJob,
+			InstanceID:     w.InstanceID,
+			State:          w.State,
+			IP:             w.IP,
+			CreatedAt:      w.CreatedAt,
+			LastBusy:       w.LastBusy,
+			CurrentJob:     w.CurrentJob,
+			PaidHourEndAt:  w.PaidHourEndAt,
+			ReapEligibleAt: w.ReapEligibleAt,
+			BillingModel:   w.BillingModel,
 		})
 	}
 	return out
