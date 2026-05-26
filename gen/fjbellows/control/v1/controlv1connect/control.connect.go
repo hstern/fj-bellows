@@ -52,6 +52,9 @@ const (
 	// ControlServiceStreamEventsProcedure is the fully-qualified name of the ControlService's
 	// StreamEvents RPC.
 	ControlServiceStreamEventsProcedure = "/fjbellows.control.v1.ControlService/StreamEvents"
+	// ControlServiceExecOnWorkerProcedure is the fully-qualified name of the ControlService's
+	// ExecOnWorker RPC.
+	ControlServiceExecOnWorkerProcedure = "/fjbellows.control.v1.ControlService/ExecOnWorker"
 	// ControlServiceStreamLogsProcedure is the fully-qualified name of the ControlService's StreamLogs
 	// RPC.
 	ControlServiceStreamLogsProcedure = "/fjbellows.control.v1.ControlService/StreamLogs"
@@ -106,6 +109,12 @@ type ControlServiceClient interface {
 	// on a quiet daemon (Connect server-streaming only writes response
 	// headers on the first Send). Clients should skip it.
 	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error)
+	// ExecOnWorker runs a single shell command on the worker identified by
+	// instance_id, returning stdout/stderr/exit code. Uses the orchestrator's
+	// existing SSH dispatcher; no new credentials. Audit-logged. Bounded
+	// command size, bounded output size — see the field comments. Gated by
+	// the daemon's -enable-control-writes flag.
+	ExecOnWorker(context.Context, *connect.Request[v1.ExecOnWorkerRequest]) (*connect.Response[v1.ExecOnWorkerResponse], error)
 	// StreamLogs streams structured slog records from the daemon. The first
 	// message is a stream_opened sentinel (zero `at`, empty `message`,
 	// level=""); clients should skip it (same convention as StreamEvents).
@@ -177,6 +186,12 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
 			connect.WithClientOptions(opts...),
 		),
+		execOnWorker: connect.NewClient[v1.ExecOnWorkerRequest, v1.ExecOnWorkerResponse](
+			httpClient,
+			baseURL+ControlServiceExecOnWorkerProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("ExecOnWorker")),
+			connect.WithClientOptions(opts...),
+		),
 		streamLogs: connect.NewClient[v1.StreamLogsRequest, v1.StreamLogsResponse](
 			httpClient,
 			baseURL+ControlServiceStreamLogsProcedure,
@@ -195,6 +210,7 @@ type controlServiceClient struct {
 	forceReap      *connect.Client[v1.ForceReapRequest, v1.ForceReapResponse]
 	forceProvision *connect.Client[v1.ForceProvisionRequest, v1.ForceProvisionResponse]
 	streamEvents   *connect.Client[v1.StreamEventsRequest, v1.StreamEventsResponse]
+	execOnWorker   *connect.Client[v1.ExecOnWorkerRequest, v1.ExecOnWorkerResponse]
 	streamLogs     *connect.Client[v1.StreamLogsRequest, v1.StreamLogsResponse]
 }
 
@@ -231,6 +247,11 @@ func (c *controlServiceClient) ForceProvision(ctx context.Context, req *connect.
 // StreamEvents calls fjbellows.control.v1.ControlService.StreamEvents.
 func (c *controlServiceClient) StreamEvents(ctx context.Context, req *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error) {
 	return c.streamEvents.CallServerStream(ctx, req)
+}
+
+// ExecOnWorker calls fjbellows.control.v1.ControlService.ExecOnWorker.
+func (c *controlServiceClient) ExecOnWorker(ctx context.Context, req *connect.Request[v1.ExecOnWorkerRequest]) (*connect.Response[v1.ExecOnWorkerResponse], error) {
+	return c.execOnWorker.CallUnary(ctx, req)
 }
 
 // StreamLogs calls fjbellows.control.v1.ControlService.StreamLogs.
@@ -287,6 +308,12 @@ type ControlServiceHandler interface {
 	// on a quiet daemon (Connect server-streaming only writes response
 	// headers on the first Send). Clients should skip it.
 	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error
+	// ExecOnWorker runs a single shell command on the worker identified by
+	// instance_id, returning stdout/stderr/exit code. Uses the orchestrator's
+	// existing SSH dispatcher; no new credentials. Audit-logged. Bounded
+	// command size, bounded output size — see the field comments. Gated by
+	// the daemon's -enable-control-writes flag.
+	ExecOnWorker(context.Context, *connect.Request[v1.ExecOnWorkerRequest]) (*connect.Response[v1.ExecOnWorkerResponse], error)
 	// StreamLogs streams structured slog records from the daemon. The first
 	// message is a stream_opened sentinel (zero `at`, empty `message`,
 	// level=""); clients should skip it (same convention as StreamEvents).
@@ -354,6 +381,12 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceExecOnWorkerHandler := connect.NewUnaryHandler(
+		ControlServiceExecOnWorkerProcedure,
+		svc.ExecOnWorker,
+		connect.WithSchema(controlServiceMethods.ByName("ExecOnWorker")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlServiceStreamLogsHandler := connect.NewServerStreamHandler(
 		ControlServiceStreamLogsProcedure,
 		svc.StreamLogs,
@@ -376,6 +409,8 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 			controlServiceForceProvisionHandler.ServeHTTP(w, r)
 		case ControlServiceStreamEventsProcedure:
 			controlServiceStreamEventsHandler.ServeHTTP(w, r)
+		case ControlServiceExecOnWorkerProcedure:
+			controlServiceExecOnWorkerHandler.ServeHTTP(w, r)
 		case ControlServiceStreamLogsProcedure:
 			controlServiceStreamLogsHandler.ServeHTTP(w, r)
 		default:
@@ -413,6 +448,10 @@ func (UnimplementedControlServiceHandler) ForceProvision(context.Context, *conne
 
 func (UnimplementedControlServiceHandler) StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.StreamEvents is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) ExecOnWorker(context.Context, *connect.Request[v1.ExecOnWorkerRequest]) (*connect.Response[v1.ExecOnWorkerResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ExecOnWorker is not implemented"))
 }
 
 func (UnimplementedControlServiceHandler) StreamLogs(context.Context, *connect.Request[v1.StreamLogsRequest], *connect.ServerStream[v1.StreamLogsResponse]) error {

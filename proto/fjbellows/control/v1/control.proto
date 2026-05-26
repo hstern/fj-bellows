@@ -64,6 +64,13 @@ service ControlService {
   // headers on the first Send). Clients should skip it.
   rpc StreamEvents(StreamEventsRequest) returns (stream StreamEventsResponse);
 
+  // ExecOnWorker runs a single shell command on the worker identified by
+  // instance_id, returning stdout/stderr/exit code. Uses the orchestrator's
+  // existing SSH dispatcher; no new credentials. Audit-logged. Bounded
+  // command size, bounded output size — see the field comments. Gated by
+  // the daemon's -enable-control-writes flag.
+  rpc ExecOnWorker(ExecOnWorkerRequest) returns (ExecOnWorkerResponse);
+
   // StreamLogs streams structured slog records from the daemon. The first
   // message is a stream_opened sentinel (zero `at`, empty `message`,
   // level=""); clients should skip it (same convention as StreamEvents).
@@ -204,6 +211,29 @@ message ForceProvisionResponse {
   // worker. Set on success; the worker may still be in StateProvisioning
   // when this returns (WaitReady runs asynchronously).
   string instance_id = 1;
+}
+
+message ExecOnWorkerRequest {
+  // instance_id identifies the worker to exec into. Must be present in
+  // the pool and in state idle or busy. Workers in provisioning (SSH may
+  // not be up yet) or removing (Destroy is in flight) are rejected.
+  string instance_id = 1;
+
+  // command is the shell command line to run. Run with `sh -c <command>`
+  // on the worker. Capped at 64 KiB; longer requests are rejected with
+  // CodeInvalidArgument.
+  string command = 2;
+}
+
+message ExecOnWorkerResponse {
+  // stdout/stderr are truncated to 1 MiB each. truncated_stdout /
+  // truncated_stderr report the original byte counts when truncation
+  // happened so the operator knows there was more.
+  bytes stdout = 1;
+  bytes stderr = 2;
+  int32 exit_code = 3;
+  int64 truncated_stdout = 4;
+  int64 truncated_stderr = 5;
 }
 
 message StreamEventsRequest {

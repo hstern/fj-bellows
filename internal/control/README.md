@@ -30,6 +30,7 @@ shim. Subsequent PRs widen the proto + handler with:
 | PR5 | plain `/metrics` |
 | FJB-25 | `StreamLogs` (server-streaming structured slog records) |
 | FJB-26 | `ForceReap`, `ForceProvision` (admin verbs; gated by `-enable-control-writes`) |
+| FJB-29 | `ExecOnWorker` (one-shot debug exec over the orchestrator's SSH path) |
 
 Deferred to follow-up tickets: pause/resume reconciler, config dump+reload,
 SSH-proxy, billing-window view, provider-passthrough. v1 leans on
@@ -136,6 +137,49 @@ The bearer-token gate and the writes gate are independent: a non-loopback
 deployment that wants read-only mirror access (Health, ListWorkers,
 GetCache, Reconcile, StreamEvents) over tailscale can leave
 `-enable-control-writes` off and still hand out the token.
+
+## ExecOnWorker (FJB-29)
+
+`ExecOnWorker(instance_id, command)` runs a single shell command on the
+named worker over the orchestrator's existing SSH dispatcher. The
+orchestrator already holds every worker's host key and signer, so the
+RPC needs no new credentials — it's a thin operator convenience for
+"poke at this specific VM" without rediscovering its address + key
+file.
+
+- Gated by `-enable-control-writes`; an exec is a write-equivalent
+  verb. `CodePermissionDenied` when the flag is unset.
+- The command is `sh -c <command>` on the worker; `shellQuote` keeps
+  attacker-influenced bytes from breaking out of the quoting. No
+  interactive TTY.
+- Command size is capped at 64 KiB; oversize requests are
+  `CodeInvalidArgument`.
+- Each output stream (stdout, stderr) is truncated to 1 MiB. The
+  response carries `truncated_stdout` / `truncated_stderr` with the
+  original byte count when truncation happened, so the operator can
+  tell when output was clipped (default 0 means "not truncated").
+- A non-zero remote exit is NOT an error — it lands in `exit_code` so
+  the operator sees the same signal as a local shell.
+- The orchestrator refuses to exec on a `provisioning` (SSH may not be
+  up yet) or `removing` (Destroy in flight) worker —
+  `CodeFailedPrecondition`. `idle` and `busy` are both fine; an exec on
+  a busy worker is an out-of-band debug poke and does not interfere
+  with the dispatch session.
+- Unknown instance → `CodeNotFound`.
+- SSH dial / transport failures → `CodeInternal`.
+- The docker provider has no SSH path; calling `ExecOnWorker` against
+  it returns `CodeUnimplemented` (a docker-exec variant is a separate
+  future RPC, not handled here — sorry).
+- Every call emits an `Info` audit line carrying the caller identity
+  threaded from the handler:
+
+```
+exec-on-worker requested id=100 caller="peer=10.0.0.5:54312 token"
+```
+
+The session is bound by the caller's context deadline; if none is
+set, the daemon imposes a 60-second default so a hung remote command
+can't pin the dispatch goroutine forever.
 
 ## Wire format for ad-hoc / e2e clients
 

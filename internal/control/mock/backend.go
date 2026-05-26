@@ -26,6 +26,7 @@ type Backend struct {
 	logHistoryFn       func(n int, filter logbus.Filter) []logbus.Record
 	forceReapFn        func(ctx context.Context, instanceID string) error
 	forceProvisionFn   func(ctx context.Context) (string, error)
+	execOnWorkerFn     func(ctx context.Context, instanceID, command string) ([]byte, []byte, int32, int64, int64, error)
 	healthCall         int
 	poolSnapshotCall   int
 	cacheStatusCall    int
@@ -35,6 +36,7 @@ type Backend struct {
 	logHistoryCall     int
 	forceReapCall      int
 	forceProvisionCall int
+	execOnWorkerCall   int
 }
 
 // SetHealth installs the response for subsequent Health calls.
@@ -259,6 +261,32 @@ func (b *Backend) ForceProvisionCalls() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.forceProvisionCall
+}
+
+// SetExecOnWorker installs the response for subsequent ExecOnWorker calls.
+func (b *Backend) SetExecOnWorker(fn func(ctx context.Context, instanceID, command string) ([]byte, []byte, int32, int64, int64, error)) {
+	b.mu.Lock()
+	b.execOnWorkerFn = fn
+	b.mu.Unlock()
+}
+
+// ExecOnWorker implements control.Backend.
+func (b *Backend) ExecOnWorker(ctx context.Context, instanceID, command string) ([]byte, []byte, int32, int64, int64, error) {
+	b.mu.Lock()
+	fn := b.execOnWorkerFn
+	b.execOnWorkerCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return nil, nil, 0, 0, 0, nil
+	}
+	return fn(ctx, instanceID, command)
+}
+
+// ExecOnWorkerCalls returns the number of times ExecOnWorker has been invoked.
+func (b *Backend) ExecOnWorkerCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.execOnWorkerCall
 }
 
 // HealthCalls returns the number of times Health has been invoked.
