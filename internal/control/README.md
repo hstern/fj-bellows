@@ -30,6 +30,7 @@ shim. Subsequent PRs widen the proto + handler with:
 | PR5 | plain `/metrics` |
 | FJB-25 | `StreamLogs` (server-streaming structured slog records) |
 | FJB-26 | `ForceReap`, `ForceProvision` (admin verbs; gated by `-enable-control-writes`) |
+| FJB-28 | `GetConfig` (read-only redacted YAML dump), `ReloadConfig` (hot-swap a subset; gated by `-enable-control-writes`) |
 
 Deferred to follow-up tickets: pause/resume reconciler, config dump+reload,
 SSH-proxy, billing-window view, provider-passthrough. v1 leans on
@@ -202,6 +203,76 @@ Stream shape:
 Each `StreamLogsResponse` carries `at`, `level` (slog's String form:
 `"DEBUG"` / `"INFO"` / `"WARN"` / `"ERROR"`), `message`, and an `attrs`
 map.
+
+## GetConfig and ReloadConfig (FJB-28)
+
+`GetConfig` is the operator-side answer to "what is the daemon actually
+using?" It serialises the resolved live config (defaults filled in by
+`config.applyDefaults`, not the raw file as written) as YAML, with secrets
+replaced by `<redacted>`. Always allowed — the response carries no
+credentials and no admin verbs.
+
+Redaction rules (see `internal/config/redact.go`):
+
+- `forgejo.token` → the marker. The field stays present so the operator
+  can confirm "yes, a token is configured."
+- Inside the opaque `provider_config` blob: any mapping key whose
+  case-insensitive name matches one of `token`, `password`, `secret`,
+  `key`, `api_key`, `access_key`, `secret_key` has its scalar value
+  replaced. Matching is *exact*, not substring — `tokenizer` and
+  `secretRecipe` are NOT redacted.
+- `ssh.private_key_file` (the *path*) passes through unchanged. The file
+  it points to is the secret; the path is operator config.
+- Everything else (Forgejo URL, scope, labels, scale, poll, tag, SSH
+  user/port, the rest of `provider_config`) passes through unchanged.
+
+`ReloadConfig` re-reads `config.yaml` from disk, validates it, and hands
+the hot-reloadable subset to the orchestrator. It is gated by
+`-enable-control-writes`. Returns the list of changed dotted-key field
+names (e.g. `["poll.interval", "scale.max"]`); an empty list means the
+re-read parsed to the same values that were already live.
+
+The hot-reloadable subset is exactly the fields the reconcile loop reads
+off `o.cfg` on each tick:
+
+| Field | What it controls |
+| --- | --- |
+| `scale.max` | warm pool ceiling |
+| `forgejo.labels` | label set advertised to workers and used to match jobs |
+| `poll.interval` | reconcile cadence; the ticker is re-created on change |
+| `poll.idle_timeout` | per-second billing teardown timer |
+| `poll.hour_margin` | hourly-rounding teardown (the `:55` rule) |
+| `poll.billing_hour` | hourly-rounding cycle length |
+| `runner_version` | the forgejo-runner version baked into the next cloud-init |
+| `drain_on_shutdown` / `drain_timeout` / `destroy_on_exit` | shutdown behaviour |
+
+Restart-required fields — `ReloadConfig` refuses with
+`CodeFailedPrecondition` and lists the offending fields:
+
+| Field | Why a restart is required |
+| --- | --- |
+| `provider` | the provider client is built once at startup |
+| `provider_config` | re-running `provider.Configure` would re-allocate firewalls/PGs/VPCs |
+| `forgejo.url` / `forgejo.token` / `forgejo.scope` | the Forgejo client wraps these at startup |
+| `tag` | switching tag mid-flight would orphan every live VM the daemon owns |
+| `ssh.*` | the SSH signer is loaded once at startup |
+| billing model | derived from the provider's compile-time `BillingModel()` |
+
+The reload is atomic: if any non-hot field has drifted, no hot field is
+applied either. The operator's edit is rejected wholesale; they fix the
+non-hot field (or accept that they need a restart) and try again. The
+config-path returned by `GetConfig` makes that "fix and retry" loop
+self-evident — the operator knows which file to edit.
+
+When `poll.interval` changes, the orchestrator's `Run` goroutine
+recreates the ticker via a one-slot signal channel so the new cadence
+takes effect on the next tick boundary. This is the only field that
+touches live state outside `o.cfg` — every other hot field is consumed
+by the reconcile loop on the next read of `o.cfg`.
+
+Each `ReloadConfig` call emits an audit log line with the caller
+identity (same convention as the force verbs), so a deployment can trace
+"who reloaded what, when" against the slog stream.
 
 ## Backend abstraction
 

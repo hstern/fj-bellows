@@ -26,6 +26,8 @@ type Backend struct {
 	logHistoryFn       func(n int, filter logbus.Filter) []logbus.Record
 	forceReapFn        func(ctx context.Context, instanceID string) error
 	forceProvisionFn   func(ctx context.Context) (string, error)
+	getConfigFn        func(ctx context.Context) (string, string)
+	reloadConfigFn     func(ctx context.Context) ([]string, error)
 	healthCall         int
 	poolSnapshotCall   int
 	cacheStatusCall    int
@@ -35,6 +37,8 @@ type Backend struct {
 	logHistoryCall     int
 	forceReapCall      int
 	forceProvisionCall int
+	getConfigCall      int
+	reloadConfigCall   int
 }
 
 // SetHealth installs the response for subsequent Health calls.
@@ -259,6 +263,58 @@ func (b *Backend) ForceProvisionCalls() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.forceProvisionCall
+}
+
+// SetGetConfig installs the response for subsequent GetConfig calls.
+func (b *Backend) SetGetConfig(fn func(ctx context.Context) (string, string)) {
+	b.mu.Lock()
+	b.getConfigFn = fn
+	b.mu.Unlock()
+}
+
+// GetConfig implements control.Backend.
+func (b *Backend) GetConfig(ctx context.Context) (string, string) {
+	b.mu.Lock()
+	fn := b.getConfigFn
+	b.getConfigCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return "", ""
+	}
+	return fn(ctx)
+}
+
+// GetConfigCalls returns the number of times GetConfig has been invoked.
+func (b *Backend) GetConfigCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.getConfigCall
+}
+
+// SetReloadConfig installs the response for subsequent ReloadConfig calls.
+func (b *Backend) SetReloadConfig(fn func(ctx context.Context) ([]string, error)) {
+	b.mu.Lock()
+	b.reloadConfigFn = fn
+	b.mu.Unlock()
+}
+
+// ReloadConfig implements control.Backend.
+func (b *Backend) ReloadConfig(ctx context.Context) ([]string, error) {
+	b.mu.Lock()
+	fn := b.reloadConfigFn
+	b.reloadConfigCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return nil, nil
+	}
+	return fn(ctx)
+}
+
+// ReloadConfigCalls returns the number of times ReloadConfig has been invoked.
+func (b *Backend) ReloadConfigCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.reloadConfigCall
 }
 
 // HealthCalls returns the number of times Health has been invoked.

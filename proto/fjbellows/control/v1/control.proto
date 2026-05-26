@@ -64,6 +64,19 @@ service ControlService {
   // headers on the first Send). Clients should skip it.
   rpc StreamEvents(StreamEventsRequest) returns (stream StreamEventsResponse);
 
+  // GetConfig returns the daemon's resolved live config as YAML, with secrets
+  // (forgejo.token, anything inside provider_config that looks like a token/
+  // password/secret/key) redacted. Useful for confirming the running process
+  // parsed config.yaml as the operator intended.
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+
+  // ReloadConfig re-reads config.yaml from disk and hot-swaps the
+  // hot-reloadable subset (poll intervals, scale.max, labels, drain
+  // settings). Returns CodeFailedPrecondition with a clear error if the
+  // new config changes provider, provider_config, forgejo.url/token, or
+  // tag — those require a daemon restart.
+  rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse);
+
   // StreamLogs streams structured slog records from the daemon. The first
   // message is a stream_opened sentinel (zero `at`, empty `message`,
   // level=""); clients should skip it (same convention as StreamEvents).
@@ -219,6 +232,31 @@ message StreamEventsResponse {
   // The set of keys depends on type; documented inline in the orchestrator
   // emit sites.
   map<string, string> attrs = 3;
+}
+
+message GetConfigRequest {}
+
+message GetConfigResponse {
+  // yaml is the daemon's resolved live config rendered as YAML, with
+  // secret-bearing fields replaced by "<redacted>". An operator can
+  // diff this against the on-disk config.yaml to confirm the daemon
+  // parsed it as intended.
+  string yaml = 1;
+
+  // config_path is the filesystem path the daemon originally loaded
+  // (the -config flag's value). Useful when the operator isn't sure
+  // which config the running process is using.
+  string config_path = 2;
+}
+
+message ReloadConfigRequest {}
+
+message ReloadConfigResponse {
+  // changed_fields names every hot-reloadable field whose value differs
+  // from the previously-running config, in dotted-key form
+  // (e.g. "scale.max", "poll.interval", "forgejo.labels"). Empty means
+  // the re-read parsed to the same values that were already live.
+  repeated string changed_fields = 1;
 }
 
 message StreamLogsRequest {

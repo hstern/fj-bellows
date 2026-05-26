@@ -76,6 +76,11 @@ type Orchestrator struct {
 	// the same select.
 	kick chan kickReq
 
+	// pollReset signals the Run goroutine to recreate its ticker with a new
+	// interval. ApplyHotConfig sends the new interval after swapping o.cfg.
+	// Non-blocking; the latest value wins.
+	pollReset chan time.Duration
+
 	wg sync.WaitGroup // tracks in-flight dispatch/provision/teardown goroutines
 
 	mu          sync.Mutex
@@ -114,6 +119,7 @@ func New(cfg Config, prov provider.Provider, jobs JobSource, disp Dispatcher, lo
 		log:         log,
 		events:      events.New(),
 		kick:        make(chan kickReq),
+		pollReset:   make(chan time.Duration, 1),
 		dispatching: map[string]struct{}{},
 		active:      map[string]struct{}{},
 		reapSeen:    map[string]struct{}{},
@@ -143,6 +149,14 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			o.Reconcile(jobCtx)
 		case req := <-o.kick:
 			o.serveKick(jobCtx, req)
+		case d := <-o.pollReset:
+			// ApplyHotConfig changed PollInterval. Recreate the ticker so
+			// the new cadence takes effect on the next boundary; the
+			// previous one stops and its in-flight tick (if any) is
+			// discarded — safe because Reconcile is idempotent.
+			t.Stop()
+			t = time.NewTicker(d)
+			o.log.Info("poll interval reloaded", "interval", d.String())
 		}
 	}
 }

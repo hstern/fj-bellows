@@ -52,6 +52,12 @@ const (
 	// ControlServiceStreamEventsProcedure is the fully-qualified name of the ControlService's
 	// StreamEvents RPC.
 	ControlServiceStreamEventsProcedure = "/fjbellows.control.v1.ControlService/StreamEvents"
+	// ControlServiceGetConfigProcedure is the fully-qualified name of the ControlService's GetConfig
+	// RPC.
+	ControlServiceGetConfigProcedure = "/fjbellows.control.v1.ControlService/GetConfig"
+	// ControlServiceReloadConfigProcedure is the fully-qualified name of the ControlService's
+	// ReloadConfig RPC.
+	ControlServiceReloadConfigProcedure = "/fjbellows.control.v1.ControlService/ReloadConfig"
 	// ControlServiceStreamLogsProcedure is the fully-qualified name of the ControlService's StreamLogs
 	// RPC.
 	ControlServiceStreamLogsProcedure = "/fjbellows.control.v1.ControlService/StreamLogs"
@@ -106,6 +112,17 @@ type ControlServiceClient interface {
 	// on a quiet daemon (Connect server-streaming only writes response
 	// headers on the first Send). Clients should skip it.
 	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error)
+	// GetConfig returns the daemon's resolved live config as YAML, with secrets
+	// (forgejo.token, anything inside provider_config that looks like a token/
+	// password/secret/key) redacted. Useful for confirming the running process
+	// parsed config.yaml as the operator intended.
+	GetConfig(context.Context, *connect.Request[v1.GetConfigRequest]) (*connect.Response[v1.GetConfigResponse], error)
+	// ReloadConfig re-reads config.yaml from disk and hot-swaps the
+	// hot-reloadable subset (poll intervals, scale.max, labels, drain
+	// settings). Returns CodeFailedPrecondition with a clear error if the
+	// new config changes provider, provider_config, forgejo.url/token, or
+	// tag — those require a daemon restart.
+	ReloadConfig(context.Context, *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error)
 	// StreamLogs streams structured slog records from the daemon. The first
 	// message is a stream_opened sentinel (zero `at`, empty `message`,
 	// level=""); clients should skip it (same convention as StreamEvents).
@@ -177,6 +194,18 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
 			connect.WithClientOptions(opts...),
 		),
+		getConfig: connect.NewClient[v1.GetConfigRequest, v1.GetConfigResponse](
+			httpClient,
+			baseURL+ControlServiceGetConfigProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("GetConfig")),
+			connect.WithClientOptions(opts...),
+		),
+		reloadConfig: connect.NewClient[v1.ReloadConfigRequest, v1.ReloadConfigResponse](
+			httpClient,
+			baseURL+ControlServiceReloadConfigProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("ReloadConfig")),
+			connect.WithClientOptions(opts...),
+		),
 		streamLogs: connect.NewClient[v1.StreamLogsRequest, v1.StreamLogsResponse](
 			httpClient,
 			baseURL+ControlServiceStreamLogsProcedure,
@@ -195,6 +224,8 @@ type controlServiceClient struct {
 	forceReap      *connect.Client[v1.ForceReapRequest, v1.ForceReapResponse]
 	forceProvision *connect.Client[v1.ForceProvisionRequest, v1.ForceProvisionResponse]
 	streamEvents   *connect.Client[v1.StreamEventsRequest, v1.StreamEventsResponse]
+	getConfig      *connect.Client[v1.GetConfigRequest, v1.GetConfigResponse]
+	reloadConfig   *connect.Client[v1.ReloadConfigRequest, v1.ReloadConfigResponse]
 	streamLogs     *connect.Client[v1.StreamLogsRequest, v1.StreamLogsResponse]
 }
 
@@ -231,6 +262,16 @@ func (c *controlServiceClient) ForceProvision(ctx context.Context, req *connect.
 // StreamEvents calls fjbellows.control.v1.ControlService.StreamEvents.
 func (c *controlServiceClient) StreamEvents(ctx context.Context, req *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.StreamEventsResponse], error) {
 	return c.streamEvents.CallServerStream(ctx, req)
+}
+
+// GetConfig calls fjbellows.control.v1.ControlService.GetConfig.
+func (c *controlServiceClient) GetConfig(ctx context.Context, req *connect.Request[v1.GetConfigRequest]) (*connect.Response[v1.GetConfigResponse], error) {
+	return c.getConfig.CallUnary(ctx, req)
+}
+
+// ReloadConfig calls fjbellows.control.v1.ControlService.ReloadConfig.
+func (c *controlServiceClient) ReloadConfig(ctx context.Context, req *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error) {
+	return c.reloadConfig.CallUnary(ctx, req)
 }
 
 // StreamLogs calls fjbellows.control.v1.ControlService.StreamLogs.
@@ -287,6 +328,17 @@ type ControlServiceHandler interface {
 	// on a quiet daemon (Connect server-streaming only writes response
 	// headers on the first Send). Clients should skip it.
 	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error
+	// GetConfig returns the daemon's resolved live config as YAML, with secrets
+	// (forgejo.token, anything inside provider_config that looks like a token/
+	// password/secret/key) redacted. Useful for confirming the running process
+	// parsed config.yaml as the operator intended.
+	GetConfig(context.Context, *connect.Request[v1.GetConfigRequest]) (*connect.Response[v1.GetConfigResponse], error)
+	// ReloadConfig re-reads config.yaml from disk and hot-swaps the
+	// hot-reloadable subset (poll intervals, scale.max, labels, drain
+	// settings). Returns CodeFailedPrecondition with a clear error if the
+	// new config changes provider, provider_config, forgejo.url/token, or
+	// tag — those require a daemon restart.
+	ReloadConfig(context.Context, *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error)
 	// StreamLogs streams structured slog records from the daemon. The first
 	// message is a stream_opened sentinel (zero `at`, empty `message`,
 	// level=""); clients should skip it (same convention as StreamEvents).
@@ -354,6 +406,18 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("StreamEvents")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceGetConfigHandler := connect.NewUnaryHandler(
+		ControlServiceGetConfigProcedure,
+		svc.GetConfig,
+		connect.WithSchema(controlServiceMethods.ByName("GetConfig")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlServiceReloadConfigHandler := connect.NewUnaryHandler(
+		ControlServiceReloadConfigProcedure,
+		svc.ReloadConfig,
+		connect.WithSchema(controlServiceMethods.ByName("ReloadConfig")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlServiceStreamLogsHandler := connect.NewServerStreamHandler(
 		ControlServiceStreamLogsProcedure,
 		svc.StreamLogs,
@@ -376,6 +440,10 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 			controlServiceForceProvisionHandler.ServeHTTP(w, r)
 		case ControlServiceStreamEventsProcedure:
 			controlServiceStreamEventsHandler.ServeHTTP(w, r)
+		case ControlServiceGetConfigProcedure:
+			controlServiceGetConfigHandler.ServeHTTP(w, r)
+		case ControlServiceReloadConfigProcedure:
+			controlServiceReloadConfigHandler.ServeHTTP(w, r)
 		case ControlServiceStreamLogsProcedure:
 			controlServiceStreamLogsHandler.ServeHTTP(w, r)
 		default:
@@ -413,6 +481,14 @@ func (UnimplementedControlServiceHandler) ForceProvision(context.Context, *conne
 
 func (UnimplementedControlServiceHandler) StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.StreamEvents is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) GetConfig(context.Context, *connect.Request[v1.GetConfigRequest]) (*connect.Response[v1.GetConfigResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.GetConfig is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) ReloadConfig(context.Context, *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ReloadConfig is not implemented"))
 }
 
 func (UnimplementedControlServiceHandler) StreamLogs(context.Context, *connect.Request[v1.StreamLogsRequest], *connect.ServerStream[v1.StreamLogsResponse]) error {

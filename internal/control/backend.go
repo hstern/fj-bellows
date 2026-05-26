@@ -60,6 +60,19 @@ type Backend interface {
 	// this single tick. Returns the new worker's instance ID on success;
 	// async readiness errors surface later via the event stream.
 	ForceProvision(ctx context.Context) (string, error)
+
+	// GetConfig returns the resolved live config as YAML (secrets redacted)
+	// plus the path the config was originally loaded from. Read-only; safe
+	// to ship to any operator who can reach the control plane.
+	GetConfig(ctx context.Context) (yamlText, configPath string)
+
+	// ReloadConfig re-reads config.yaml from disk and hot-swaps the
+	// hot-reloadable subset (poll intervals, scale.max, labels, runner
+	// version, drain settings). Returns the list of changed dotted-key
+	// field names; the error case is "the new config changes a non-hot
+	// field" — the daemon refuses to partially apply and the caller maps
+	// the error to CodeFailedPrecondition.
+	ReloadConfig(ctx context.Context) (changedFields []string, err error)
 }
 
 // ReconcileResult is the per-tick summary returned by Kick. Counts are

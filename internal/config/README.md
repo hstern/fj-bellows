@@ -15,3 +15,12 @@ file tidy.
 `Duration` is a thin wrapper over `time.Duration` that unmarshals from strings
 like `10s` / `5m`. `Load` applies defaults (tag, max scale, poll interval, idle
 timeout, hour margin, SSH user/port) and validates required fields.
+
+`Redact(*Config)` returns a copy with secret-bearing fields replaced by
+`<redacted>`, safe to ship over the operator-facing control plane
+(`GetConfig` RPC). It zeros `Forgejo.Token` and walks the opaque
+`provider_config` `yaml.Node` tree, replacing any mapping value whose key
+matches `token`, `password`, `secret`, `key`, `api_key`, `access_key`, or
+`secret_key` (case-insensitive, exact match — no substring). The
+`ssh.private_key_file` path is left intact: the file at that path is the
+secret, the path itself is operator config.
