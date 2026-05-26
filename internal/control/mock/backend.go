@@ -26,6 +26,7 @@ type Backend struct {
 	logHistoryFn       func(n int, filter logbus.Filter) []logbus.Record
 	forceReapFn        func(ctx context.Context, instanceID string) error
 	forceProvisionFn   func(ctx context.Context) (string, error)
+	providerInfoFn     func(ctx context.Context) (string, map[string]string)
 	healthCall         int
 	poolSnapshotCall   int
 	cacheStatusCall    int
@@ -35,6 +36,7 @@ type Backend struct {
 	logHistoryCall     int
 	forceReapCall      int
 	forceProvisionCall int
+	providerInfoCall   int
 }
 
 // SetHealth installs the response for subsequent Health calls.
@@ -259,6 +261,32 @@ func (b *Backend) ForceProvisionCalls() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.forceProvisionCall
+}
+
+// SetProviderInfo installs the response for subsequent ProviderInfo calls.
+func (b *Backend) SetProviderInfo(fn func(ctx context.Context) (string, map[string]string)) {
+	b.mu.Lock()
+	b.providerInfoFn = fn
+	b.mu.Unlock()
+}
+
+// ProviderInfo implements control.Backend.
+func (b *Backend) ProviderInfo(ctx context.Context) (string, map[string]string) {
+	b.mu.Lock()
+	fn := b.providerInfoFn
+	b.providerInfoCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return "", map[string]string{}
+	}
+	return fn(ctx)
+}
+
+// ProviderInfoCalls returns the number of times ProviderInfo has been invoked.
+func (b *Backend) ProviderInfoCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.providerInfoCall
 }
 
 // HealthCalls returns the number of times Health has been invoked.

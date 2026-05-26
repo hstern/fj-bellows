@@ -60,6 +60,12 @@ type Backend interface {
 	// this single tick. Returns the new worker's instance ID on success;
 	// async readiness errors surface later via the event stream.
 	ForceProvision(ctx context.Context) (string, error)
+
+	// ProviderInfo returns the configured provider's slug ("linode",
+	// "docker", ...) plus its operator-debug key/value map. Providers
+	// that don't implement provider.InfoProvider answer with an empty
+	// map; the slug is always populated. Used by the ProviderInfo RPC.
+	ProviderInfo(ctx context.Context) (provider string, info map[string]string)
 }
 
 // ReconcileResult is the per-tick summary returned by Kick. Counts are

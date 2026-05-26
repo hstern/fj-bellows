@@ -323,6 +323,24 @@ if [ "$cache_ok" -ne 1 ]; then
   exit 1
 fi
 
+# FJB-31: assert ProviderInfo round-trips for the configured Linode
+# provider and the documented keys are present. Doesn't gate on key
+# values (region/type/etc. are deployment-specific), just that the slug
+# is "linode" and the shape matches the README contract.
+log "asserting ProviderInfo wire shape"
+pinfo=$(ctl ProviderInfo 2>/dev/null || true)
+if ! echo "$pinfo" | jq -e '.provider == "linode"
+  and (.info|has("region"))
+  and (.info|has("type"))
+  and (.info|has("image"))
+  and (.info|has("workers_in_flight"))
+  and (.info|has("capacity_full_count_24h"))' >/dev/null 2>&1; then
+  err "ProviderInfo missing required keys; response:"
+  echo "$pinfo" >&2
+  exit 1
+fi
+log "ProviderInfo OK ($(echo "$pinfo" | jq -r '.info|length') keys)"
+
 # FJB-6 PR 3: worker-side cache assertions. Read-only — verifies that
 # the PR 2b multipart wrap actually landed the cache plumbing on the
 # worker. Runs BEFORE we wait for job-complete so the worker can't be

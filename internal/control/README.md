@@ -30,6 +30,7 @@ shim. Subsequent PRs widen the proto + handler with:
 | PR5 | plain `/metrics` |
 | FJB-25 | `StreamLogs` (server-streaming structured slog records) |
 | FJB-26 | `ForceReap`, `ForceProvision` (admin verbs; gated by `-enable-control-writes`) |
+| FJB-31 | `ProviderInfo` (provider-defined operator-debug key/value map) |
 
 Deferred to follow-up tickets: pause/resume reconciler, config dump+reload,
 SSH-proxy, billing-window view, provider-passthrough. v1 leans on
@@ -202,6 +203,47 @@ Stream shape:
 Each `StreamLogsResponse` carries `at`, `level` (slog's String form:
 `"DEBUG"` / `"INFO"` / `"WARN"` / `"ERROR"`), `message`, and an `attrs`
 map.
+
+## ProviderInfo (FJB-31)
+
+`ProviderInfo` is a unary RPC that surfaces provider-defined operator-
+debug info as a free-form `map<string, string>`. The control plane
+type-asserts the live provider to the optional `provider.InfoProvider`
+interface and copies its `Info(ctx)` map through; providers that don't
+implement the interface answer with an empty map. The provider slug
+(e.g. `"linode"`, `"docker"`) is always populated.
+
+Keys are stable and provider-documented. Today:
+
+- **Linode** — see `internal/provider/linode/README.md` for the full
+  list, but operators reach for it mainly during capacity-full
+  incidents (FJB-11) and account-balance / dunning checks. Keys
+  include `region`, `type`, `image`, `firewall_id`,
+  `placement_group_id`, `vpc_id`, `cache_linode_id`,
+  `workers_in_flight`, `capacity_full_count_24h`, and
+  `account_balance_usd` (empty when the PAT lacks Account read
+  scope).
+- **Docker** — `docker_bin`, `image`, `network`, `wait_timeout`.
+
+Sample call:
+
+```sh
+curl -sS -X POST \
+  -H 'content-type: application/json' \
+  -d '{}' \
+  http://127.0.0.1:9876/fjbellows.control.v1.ControlService/ProviderInfo
+```
+
+Or via `fjbctl`:
+
+```sh
+fjbctl info             # sorted text view (default)
+fjbctl -json info       # raw JSON
+```
+
+Values are operator-readable strings — no secrets, no PII. A provider
+that needs to surface something sensitive should add a dedicated RPC
+with its own auth posture instead.
 
 ## Backend abstraction
 

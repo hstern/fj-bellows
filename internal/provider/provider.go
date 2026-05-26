@@ -59,6 +59,17 @@ type Instance struct {
 	Tag       string
 }
 
+// InfoProvider is the optional surface providers implement to expose
+// operator-debug info via the control plane's ProviderInfo RPC. Providers
+// don't have to implement this; the control plane's adapter type-asserts
+// and emits an empty info map for providers that don't.
+//
+// Keys are stable, provider-documented slugs (per provider's README).
+// Values are operator-readable strings — don't include secrets.
+type InfoProvider interface {
+	Info(ctx context.Context) map[string]string
+}
+
 // Provider is the in-tree cloud abstraction.
 type Provider interface {
 	// Configure decodes the opaque provider_config node into the provider's

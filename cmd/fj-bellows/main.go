@@ -168,7 +168,7 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 		listen:       opts.controlListen,
 		tokenFile:    opts.controlTokenFile,
 		enableWrites: opts.enableControlWrites,
-	}, orch, prov, logBus, log); err != nil {
+	}, orch, prov, cfg.Provider, logBus, log); err != nil {
 		return err
 	}
 
@@ -198,7 +198,7 @@ type controlOpts struct {
 // file, unreadable token, a non-loopback bind with no token, or
 // -enable-control-writes set on a non-loopback bind with no token) — once
 // it successfully arms the goroutine, runtime listen errors are logged.
-func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator.Orchestrator, prov provider.Provider, logBus *logbus.Bus, log *slog.Logger) error {
+func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator.Orchestrator, prov provider.Provider, providerName string, logBus *logbus.Bus, log *slog.Logger) error {
 	if opts.listen == "" {
 		return nil
 	}
@@ -223,7 +223,7 @@ func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator
 	if opts.enableWrites && !loopback && token == "" {
 		return fmt.Errorf("-enable-control-writes on non-loopback bind %q requires -control-token-file", opts.listen)
 	}
-	srv := control.NewServer(opts.listen, controlBackend{o: orch, prov: prov, logBus: logBus}, log,
+	srv := control.NewServer(opts.listen, controlBackend{o: orch, prov: prov, providerName: providerName, logBus: logBus}, log,
 		control.WithBearerToken(token),
 		control.WithControlWrites(opts.enableWrites))
 	go func() {
@@ -238,9 +238,10 @@ func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator
 // for cache-aware reports) to control.Backend so the orchestrator package
 // stays free of generated-protobuf coupling.
 type controlBackend struct {
-	o      *orchestrator.Orchestrator
-	prov   provider.Provider
-	logBus *logbus.Bus
+	o            *orchestrator.Orchestrator
+	prov         provider.Provider
+	providerName string
+	logBus       *logbus.Bus
 }
 
 func (b controlBackend) Health(ctx context.Context) control.HealthStatus {
@@ -302,6 +303,21 @@ func (b controlBackend) ForceReap(ctx context.Context, instanceID string) error 
 
 func (b controlBackend) ForceProvision(ctx context.Context) (string, error) {
 	return b.o.ForceProvision(ctx)
+}
+
+// ProviderInfo type-asserts the live provider to the optional
+// InfoProvider surface and returns its key/value map, plus the
+// configured provider slug. Providers that don't implement
+// InfoProvider answer with an empty map; the slug is always
+// populated so the operator can tell apart "provider doesn't expose
+// anything" from "wrong provider name on the wire". Keeps the
+// provider.Provider interface from growing every time we add a
+// provider-debug surface (FJB-31).
+func (b controlBackend) ProviderInfo(ctx context.Context) (string, map[string]string) {
+	if ip, ok := b.prov.(provider.InfoProvider); ok {
+		return b.providerName, ip.Info(ctx)
+	}
+	return b.providerName, map[string]string{}
 }
 
 // CacheStatus walks the provider for cache info if it supports it (Linode

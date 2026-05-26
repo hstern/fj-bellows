@@ -215,6 +215,23 @@ func logRecordToResponse(r logbus.Record) *controlv1.StreamLogsResponse {
 	}
 }
 
+func (h *apiHandler) ProviderInfo(
+	ctx context.Context,
+	_ *connect.Request[controlv1.ProviderInfoRequest],
+) (*connect.Response[controlv1.ProviderInfoResponse], error) {
+	name, info := h.b.ProviderInfo(ctx)
+	// Nil maps marshal to an empty proto map; defensively normalise so
+	// the wire form is always present and clients don't have to nil-
+	// check Info themselves.
+	if info == nil {
+		info = map[string]string{}
+	}
+	return connect.NewResponse(&controlv1.ProviderInfoResponse{
+		Provider: name,
+		Info:     info,
+	}), nil
+}
+
 func (h *apiHandler) ForceReap(
 	ctx context.Context,
 	req *connect.Request[controlv1.ForceReapRequest],
