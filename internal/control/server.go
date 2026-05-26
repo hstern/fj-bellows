@@ -17,12 +17,13 @@ import (
 // One http.Server multiplexes:
 //   - ConnectRPC handlers (Connect/JSON, gRPC, gRPC-Web) at /<package>.<Service>/<Method>
 //   - Plain HTTP /healthz so k8s probes and `curl --fail` work without Connect
-//
-// /metrics will join the same mux in PR5.
+//   - Plain HTTP /metrics for Prometheus scrape
 type Server struct {
-	listen string
-	srv    *http.Server
-	log    *slog.Logger
+	listen  string
+	srv     *http.Server
+	log     *slog.Logger
+	backend Backend
+	metrics *metrics
 }
 
 // NewServer builds the server but does not start it.
@@ -37,6 +38,9 @@ func NewServer(listen string, backend Backend, log *slog.Logger) *Server {
 	mux.Handle(path, handler)
 	mux.HandleFunc("/healthz", plainHealthz(backend))
 
+	m := newMetrics(backend, time.Now)
+	mux.Handle("/metrics", m.handler())
+
 	// Enable HTTP/2 cleartext so gRPC clients can speak h2c over the
 	// loopback-bound socket. Connect/JSON over HTTP/1.1 still works.
 	var protos http.Protocols
@@ -44,8 +48,10 @@ func NewServer(listen string, backend Backend, log *slog.Logger) *Server {
 	protos.SetUnencryptedHTTP2(true)
 
 	return &Server{
-		listen: listen,
-		log:    log,
+		listen:  listen,
+		log:     log,
+		backend: backend,
+		metrics: m,
 		srv: &http.Server{
 			Handler:           mux,
 			Protocols:         &protos,
@@ -71,6 +77,11 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("control listen %s: %w", s.listen, err)
 	}
 	s.log.Info("control plane listening", "addr", ln.Addr().String())
+
+	// Tee events into the per-type counter for the lifetime of Run.
+	teeCtx, cancelTee := context.WithCancel(ctx)
+	defer cancelTee()
+	go s.metrics.runEventTee(teeCtx, s.backend, s.log)
 
 	serveErr := make(chan error, 1)
 	go func() {
