@@ -87,7 +87,8 @@ type CacheStatus struct {
 }
 
 // WorkerView is the per-node shape the control plane returns from ListWorkers.
-// Mirrors orchestrator.Node plus the in-flight job handle.
+// Mirrors orchestrator.Node plus the in-flight job handle and the billing-
+// window snapshot (FJB-30) computed from the current TeardownPolicy.
 type WorkerView struct {
 	InstanceID string
 	State      string
@@ -95,6 +96,18 @@ type WorkerView struct {
 	CreatedAt  time.Time
 	LastBusy   time.Time
 	CurrentJob string
+
+	// PaidHourEndAt is the next paid-hour boundary for the worker — when
+	// hourly-round-up billing models close out the next paid hour. Zero
+	// for per-second models.
+	PaidHourEndAt time.Time
+	// ReapEligibleAt is the earliest time the policy will tear this worker
+	// down (LastBusy + IdleTimeout for per-second; the next :55 mark for
+	// hourly).
+	ReapEligibleAt time.Time
+	// BillingModel is "per_second" or "hourly_round_up". Empty when the
+	// policy is the zero value.
+	BillingModel string
 }
 
 // HealthStatus is the orchestrator's view of its own readiness.

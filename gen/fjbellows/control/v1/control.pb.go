@@ -235,7 +235,17 @@ type Worker struct {
 	// current_job is the Forgejo job handle in flight on this worker. Empty
 	// unless state == "busy". Goes empty again when the dispatch goroutine
 	// transitions the node back to idle.
-	CurrentJob    string `protobuf:"bytes,6,opt,name=current_job,json=currentJob,proto3" json:"current_job,omitempty"`
+	CurrentJob string `protobuf:"bytes,6,opt,name=current_job,json=currentJob,proto3" json:"current_job,omitempty"`
+	// paid_hour_end_at is when the next paid-hour boundary closes for
+	// this worker (hourly-billed providers). Empty for per-second.
+	PaidHourEndAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=paid_hour_end_at,json=paidHourEndAt,proto3" json:"paid_hour_end_at,omitempty"`
+	// reap_eligible_at is the earliest time the policy will tear this
+	// worker down. last_busy + idle_timeout for per-second; the next
+	// :55 mark for hourly.
+	ReapEligibleAt *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=reap_eligible_at,json=reapEligibleAt,proto3" json:"reap_eligible_at,omitempty"`
+	// billing_model is the provider's billing model string:
+	// "per_second" or "hourly_round_up".
+	BillingModel  string `protobuf:"bytes,9,opt,name=billing_model,json=billingModel,proto3" json:"billing_model,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -308,6 +318,27 @@ func (x *Worker) GetLastBusy() *timestamppb.Timestamp {
 func (x *Worker) GetCurrentJob() string {
 	if x != nil {
 		return x.CurrentJob
+	}
+	return ""
+}
+
+func (x *Worker) GetPaidHourEndAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.PaidHourEndAt
+	}
+	return nil
+}
+
+func (x *Worker) GetReapEligibleAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ReapEligibleAt
+	}
+	return nil
+}
+
+func (x *Worker) GetBillingModel() string {
+	if x != nil {
+		return x.BillingModel
 	}
 	return ""
 }
@@ -1006,7 +1037,7 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\x14last_forgejo_poll_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x11lastForgejoPollAt\"\x14\n" +
 	"\x12ListWorkersRequest\"M\n" +
 	"\x13ListWorkersResponse\x126\n" +
-	"\aworkers\x18\x01 \x03(\v2\x1c.fjbellows.control.v1.WorkerR\aworkers\"\xe4\x01\n" +
+	"\aworkers\x18\x01 \x03(\v2\x1c.fjbellows.control.v1.WorkerR\aworkers\"\x94\x03\n" +
 	"\x06Worker\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12\x14\n" +
@@ -1016,7 +1047,10 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"created_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x127\n" +
 	"\tlast_busy\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\blastBusy\x12\x1f\n" +
 	"\vcurrent_job\x18\x06 \x01(\tR\n" +
-	"currentJob\"\x11\n" +
+	"currentJob\x12C\n" +
+	"\x10paid_hour_end_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\rpaidHourEndAt\x12D\n" +
+	"\x10reap_eligible_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\x0ereapEligibleAt\x12#\n" +
+	"\rbilling_model\x18\t \x01(\tR\fbillingModel\"\x11\n" +
 	"\x0fGetCacheRequest\"\xee\x01\n" +
 	"\x10GetCacheResponse\x12\x18\n" +
 	"\apresent\x18\x01 \x01(\bR\apresent\x12)\n" +
@@ -1121,31 +1155,33 @@ var file_fjbellows_control_v1_control_proto_depIdxs = []int32{
 	4,  // 3: fjbellows.control.v1.ListWorkersResponse.workers:type_name -> fjbellows.control.v1.Worker
 	19, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
 	19, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
-	19, // 6: fjbellows.control.v1.StreamEventsResponse.at:type_name -> google.protobuf.Timestamp
-	17, // 7: fjbellows.control.v1.StreamEventsResponse.attrs:type_name -> fjbellows.control.v1.StreamEventsResponse.AttrsEntry
-	19, // 8: fjbellows.control.v1.StreamLogsResponse.at:type_name -> google.protobuf.Timestamp
-	18, // 9: fjbellows.control.v1.StreamLogsResponse.attrs:type_name -> fjbellows.control.v1.StreamLogsResponse.AttrsEntry
-	0,  // 10: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
-	2,  // 11: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
-	5,  // 12: fjbellows.control.v1.ControlService.GetCache:input_type -> fjbellows.control.v1.GetCacheRequest
-	7,  // 13: fjbellows.control.v1.ControlService.Reconcile:input_type -> fjbellows.control.v1.ReconcileRequest
-	9,  // 14: fjbellows.control.v1.ControlService.ForceReap:input_type -> fjbellows.control.v1.ForceReapRequest
-	11, // 15: fjbellows.control.v1.ControlService.ForceProvision:input_type -> fjbellows.control.v1.ForceProvisionRequest
-	13, // 16: fjbellows.control.v1.ControlService.StreamEvents:input_type -> fjbellows.control.v1.StreamEventsRequest
-	15, // 17: fjbellows.control.v1.ControlService.StreamLogs:input_type -> fjbellows.control.v1.StreamLogsRequest
-	1,  // 18: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
-	3,  // 19: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
-	6,  // 20: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
-	8,  // 21: fjbellows.control.v1.ControlService.Reconcile:output_type -> fjbellows.control.v1.ReconcileResponse
-	10, // 22: fjbellows.control.v1.ControlService.ForceReap:output_type -> fjbellows.control.v1.ForceReapResponse
-	12, // 23: fjbellows.control.v1.ControlService.ForceProvision:output_type -> fjbellows.control.v1.ForceProvisionResponse
-	14, // 24: fjbellows.control.v1.ControlService.StreamEvents:output_type -> fjbellows.control.v1.StreamEventsResponse
-	16, // 25: fjbellows.control.v1.ControlService.StreamLogs:output_type -> fjbellows.control.v1.StreamLogsResponse
-	18, // [18:26] is the sub-list for method output_type
-	10, // [10:18] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	19, // 6: fjbellows.control.v1.Worker.paid_hour_end_at:type_name -> google.protobuf.Timestamp
+	19, // 7: fjbellows.control.v1.Worker.reap_eligible_at:type_name -> google.protobuf.Timestamp
+	19, // 8: fjbellows.control.v1.StreamEventsResponse.at:type_name -> google.protobuf.Timestamp
+	17, // 9: fjbellows.control.v1.StreamEventsResponse.attrs:type_name -> fjbellows.control.v1.StreamEventsResponse.AttrsEntry
+	19, // 10: fjbellows.control.v1.StreamLogsResponse.at:type_name -> google.protobuf.Timestamp
+	18, // 11: fjbellows.control.v1.StreamLogsResponse.attrs:type_name -> fjbellows.control.v1.StreamLogsResponse.AttrsEntry
+	0,  // 12: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
+	2,  // 13: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
+	5,  // 14: fjbellows.control.v1.ControlService.GetCache:input_type -> fjbellows.control.v1.GetCacheRequest
+	7,  // 15: fjbellows.control.v1.ControlService.Reconcile:input_type -> fjbellows.control.v1.ReconcileRequest
+	9,  // 16: fjbellows.control.v1.ControlService.ForceReap:input_type -> fjbellows.control.v1.ForceReapRequest
+	11, // 17: fjbellows.control.v1.ControlService.ForceProvision:input_type -> fjbellows.control.v1.ForceProvisionRequest
+	13, // 18: fjbellows.control.v1.ControlService.StreamEvents:input_type -> fjbellows.control.v1.StreamEventsRequest
+	15, // 19: fjbellows.control.v1.ControlService.StreamLogs:input_type -> fjbellows.control.v1.StreamLogsRequest
+	1,  // 20: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
+	3,  // 21: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
+	6,  // 22: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
+	8,  // 23: fjbellows.control.v1.ControlService.Reconcile:output_type -> fjbellows.control.v1.ReconcileResponse
+	10, // 24: fjbellows.control.v1.ControlService.ForceReap:output_type -> fjbellows.control.v1.ForceReapResponse
+	12, // 25: fjbellows.control.v1.ControlService.ForceProvision:output_type -> fjbellows.control.v1.ForceProvisionResponse
+	14, // 26: fjbellows.control.v1.ControlService.StreamEvents:output_type -> fjbellows.control.v1.StreamEventsResponse
+	16, // 27: fjbellows.control.v1.ControlService.StreamLogs:output_type -> fjbellows.control.v1.StreamLogsResponse
+	20, // [20:28] is the sub-list for method output_type
+	12, // [12:20] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_fjbellows_control_v1_control_proto_init() }

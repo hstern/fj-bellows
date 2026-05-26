@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"testing"
 	"time"
+
+	"github.com/hstern/fj-bellows/internal/provider"
 )
 
 func TestPoolSetJob(t *testing.T) {
@@ -67,5 +69,44 @@ func TestPoolSnapshot_StringifiesState(t *testing.T) {
 	}
 	if idle.CurrentJob != "" {
 		t.Fatalf("idle CurrentJob should be empty; got %q", idle.CurrentJob)
+	}
+}
+
+// TestPoolSnapshot_BillingWindow covers FJB-30: PoolSnapshot pulls the
+// billing-window timing from the configured TeardownPolicy so ListWorkers
+// can surface it.
+func TestPoolSnapshot_BillingWindow(t *testing.T) {
+	created := time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
+	now := created.Add(10 * time.Minute)
+	o := &Orchestrator{
+		pool: NewPool(),
+		now:  func() time.Time { return now },
+		cfg: Config{
+			Teardown: TeardownPolicy{
+				Model:       provider.BillingHourlyRoundUp,
+				HourMargin:  5 * time.Minute,
+				BillingHour: time.Hour,
+			},
+		},
+	}
+	o.pool.Put(&Node{
+		InstanceID: "linode-1",
+		State:      StateIdle,
+		CreatedAt:  created,
+	})
+
+	got := o.PoolSnapshot()
+	if len(got) != 1 {
+		t.Fatalf("snapshot length: want 1 got %d", len(got))
+	}
+	w := got[0]
+	if w.BillingModel != "hourly_round_up" {
+		t.Errorf("BillingModel = %q, want hourly_round_up", w.BillingModel)
+	}
+	if want := created.Add(55 * time.Minute); !w.ReapEligibleAt.Equal(want) {
+		t.Errorf("ReapEligibleAt = %s, want %s", w.ReapEligibleAt, want)
+	}
+	if want := created.Add(time.Hour); !w.PaidHourEndAt.Equal(want) {
+		t.Errorf("PaidHourEndAt = %s, want %s", w.PaidHourEndAt, want)
 	}
 }

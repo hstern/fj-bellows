@@ -20,6 +20,32 @@ type TeardownPolicy struct {
 	BillingHour time.Duration
 }
 
+// Billing-model strings exposed by Timing.BillingModel. Stable wire constants
+// for the operator-facing control plane (FJB-30); not the same surface as
+// provider.BillingModel.String() (which is human-readable with a hyphen) —
+// these are snake_case so JSON/CLI consumers can switch on them cleanly.
+const (
+	billingModelPerSecond     = "per_second"
+	billingModelHourlyRoundUp = "hourly_round_up"
+)
+
+// TeardownTiming is the per-worker billing-window snapshot the control
+// plane returns to operators. Fields default to zero/empty when the policy
+// model doesn't make them meaningful.
+type TeardownTiming struct {
+	// PaidHourEndAt is the next paid-hour boundary for the worker — when
+	// hourly-round-up billing models would close out the next paid hour.
+	// Zero for per-second models.
+	PaidHourEndAt time.Time
+	// ReapEligibleAt is when the worker first becomes eligible for
+	// teardown under the current policy: LastBusy + IdleTimeout for
+	// per-second, the next :55 mark for hourly.
+	ReapEligibleAt time.Time
+	// BillingModel is the policy's billing model string:
+	// "per_second" | "hourly_round_up".
+	BillingModel string
+}
+
 // ShouldTeardown reports whether an idle node should be torn down now.
 //
 //   - Per-second billing: tear down once idle for IdleTimeout.
@@ -35,6 +61,38 @@ func (tp TeardownPolicy) ShouldTeardown(n Node, now time.Time) bool {
 		return !now.Before(NextKillMark(n.CreatedAt, now, tp.cycle(), tp.HourMargin))
 	default:
 		return false
+	}
+}
+
+// Timing returns the teardown-timing snapshot for a node under the current
+// policy. ShouldTeardown is unchanged; this is a read-only sibling that
+// exposes the intermediate computation for operator-facing surfaces (the
+// control plane's billing-window view, FJB-30).
+func (tp TeardownPolicy) Timing(n Node, now time.Time) TeardownTiming {
+	switch tp.Model {
+	case provider.BillingPerSecond:
+		var reap time.Time
+		if !n.LastBusy.IsZero() {
+			reap = n.LastBusy.Add(tp.IdleTimeout)
+		}
+		return TeardownTiming{
+			ReapEligibleAt: reap,
+			BillingModel:   billingModelPerSecond,
+		}
+	case provider.BillingHourlyRoundUp:
+		var paidEnd, reap time.Time
+		if !n.CreatedAt.IsZero() {
+			cycle := tp.cycle()
+			reap = NextKillMark(n.CreatedAt, now, cycle, tp.HourMargin)
+			paidEnd = reap.Add(tp.HourMargin)
+		}
+		return TeardownTiming{
+			PaidHourEndAt:  paidEnd,
+			ReapEligibleAt: reap,
+			BillingModel:   billingModelHourlyRoundUp,
+		}
+	default:
+		return TeardownTiming{}
 	}
 }
 

@@ -134,6 +134,19 @@ message Worker {
   // unless state == "busy". Goes empty again when the dispatch goroutine
   // transitions the node back to idle.
   string current_job = 6;
+
+  // paid_hour_end_at is when the next paid-hour boundary closes for
+  // this worker (hourly-billed providers). Empty for per-second.
+  google.protobuf.Timestamp paid_hour_end_at = 7;
+
+  // reap_eligible_at is the earliest time the policy will tear this
+  // worker down. last_busy + idle_timeout for per-second; the next
+  // :55 mark for hourly.
+  google.protobuf.Timestamp reap_eligible_at = 8;
+
+  // billing_model is the provider's billing model string:
+  // "per_second" or "hourly_round_up".
+  string billing_model = 9;
 }
 
 message GetCacheRequest {}

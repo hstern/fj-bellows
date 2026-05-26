@@ -30,11 +30,12 @@ shim. Subsequent PRs widen the proto + handler with:
 | PR5 | plain `/metrics` |
 | FJB-25 | `StreamLogs` (server-streaming structured slog records) |
 | FJB-26 | `ForceReap`, `ForceProvision` (admin verbs; gated by `-enable-control-writes`) |
+| FJB-30 | `ListWorkers` billing-window fields (`paid_hour_end_at`, `reap_eligible_at`, `billing_model`) |
 
 Deferred to follow-up tickets: pause/resume reconciler, config dump+reload,
-SSH-proxy, billing-window view, provider-passthrough. v1 leans on
-loopback-binding as the default auth boundary; the bearer-token interceptor
-(FJB-33, below) is what binds a non-loopback deployment.
+SSH-proxy, provider-passthrough. v1 leans on loopback-binding as the default
+auth boundary; the bearer-token interceptor (FJB-33, below) is what binds a
+non-loopback deployment.
 
 ## Auth on non-loopback binds (FJB-33)
 
@@ -202,6 +203,25 @@ Stream shape:
 Each `StreamLogsResponse` carries `at`, `level` (slog's String form:
 `"DEBUG"` / `"INFO"` / `"WARN"` / `"ERROR"`), `message`, and an `attrs`
 map.
+
+## ListWorkers billing window (FJB-30)
+
+Each `Worker` in `ListWorkers` carries three fields that surface the
+teardown policy's view of the worker, so operators can debug warm-hold /
+reap timing from the control plane instead of from log archaeology:
+
+- `billing_model` — `"per_second"` or `"hourly_round_up"`, matching the
+  provider's `BillingModel()`. Empty for the zero policy.
+- `reap_eligible_at` — the earliest instant the policy would tear this
+  worker down: `last_busy + idle_timeout` for per-second, the next
+  `created + N*billing_hour - hour_margin` mark for hourly.
+- `paid_hour_end_at` — the next paid-hour boundary
+  (`reap_eligible_at + hour_margin`). Empty for per-second.
+
+Values are computed from `orchestrator.TeardownPolicy.Timing(node, now)`,
+which is the read-only sibling of `ShouldTeardown` — same math, no
+decision. The Linode e2e uses `billing_hour: 60s, hour_margin: 10s` so
+both timestamps populate within seconds of worker creation.
 
 ## Backend abstraction
 
