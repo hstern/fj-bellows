@@ -38,18 +38,20 @@ func main() {
 	drainTimeout := flag.Duration("drain-timeout", 0, "max time to wait for in-flight jobs when draining (0 = wait indefinitely)")
 	destroyOnExit := flag.Bool("destroy-on-exit", false, "destroy all owned VMs on shutdown (for a permanent stop)")
 	controlListen := flag.String("control-listen", "127.0.0.1:9876", "control plane listen address (TCP); empty disables")
+	controlTokenFile := flag.String("control-token-file", "", "bearer-token file for the control plane (required for non-loopback binds; mode 0600)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	opts := runOpts{
-		configPath:    *configPath,
-		lockPath:      *lockPath,
-		runnerVersion: *runnerVersion,
-		drain:         *drain,
-		drainTimeout:  *drainTimeout,
-		destroyOnExit: *destroyOnExit,
-		controlListen: *controlListen,
+		configPath:       *configPath,
+		lockPath:         *lockPath,
+		runnerVersion:    *runnerVersion,
+		drain:            *drain,
+		drainTimeout:     *drainTimeout,
+		destroyOnExit:    *destroyOnExit,
+		controlListen:    *controlListen,
+		controlTokenFile: *controlTokenFile,
 	}
 	if err := run(opts, log); err != nil {
 		log.Error("fatal", "err", err)
@@ -58,13 +60,14 @@ func main() {
 }
 
 type runOpts struct {
-	configPath    string
-	lockPath      string
-	runnerVersion string
-	drain         bool
-	drainTimeout  time.Duration
-	destroyOnExit bool
-	controlListen string
+	configPath       string
+	lockPath         string
+	runnerVersion    string
+	drain            bool
+	drainTimeout     time.Duration
+	destroyOnExit    bool
+	controlListen    string
+	controlTokenFile string
 }
 
 func run(opts runOpts, log *slog.Logger) error {
@@ -73,20 +76,7 @@ func run(opts runOpts, log *slog.Logger) error {
 		return err
 	}
 
-	// config.yaml and the SSH key hold secrets; warn if other users can read
-	// them. The Forgejo admin token rides in a header, so warn on plaintext URLs.
-	warnLoosePerms(log, opts.configPath)
-	if cfg.SSH.PrivateKeyFile != "" {
-		warnLoosePerms(log, cfg.SSH.PrivateKeyFile)
-	}
-	if !strings.HasPrefix(strings.ToLower(cfg.Forgejo.URL), "https://") {
-		log.Warn("forgejo.url is not https; the admin token will be sent in plaintext", "url", cfg.Forgejo.URL)
-	}
-	if cfg.Tag == config.DefaultTag {
-		log.Warn("using the default instance tag; set a unique 'tag' per deployment, "+
-			"or multiple fj-bellows deployments on the same cloud account will adopt and destroy each other's VMs",
-			"tag", cfg.Tag)
-	}
+	warnStartupHygiene(log, cfg, opts.configPath)
 
 	// Singleton lock: only one daemon may make provisioning decisions.
 	release, err := acquireLock(opts.lockPath)
@@ -164,7 +154,9 @@ func run(opts runOpts, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	startControlPlane(ctx, opts.controlListen, orch, prov, log)
+	if err := startControlPlane(ctx, opts.controlListen, opts.controlTokenFile, orch, prov, log); err != nil {
+		return err
+	}
 
 	log.Info(
 		"fj-bellows starting",
@@ -178,16 +170,35 @@ func run(opts runOpts, log *slog.Logger) error {
 
 // startControlPlane spins up the operator-facing HTTP/RPC server on a side
 // goroutine. Empty listen disables it (e.g. for tests or restricted deploys).
-func startControlPlane(ctx context.Context, listen string, orch *orchestrator.Orchestrator, prov provider.Provider, log *slog.Logger) {
+// If a token file is supplied, every Connect RPC must carry an
+// Authorization: Bearer header matching its contents; /healthz and /metrics
+// stay open. Returns an error only on bad operator config (missing token
+// file, unreadable token, or a non-loopback bind with no token) — once it
+// successfully arms the goroutine, runtime listen errors are logged.
+func startControlPlane(ctx context.Context, listen, tokenFile string, orch *orchestrator.Orchestrator, prov provider.Provider, log *slog.Logger) error {
 	if listen == "" {
-		return
+		return nil
 	}
-	srv := control.NewServer(listen, controlBackend{o: orch, prov: prov}, log)
+	var token string
+	if tokenFile != "" {
+		t, err := control.LoadToken(tokenFile)
+		if err != nil {
+			return fmt.Errorf("control token: %w", err)
+		}
+		token = t
+	}
+	if !control.IsLoopbackBind(listen) && token == "" {
+		return fmt.Errorf("control-listen %q is not loopback but -control-token-file is unset; "+
+			"either bind 127.0.0.1 or provide a token file", listen)
+	}
+	srv := control.NewServer(listen, controlBackend{o: orch, prov: prov}, log,
+		control.WithBearerToken(token))
 	go func() {
 		if err := srv.Run(ctx); err != nil {
 			log.Error("control plane", "err", err)
 		}
 	}()
+	return nil
 }
 
 // controlBackend adapts *orchestrator.Orchestrator (and the live provider,
@@ -317,6 +328,25 @@ func loadSSHKey(path string) (ssh.Signer, string, error) {
 	}
 	authLine := string(ssh.MarshalAuthorizedKey(signer.PublicKey()))
 	return signer, authLine, nil
+}
+
+// warnStartupHygiene logs warnings for common operator mistakes the daemon
+// can still run through: world-readable secret files, plaintext Forgejo URL,
+// and the default instance tag (which is unique-per-deployment-safe but
+// silently destroys peer deployments on the same cloud account).
+func warnStartupHygiene(log *slog.Logger, cfg *config.Config, configPath string) {
+	warnLoosePerms(log, configPath)
+	if cfg.SSH.PrivateKeyFile != "" {
+		warnLoosePerms(log, cfg.SSH.PrivateKeyFile)
+	}
+	if !strings.HasPrefix(strings.ToLower(cfg.Forgejo.URL), "https://") {
+		log.Warn("forgejo.url is not https; the admin token will be sent in plaintext", "url", cfg.Forgejo.URL)
+	}
+	if cfg.Tag == config.DefaultTag {
+		log.Warn("using the default instance tag; set a unique 'tag' per deployment, "+
+			"or multiple fj-bellows deployments on the same cloud account will adopt and destroy each other's VMs",
+			"tag", cfg.Tag)
+	}
 }
 
 // warnLoosePerms logs a warning if a secret file is readable by group or other.

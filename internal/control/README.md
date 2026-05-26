@@ -31,8 +31,47 @@ shim. Subsequent PRs widen the proto + handler with:
 
 Deferred to follow-up tickets: logs streaming, force-reap/force-provision,
 pause/resume reconciler, config dump+reload, SSH-proxy, billing-window view,
-provider-passthrough, the `fjbctl` companion CLI, and bearer-token auth for
-non-loopback binds. v1 leans on loopback-binding as the auth boundary.
+provider-passthrough, the `fjbctl` companion CLI. v1 leans on
+loopback-binding as the default auth boundary; the bearer-token interceptor
+(FJB-33, below) is what binds a non-loopback deployment.
+
+## Auth on non-loopback binds (FJB-33)
+
+When `-control-listen` is loopback (`127.0.0.1`, `localhost`, `[::1]`), the
+control plane assumes the network is the auth boundary and accepts every
+request. The default `127.0.0.1:9876` deployment needs no further config.
+
+When `-control-listen` is anything else (`0.0.0.0`, a private LAN address, a
+tailscale IP, …), the daemon **refuses to start** without
+`-control-token-file /path/to/token`. The file holds one non-empty line of
+token (whitespace trimmed); mode `0600` is the recommended posture.
+
+Connect RPCs then require the header on every request:
+
+```
+Authorization: Bearer <contents of token file>
+```
+
+`/healthz` and `/metrics` stay open regardless — Prom scrapers and k8s
+liveness probes can't reasonably carry per-request bearer creds, and what
+they expose isn't sensitive enough to gate.
+
+Sample bind for a tailscale-exposed daemon:
+
+```sh
+openssl rand -hex 32 > /etc/fj-bellows/control.token
+chmod 600 /etc/fj-bellows/control.token
+
+fj-bellows \
+  -config /etc/fj-bellows/config.yaml \
+  -control-listen 100.x.y.z:9876 \
+  -control-token-file /etc/fj-bellows/control.token
+```
+
+A client (e.g. `fjbctl` once it lands, FJB-32) reads the same file and
+injects the header. Out of scope for this milestone: SIGHUP-driven token
+rotation, per-RPC allowlists (mutating verbs gated, read-only open), mTLS
+termination — that last one belongs behind a reverse proxy.
 
 ## Wire format for ad-hoc / e2e clients
 

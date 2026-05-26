@@ -26,12 +26,33 @@ type Server struct {
 	metrics *metrics
 }
 
+// Option configures a Server at construction time. Use the With* helpers.
+type Option func(*config)
+
+// WithBearerToken enforces an Authorization: Bearer <token> header on every
+// Connect RPC. The plain HTTP /healthz and /metrics shims stay open so
+// ecosystem tooling that doesn't speak Connect can scrape unimpeded.
+// Empty token disables the check (the default — relied on by loopback
+// deployments where the network is the auth boundary).
+func WithBearerToken(token string) Option {
+	return func(c *config) { c.token = token }
+}
+
+type config struct {
+	token string
+}
+
 // NewServer builds the server but does not start it.
 // listen is a host:port suitable for net.Listen("tcp", ...).
-func NewServer(listen string, backend Backend, log *slog.Logger) *Server {
+func NewServer(listen string, backend Backend, log *slog.Logger, opts ...Option) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
+	var cfg config
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	mux := http.NewServeMux()
 
 	path, handler := controlv1connect.NewControlServiceHandler(&apiHandler{b: backend})
@@ -53,7 +74,7 @@ func NewServer(listen string, backend Backend, log *slog.Logger) *Server {
 		backend: backend,
 		metrics: m,
 		srv: &http.Server{
-			Handler:           mux,
+			Handler:           bearerAuth(mux, cfg.token),
 			Protocols:         &protos,
 			ReadHeaderTimeout: 5 * time.Second,
 		},

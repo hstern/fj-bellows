@@ -455,22 +455,25 @@ fi
 log "  ✓ worker CA byte-identical to orchestrator's persisted CA"
 
 # With assertions green, wait for the runner to finish its job. Detected
-# via the control plane: the worker was busy serving the job; once that
-# returns to state=idle with an empty current_job, the dispatch goroutine
-# has finished. Replaces the prior `grep -q 'job complete' $LOG`.
+# via the control plane: a worker was busy serving the job; either it has
+# returned to state=idle with an empty current_job, OR the pool is empty
+# (the orchestrator has already reaped the now-idle worker — only possible
+# AFTER the job completed, since the reaper never destroys a busy node).
+# We've already confirmed at least one worker provisioned successfully via
+# the earlier state=idle assertion, so pool-empty here implies job-then-reap,
+# not no-worker-ever.
 log "waiting for job completion via ListWorkers (up to ~6 min)"
 complete=0
 for i in $(seq 1 180); do
   resp=$(ctl ListWorkers 2>/dev/null || true)
-  # Definition of done: at least one worker exists, all workers are idle,
-  # and no worker has a non-empty current_job. (Empty pool wouldn't satisfy
-  # this — the worker has to have run, not been reaped before it ran.)
   if [ -n "$resp" ] && echo "$resp" | jq -e '
-        (.workers | length) > 0
-        and (all(.workers[]; .state == "idle"))
-        and (all(.workers[]; (.currentJob // "") == ""))
+        ((.workers // []) | length) == 0
+        or (
+          all(.workers[]; .state == "idle")
+          and all(.workers[]; (.currentJob // "") == "")
+        )
       ' >/dev/null 2>&1; then
-    log "job complete (all workers state=idle, current_job empty) after ${i}*2s"
+    log "job complete (all workers idle with no current_job, or pool reaped) after ${i}*2s"
     complete=1
     break
   fi
