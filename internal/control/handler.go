@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -11,6 +12,7 @@ import (
 	controlv1 "github.com/hstern/fj-bellows/gen/fjbellows/control/v1"
 	"github.com/hstern/fj-bellows/gen/fjbellows/control/v1/controlv1connect"
 	"github.com/hstern/fj-bellows/internal/control/logbus"
+	"github.com/hstern/fj-bellows/internal/orchestrator"
 )
 
 // defaultLogHistoryLines is the replay-on-connect size when a StreamLogs
@@ -24,7 +26,16 @@ const defaultLogHistoryLines = 100
 type apiHandler struct {
 	controlv1connect.UnimplementedControlServiceHandler
 	b Backend
+	// enableWrites gates the mutating ForceReap / ForceProvision RPCs.
+	// When false, those RPCs short-circuit to CodePermissionDenied before
+	// touching the backend. Read-only RPCs ignore it entirely.
+	enableWrites bool
 }
+
+// errWritesDisabled is the response body for force-* RPCs when the
+// -enable-control-writes flag is unset. Operator-facing: tells them which
+// flag to flip.
+var errWritesDisabled = errors.New("control writes not enabled (set -enable-control-writes)")
 
 func (h *apiHandler) Health(
 	ctx context.Context,
@@ -202,6 +213,62 @@ func logRecordToResponse(r logbus.Record) *controlv1.StreamLogsResponse {
 		Message: r.Message,
 		Attrs:   r.Attrs,
 	}
+}
+
+func (h *apiHandler) ForceReap(
+	ctx context.Context,
+	req *connect.Request[controlv1.ForceReapRequest],
+) (*connect.Response[controlv1.ForceReapResponse], error) {
+	if !h.enableWrites {
+		return nil, connect.NewError(connect.CodePermissionDenied, errWritesDisabled)
+	}
+	id := req.Msg.InstanceId
+	if id == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("instance_id is required"))
+	}
+	ctx = orchestrator.WithAuditCaller(ctx, auditCaller(req))
+	if err := h.b.ForceReap(ctx, id); err != nil {
+		// "not in pool" is a 4xx (the operator named something that
+		// doesn't exist); other failures are 5xx.
+		if strings.Contains(err.Error(), "not in pool") || strings.Contains(err.Error(), "vanished from pool") {
+			return nil, connect.NewError(connect.CodeNotFound, err)
+		}
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&controlv1.ForceReapResponse{}), nil
+}
+
+func (h *apiHandler) ForceProvision(
+	ctx context.Context,
+	req *connect.Request[controlv1.ForceProvisionRequest],
+) (*connect.Response[controlv1.ForceProvisionResponse], error) {
+	if !h.enableWrites {
+		return nil, connect.NewError(connect.CodePermissionDenied, errWritesDisabled)
+	}
+	ctx = orchestrator.WithAuditCaller(ctx, auditCaller(req))
+	id, err := h.b.ForceProvision(ctx)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&controlv1.ForceProvisionResponse{InstanceId: id}), nil
+}
+
+// auditCaller builds a short, log-safe identity string from the Connect
+// request: the peer address always, plus a "token" marker when the
+// Authorization header carries a bearer token (we don't decode it — the
+// header's presence is the signal). Format example: "peer=127.0.0.1:54312"
+// or "peer=10.0.0.5:60000 token". Loopback peers also get the explicit
+// peer= prefix so the operator can distinguish "someone hit /healthz over
+// loopback" from "nothing set this at all".
+func auditCaller[T any](req *connect.Request[T]) string {
+	parts := make([]string, 0, 2)
+	if p := req.Peer().Addr; p != "" {
+		parts = append(parts, "peer="+p)
+	}
+	if h := req.Header().Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		parts = append(parts, "token")
+	}
+	return strings.Join(parts, " ")
 }
 
 // tsOrNil emits a Timestamp only for non-zero times; zero stays nil so the

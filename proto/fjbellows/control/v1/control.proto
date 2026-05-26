@@ -33,6 +33,24 @@ service ControlService {
   // without waiting on the poll interval (FJB-17 multi-cycle).
   rpc Reconcile(ReconcileRequest) returns (ReconcileResponse);
 
+  // ForceReap immediately destroys the worker with the given instance ID,
+  // even if billing policy would keep it warm. Cancels any in-flight teardown
+  // state and runs provider.Destroy from the reconcile goroutine (so the
+  // single-writer property is preserved). Drops the node from the pool on
+  // success. Every call is audit-logged with the caller identity. Returns
+  // a Connect error (CodeNotFound) when the instance isn't in the pool,
+  // (CodeInternal) when Destroy fails, or (CodePermissionDenied) when
+  // -enable-control-writes is unset.
+  rpc ForceReap(ForceReapRequest) returns (ForceReapResponse);
+
+  // ForceProvision spawns one extra worker, bypassing the scale.max cap
+  // for this single tick. Audit-logged. Returns the new worker's
+  // instance_id on success, or a Connect error (CodeInternal) when
+  // Provision fails immediately. Async readiness errors surface later as
+  // worker_reaped events on the StreamEvents stream. Returns
+  // CodePermissionDenied when -enable-control-writes is unset.
+  rpc ForceProvision(ForceProvisionRequest) returns (ForceProvisionResponse);
+
   // StreamEvents emits state-transition events as they happen:
   // worker_provisioned, worker_ready, worker_busy, worker_idle,
   // worker_reaped, worker_adopted, worker_dropped, job_dispatched,
@@ -166,6 +184,26 @@ message ReconcileResponse {
   // One entry per failing top-level step in the tick (list instances,
   // poll waiting jobs, ...). Empty on a fully-clean tick.
   repeated string errors = 6;
+}
+
+message ForceReapRequest {
+  // instance_id is the provider's identifier (Linode ID, docker container
+  // ID, etc.) of the worker to destroy. Must be present in the pool.
+  string instance_id = 1;
+}
+
+// ForceReapResponse is intentionally empty — failure surfaces via the
+// Connect error code, success means "Destroy returned cleanly and the
+// node was dropped from the pool."
+message ForceReapResponse {}
+
+message ForceProvisionRequest {}
+
+message ForceProvisionResponse {
+  // instance_id is the provider's identifier for the newly created
+  // worker. Set on success; the worker may still be in StateProvisioning
+  // when this returns (WaitReady runs asynchronously).
+  string instance_id = 1;
 }
 
 message StreamEventsRequest {

@@ -15,7 +15,12 @@ import (
 	pmock "github.com/hstern/fj-bellows/internal/provider/mock"
 )
 
-const labelUbuntu = "ubuntu-latest"
+const (
+	labelUbuntu = "ubuntu-latest"
+	// testIP is a stand-in worker IP used across orchestrator tests. Kept
+	// in one place to satisfy goconst.
+	testIP = "10.0.0.5"
+)
 
 func waitFor(t *testing.T, msg string, cond func() bool) {
 	t.Helper()
@@ -68,7 +73,7 @@ func TestReconcileProvisionsForWaitingJob(t *testing.T) {
 func TestReconcileDispatchesToIdleNode(t *testing.T) {
 	prov := &pmock.Provider{
 		ListFn: func(context.Context, string) ([]provider.Instance, error) {
-			return []provider.Instance{{ID: "1", IPv4: "10.0.0.5", CreatedAt: time.Now()}}, nil
+			return []provider.Instance{{ID: "1", IPv4: testIP, CreatedAt: time.Now()}}, nil
 		},
 	}
 	jobs := &omock.JobSource{
@@ -429,7 +434,7 @@ func TestRunDrainsInFlightJob(t *testing.T) {
 	release := make(chan struct{})
 	prov := &pmock.Provider{
 		ListFn: func(context.Context, string) ([]provider.Instance, error) {
-			return []provider.Instance{{ID: "1", IPv4: "10.0.0.5", CreatedAt: time.Now()}}, nil
+			return []provider.Instance{{ID: "1", IPv4: testIP, CreatedAt: time.Now()}}, nil
 		},
 	}
 	jobs := &omock.JobSource{
@@ -475,7 +480,7 @@ func TestRunInterruptsWhenNoDrain(t *testing.T) {
 	started := make(chan struct{})
 	prov := &pmock.Provider{
 		ListFn: func(context.Context, string) ([]provider.Instance, error) {
-			return []provider.Instance{{ID: "1", IPv4: "10.0.0.5", CreatedAt: time.Now()}}, nil
+			return []provider.Instance{{ID: "1", IPv4: testIP, CreatedAt: time.Now()}}, nil
 		},
 	}
 	jobs := &omock.JobSource{

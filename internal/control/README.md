@@ -29,10 +29,10 @@ shim. Subsequent PRs widen the proto + handler with:
 | PR4 | `Reconcile` (unary), `StreamEvents` (server-streaming) |
 | PR5 | plain `/metrics` |
 | FJB-25 | `StreamLogs` (server-streaming structured slog records) |
+| FJB-26 | `ForceReap`, `ForceProvision` (admin verbs; gated by `-enable-control-writes`) |
 
-Deferred to follow-up tickets: force-reap/force-provision,
-pause/resume reconciler, config dump+reload, SSH-proxy, billing-window view,
-provider-passthrough, the `fjbctl` companion CLI. v1 leans on
+Deferred to follow-up tickets: pause/resume reconciler, config dump+reload,
+SSH-proxy, billing-window view, provider-passthrough. v1 leans on
 loopback-binding as the default auth boundary; the bearer-token interceptor
 (FJB-33, below) is what binds a non-loopback deployment.
 
@@ -73,6 +73,69 @@ A client (e.g. `fjbctl` once it lands, FJB-32) reads the same file and
 injects the header. Out of scope for this milestone: SIGHUP-driven token
 rotation, per-RPC allowlists (mutating verbs gated, read-only open), mTLS
 termination — that last one belongs behind a reverse proxy.
+
+## Force verbs (FJB-26)
+
+`ForceReap` and `ForceProvision` are operator-facing escape hatches for
+production incidents. They are off by default; the daemon enables them only
+when `-enable-control-writes` is set.
+
+- `ForceReap(instance_id)` — destroys a worker immediately, bypassing
+  billing policy. Any in-flight teardown state is overridden. Returns
+  `CodeNotFound` when the instance is not in the pool, `CodeInternal` when
+  `provider.Destroy` fails (the node is reverted to `idle` so the next
+  teardown tick or another force-reap can retry), and `CodePermissionDenied`
+  when `-enable-control-writes` is unset.
+- `ForceProvision()` — spawns one extra worker, bypassing `scale.max` for
+  this single tick. Returns the new instance ID synchronously; async
+  readiness errors land later as `worker_reaped` events on the
+  `StreamEvents` stream. Returns `CodePermissionDenied` when
+  `-enable-control-writes` is unset.
+
+Both verbs run from the reconcile goroutine (kicked through the same
+single-writer select that drives `Reconcile`), so they cannot race a
+concurrent tick.
+
+Every force call emits a slog `Info` line carrying the caller identity
+threaded from the handler:
+
+```
+force-reap requested id=100 caller="peer=10.0.0.5:54312 token"
+force-provision requested caller="peer=127.0.0.1:54312"
+```
+
+The `caller` string is built from the Connect request's peer address plus
+a `token` marker when the request carried an `Authorization: Bearer`
+header (we don't decode the token — its presence is the signal). When
+nothing was threaded, the value is `"loopback"`.
+
+### Enabling the writes
+
+Loopback bind, no token: just pass `-enable-control-writes`. The network
+is the auth boundary; anyone who can reach `127.0.0.1:9876` already owns
+the daemon.
+
+```sh
+fj-bellows -config /etc/fj-bellows/config.yaml -enable-control-writes
+```
+
+Non-loopback bind: `-enable-control-writes` requires `-control-token-file`
+too (the same token file the bearer-token gate reads). The daemon refuses
+to start otherwise — exposing mutating verbs unauthenticated to the
+network is never the intent.
+
+```sh
+fj-bellows \
+  -config /etc/fj-bellows/config.yaml \
+  -control-listen 100.x.y.z:9876 \
+  -control-token-file /etc/fj-bellows/control.token \
+  -enable-control-writes
+```
+
+The bearer-token gate and the writes gate are independent: a non-loopback
+deployment that wants read-only mirror access (Health, ListWorkers,
+GetCache, Reconcile, StreamEvents) over tailscale can leave
+`-enable-control-writes` off and still hand out the token.
 
 ## Wire format for ad-hoc / e2e clients
 

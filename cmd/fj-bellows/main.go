@@ -40,6 +40,7 @@ func main() {
 	destroyOnExit := flag.Bool("destroy-on-exit", false, "destroy all owned VMs on shutdown (for a permanent stop)")
 	controlListen := flag.String("control-listen", "127.0.0.1:9876", "control plane listen address (TCP); empty disables")
 	controlTokenFile := flag.String("control-token-file", "", "bearer-token file for the control plane (required for non-loopback binds; mode 0600)")
+	enableControlWrites := flag.Bool("enable-control-writes", false, "expose mutating control RPCs (ForceReap, ForceProvision); off by default")
 	flag.Parse()
 
 	// Wrap the stderr text handler with a logbus tee so the control plane's
@@ -51,14 +52,15 @@ func main() {
 	log := slog.New(logbus.NewHandler(textHandler, logBus))
 
 	opts := runOpts{
-		configPath:       *configPath,
-		lockPath:         *lockPath,
-		runnerVersion:    *runnerVersion,
-		drain:            *drain,
-		drainTimeout:     *drainTimeout,
-		destroyOnExit:    *destroyOnExit,
-		controlListen:    *controlListen,
-		controlTokenFile: *controlTokenFile,
+		configPath:          *configPath,
+		lockPath:            *lockPath,
+		runnerVersion:       *runnerVersion,
+		drain:               *drain,
+		drainTimeout:        *drainTimeout,
+		destroyOnExit:       *destroyOnExit,
+		controlListen:       *controlListen,
+		controlTokenFile:    *controlTokenFile,
+		enableControlWrites: *enableControlWrites,
 	}
 	if err := run(opts, log, logBus); err != nil {
 		log.Error("fatal", "err", err)
@@ -67,14 +69,15 @@ func main() {
 }
 
 type runOpts struct {
-	configPath       string
-	lockPath         string
-	runnerVersion    string
-	drain            bool
-	drainTimeout     time.Duration
-	destroyOnExit    bool
-	controlListen    string
-	controlTokenFile string
+	configPath          string
+	lockPath            string
+	runnerVersion       string
+	drain               bool
+	drainTimeout        time.Duration
+	destroyOnExit       bool
+	controlListen       string
+	controlTokenFile    string
+	enableControlWrites bool
 }
 
 func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
@@ -161,7 +164,11 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := startControlPlane(ctx, opts.controlListen, opts.controlTokenFile, orch, prov, logBus, log); err != nil {
+	if err := startControlPlane(ctx, controlOpts{
+		listen:       opts.controlListen,
+		tokenFile:    opts.controlTokenFile,
+		enableWrites: opts.enableControlWrites,
+	}, orch, prov, logBus, log); err != nil {
 		return err
 	}
 
@@ -175,31 +182,50 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 	return orch.Run(ctx)
 }
 
+// controlOpts groups the wiring inputs for startControlPlane so adding a new
+// knob (the FJB-26 enableWrites flag) doesn't keep widening the signature.
+type controlOpts struct {
+	listen       string
+	tokenFile    string
+	enableWrites bool
+}
+
 // startControlPlane spins up the operator-facing HTTP/RPC server on a side
 // goroutine. Empty listen disables it (e.g. for tests or restricted deploys).
 // If a token file is supplied, every Connect RPC must carry an
 // Authorization: Bearer header matching its contents; /healthz and /metrics
 // stay open. Returns an error only on bad operator config (missing token
-// file, unreadable token, or a non-loopback bind with no token) — once it
-// successfully arms the goroutine, runtime listen errors are logged.
-func startControlPlane(ctx context.Context, listen, tokenFile string, orch *orchestrator.Orchestrator, prov provider.Provider, logBus *logbus.Bus, log *slog.Logger) error {
-	if listen == "" {
+// file, unreadable token, a non-loopback bind with no token, or
+// -enable-control-writes set on a non-loopback bind with no token) — once
+// it successfully arms the goroutine, runtime listen errors are logged.
+func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator.Orchestrator, prov provider.Provider, logBus *logbus.Bus, log *slog.Logger) error {
+	if opts.listen == "" {
 		return nil
 	}
 	var token string
-	if tokenFile != "" {
-		t, err := control.LoadToken(tokenFile)
+	if opts.tokenFile != "" {
+		t, err := control.LoadToken(opts.tokenFile)
 		if err != nil {
 			return fmt.Errorf("control token: %w", err)
 		}
 		token = t
 	}
-	if !control.IsLoopbackBind(listen) && token == "" {
+	loopback := control.IsLoopbackBind(opts.listen)
+	if !loopback && token == "" {
 		return fmt.Errorf("control-listen %q is not loopback but -control-token-file is unset; "+
-			"either bind 127.0.0.1 or provide a token file", listen)
+			"either bind 127.0.0.1 or provide a token file", opts.listen)
 	}
-	srv := control.NewServer(listen, controlBackend{o: orch, prov: prov, logBus: logBus}, log,
-		control.WithBearerToken(token))
+	// Mutating verbs on a non-loopback bind without a token are an outright
+	// refusal: the bearer-token gate is the deployment's auth boundary, and
+	// exposing force-* unauthenticated to the network is never the intent.
+	// The loopback + writes + no-token combination is fine (the network is
+	// the boundary).
+	if opts.enableWrites && !loopback && token == "" {
+		return fmt.Errorf("-enable-control-writes on non-loopback bind %q requires -control-token-file", opts.listen)
+	}
+	srv := control.NewServer(opts.listen, controlBackend{o: orch, prov: prov, logBus: logBus}, log,
+		control.WithBearerToken(token),
+		control.WithControlWrites(opts.enableWrites))
 	go func() {
 		if err := srv.Run(ctx); err != nil {
 			log.Error("control plane", "err", err)
@@ -268,6 +294,14 @@ func (b controlBackend) SubscribeLogs(filter logbus.Filter) (<-chan logbus.Recor
 
 func (b controlBackend) LogHistory(n int, filter logbus.Filter) []logbus.Record {
 	return b.logBus.History(n, filter)
+}
+
+func (b controlBackend) ForceReap(ctx context.Context, instanceID string) error {
+	return b.o.ForceReap(ctx, instanceID)
+}
+
+func (b controlBackend) ForceProvision(ctx context.Context) (string, error) {
+	return b.o.ForceProvision(ctx)
 }
 
 // CacheStatus walks the provider for cache info if it supports it (Linode

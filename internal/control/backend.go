@@ -49,6 +49,17 @@ type Backend interface {
 	// match filter, in chronological order (oldest first). Used by
 	// StreamLogs to replay recent history before live streaming.
 	LogHistory(n int, filter logbus.Filter) []logbus.Record
+
+	// ForceReap immediately destroys the worker with the given instance
+	// ID, bypassing billing policy. Audit-logged with the caller identity
+	// threaded through the context. Returns an error if the instance
+	// isn't in the pool or Destroy fails.
+	ForceReap(ctx context.Context, instanceID string) error
+
+	// ForceProvision spawns one extra worker, bypassing scale.max for
+	// this single tick. Returns the new worker's instance ID on success;
+	// async readiness errors surface later via the event stream.
+	ForceProvision(ctx context.Context) (string, error)
 }
 
 // ReconcileResult is the per-tick summary returned by Kick. Counts are

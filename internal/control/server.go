@@ -38,8 +38,19 @@ func WithBearerToken(token string) Option {
 	return func(c *config) { c.token = token }
 }
 
+// WithControlWrites opts the server in to the mutating force-* RPCs
+// (ForceReap, ForceProvision). Default false; mutating RPCs return
+// CodePermissionDenied when the flag is unset. The bearer-token check
+// (WithBearerToken) still applies independently — for a non-loopback
+// deployment, operators get both: a token gates the connection, and this
+// flag gates whether mutations are exposed at all.
+func WithControlWrites(enable bool) Option {
+	return func(c *config) { c.enableWrites = enable }
+}
+
 type config struct {
-	token string
+	token        string
+	enableWrites bool
 }
 
 // NewServer builds the server but does not start it.
@@ -55,7 +66,10 @@ func NewServer(listen string, backend Backend, log *slog.Logger, opts ...Option)
 
 	mux := http.NewServeMux()
 
-	path, handler := controlv1connect.NewControlServiceHandler(&apiHandler{b: backend})
+	path, handler := controlv1connect.NewControlServiceHandler(&apiHandler{
+		b:            backend,
+		enableWrites: cfg.enableWrites,
+	})
 	mux.Handle(path, handler)
 	mux.HandleFunc("/healthz", plainHealthz(backend))
 

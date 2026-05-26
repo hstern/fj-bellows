@@ -43,6 +43,12 @@ const (
 	// ControlServiceReconcileProcedure is the fully-qualified name of the ControlService's Reconcile
 	// RPC.
 	ControlServiceReconcileProcedure = "/fjbellows.control.v1.ControlService/Reconcile"
+	// ControlServiceForceReapProcedure is the fully-qualified name of the ControlService's ForceReap
+	// RPC.
+	ControlServiceForceReapProcedure = "/fjbellows.control.v1.ControlService/ForceReap"
+	// ControlServiceForceProvisionProcedure is the fully-qualified name of the ControlService's
+	// ForceProvision RPC.
+	ControlServiceForceProvisionProcedure = "/fjbellows.control.v1.ControlService/ForceProvision"
 	// ControlServiceStreamEventsProcedure is the fully-qualified name of the ControlService's
 	// StreamEvents RPC.
 	ControlServiceStreamEventsProcedure = "/fjbellows.control.v1.ControlService/StreamEvents"
@@ -72,6 +78,22 @@ type ControlServiceClient interface {
 	// Dropped, Errors). The e2e harness uses this to force a second cycle
 	// without waiting on the poll interval (FJB-17 multi-cycle).
 	Reconcile(context.Context, *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error)
+	// ForceReap immediately destroys the worker with the given instance ID,
+	// even if billing policy would keep it warm. Cancels any in-flight teardown
+	// state and runs provider.Destroy from the reconcile goroutine (so the
+	// single-writer property is preserved). Drops the node from the pool on
+	// success. Every call is audit-logged with the caller identity. Returns
+	// a Connect error (CodeNotFound) when the instance isn't in the pool,
+	// (CodeInternal) when Destroy fails, or (CodePermissionDenied) when
+	// -enable-control-writes is unset.
+	ForceReap(context.Context, *connect.Request[v1.ForceReapRequest]) (*connect.Response[v1.ForceReapResponse], error)
+	// ForceProvision spawns one extra worker, bypassing the scale.max cap
+	// for this single tick. Audit-logged. Returns the new worker's
+	// instance_id on success, or a Connect error (CodeInternal) when
+	// Provision fails immediately. Async readiness errors surface later as
+	// worker_reaped events on the StreamEvents stream. Returns
+	// CodePermissionDenied when -enable-control-writes is unset.
+	ForceProvision(context.Context, *connect.Request[v1.ForceProvisionRequest]) (*connect.Response[v1.ForceProvisionResponse], error)
 	// StreamEvents emits state-transition events as they happen:
 	// worker_provisioned, worker_ready, worker_busy, worker_idle,
 	// worker_reaped, worker_adopted, worker_dropped, job_dispatched,
@@ -137,6 +159,18 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("Reconcile")),
 			connect.WithClientOptions(opts...),
 		),
+		forceReap: connect.NewClient[v1.ForceReapRequest, v1.ForceReapResponse](
+			httpClient,
+			baseURL+ControlServiceForceReapProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("ForceReap")),
+			connect.WithClientOptions(opts...),
+		),
+		forceProvision: connect.NewClient[v1.ForceProvisionRequest, v1.ForceProvisionResponse](
+			httpClient,
+			baseURL+ControlServiceForceProvisionProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("ForceProvision")),
+			connect.WithClientOptions(opts...),
+		),
 		streamEvents: connect.NewClient[v1.StreamEventsRequest, v1.StreamEventsResponse](
 			httpClient,
 			baseURL+ControlServiceStreamEventsProcedure,
@@ -154,12 +188,14 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 
 // controlServiceClient implements ControlServiceClient.
 type controlServiceClient struct {
-	health       *connect.Client[v1.HealthRequest, v1.HealthResponse]
-	listWorkers  *connect.Client[v1.ListWorkersRequest, v1.ListWorkersResponse]
-	getCache     *connect.Client[v1.GetCacheRequest, v1.GetCacheResponse]
-	reconcile    *connect.Client[v1.ReconcileRequest, v1.ReconcileResponse]
-	streamEvents *connect.Client[v1.StreamEventsRequest, v1.StreamEventsResponse]
-	streamLogs   *connect.Client[v1.StreamLogsRequest, v1.StreamLogsResponse]
+	health         *connect.Client[v1.HealthRequest, v1.HealthResponse]
+	listWorkers    *connect.Client[v1.ListWorkersRequest, v1.ListWorkersResponse]
+	getCache       *connect.Client[v1.GetCacheRequest, v1.GetCacheResponse]
+	reconcile      *connect.Client[v1.ReconcileRequest, v1.ReconcileResponse]
+	forceReap      *connect.Client[v1.ForceReapRequest, v1.ForceReapResponse]
+	forceProvision *connect.Client[v1.ForceProvisionRequest, v1.ForceProvisionResponse]
+	streamEvents   *connect.Client[v1.StreamEventsRequest, v1.StreamEventsResponse]
+	streamLogs     *connect.Client[v1.StreamLogsRequest, v1.StreamLogsResponse]
 }
 
 // Health calls fjbellows.control.v1.ControlService.Health.
@@ -180,6 +216,16 @@ func (c *controlServiceClient) GetCache(ctx context.Context, req *connect.Reques
 // Reconcile calls fjbellows.control.v1.ControlService.Reconcile.
 func (c *controlServiceClient) Reconcile(ctx context.Context, req *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error) {
 	return c.reconcile.CallUnary(ctx, req)
+}
+
+// ForceReap calls fjbellows.control.v1.ControlService.ForceReap.
+func (c *controlServiceClient) ForceReap(ctx context.Context, req *connect.Request[v1.ForceReapRequest]) (*connect.Response[v1.ForceReapResponse], error) {
+	return c.forceReap.CallUnary(ctx, req)
+}
+
+// ForceProvision calls fjbellows.control.v1.ControlService.ForceProvision.
+func (c *controlServiceClient) ForceProvision(ctx context.Context, req *connect.Request[v1.ForceProvisionRequest]) (*connect.Response[v1.ForceProvisionResponse], error) {
+	return c.forceProvision.CallUnary(ctx, req)
 }
 
 // StreamEvents calls fjbellows.control.v1.ControlService.StreamEvents.
@@ -213,6 +259,22 @@ type ControlServiceHandler interface {
 	// Dropped, Errors). The e2e harness uses this to force a second cycle
 	// without waiting on the poll interval (FJB-17 multi-cycle).
 	Reconcile(context.Context, *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error)
+	// ForceReap immediately destroys the worker with the given instance ID,
+	// even if billing policy would keep it warm. Cancels any in-flight teardown
+	// state and runs provider.Destroy from the reconcile goroutine (so the
+	// single-writer property is preserved). Drops the node from the pool on
+	// success. Every call is audit-logged with the caller identity. Returns
+	// a Connect error (CodeNotFound) when the instance isn't in the pool,
+	// (CodeInternal) when Destroy fails, or (CodePermissionDenied) when
+	// -enable-control-writes is unset.
+	ForceReap(context.Context, *connect.Request[v1.ForceReapRequest]) (*connect.Response[v1.ForceReapResponse], error)
+	// ForceProvision spawns one extra worker, bypassing the scale.max cap
+	// for this single tick. Audit-logged. Returns the new worker's
+	// instance_id on success, or a Connect error (CodeInternal) when
+	// Provision fails immediately. Async readiness errors surface later as
+	// worker_reaped events on the StreamEvents stream. Returns
+	// CodePermissionDenied when -enable-control-writes is unset.
+	ForceProvision(context.Context, *connect.Request[v1.ForceProvisionRequest]) (*connect.Response[v1.ForceProvisionResponse], error)
 	// StreamEvents emits state-transition events as they happen:
 	// worker_provisioned, worker_ready, worker_busy, worker_idle,
 	// worker_reaped, worker_adopted, worker_dropped, job_dispatched,
@@ -274,6 +336,18 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("Reconcile")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceForceReapHandler := connect.NewUnaryHandler(
+		ControlServiceForceReapProcedure,
+		svc.ForceReap,
+		connect.WithSchema(controlServiceMethods.ByName("ForceReap")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlServiceForceProvisionHandler := connect.NewUnaryHandler(
+		ControlServiceForceProvisionProcedure,
+		svc.ForceProvision,
+		connect.WithSchema(controlServiceMethods.ByName("ForceProvision")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlServiceStreamEventsHandler := connect.NewServerStreamHandler(
 		ControlServiceStreamEventsProcedure,
 		svc.StreamEvents,
@@ -296,6 +370,10 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 			controlServiceGetCacheHandler.ServeHTTP(w, r)
 		case ControlServiceReconcileProcedure:
 			controlServiceReconcileHandler.ServeHTTP(w, r)
+		case ControlServiceForceReapProcedure:
+			controlServiceForceReapHandler.ServeHTTP(w, r)
+		case ControlServiceForceProvisionProcedure:
+			controlServiceForceProvisionHandler.ServeHTTP(w, r)
 		case ControlServiceStreamEventsProcedure:
 			controlServiceStreamEventsHandler.ServeHTTP(w, r)
 		case ControlServiceStreamLogsProcedure:
@@ -323,6 +401,14 @@ func (UnimplementedControlServiceHandler) GetCache(context.Context, *connect.Req
 
 func (UnimplementedControlServiceHandler) Reconcile(context.Context, *connect.Request[v1.ReconcileRequest]) (*connect.Response[v1.ReconcileResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.Reconcile is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) ForceReap(context.Context, *connect.Request[v1.ForceReapRequest]) (*connect.Response[v1.ForceReapResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ForceReap is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) ForceProvision(context.Context, *connect.Request[v1.ForceProvisionRequest]) (*connect.Response[v1.ForceProvisionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ForceProvision is not implemented"))
 }
 
 func (UnimplementedControlServiceHandler) StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.StreamEventsResponse]) error {

@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -141,7 +142,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		case <-t.C:
 			o.Reconcile(jobCtx)
 		case req := <-o.kick:
-			req.result <- o.Reconcile(jobCtx)
+			o.serveKick(jobCtx, req)
 		}
 	}
 }
@@ -205,10 +206,38 @@ type ReconcileResult struct {
 	Errors      []string // formatted; one per failing top-level step
 }
 
+// kickKind selects which out-of-band action the Run-goroutine performs in
+// response to a kickReq. Sharing the kick channel keeps every state mutation
+// on a single goroutine.
+type kickKind int
+
+const (
+	// kickReconcile drives a synchronous Reconcile pass and returns the
+	// per-tick summary on req.reconcile.
+	kickReconcile kickKind = iota
+	// kickForceReap destroys the worker named req.instanceID, bypassing
+	// billing policy. Result lands on req.force.
+	kickForceReap
+	// kickForceProvision spawns one extra worker, bypassing scale.max for
+	// this single tick. The new ID lands on req.force.
+	kickForceProvision
+)
+
 // kickReq is the message the control plane sends on the kick channel to
-// drive a synchronous reconcile.
+// drive an out-of-band action from the Run goroutine. Exactly one of
+// reconcile or force is populated based on kind.
 type kickReq struct {
-	result chan ReconcileResult
+	kind       kickKind
+	instanceID string // populated for kickForceReap
+	reconcile  chan ReconcileResult
+	force      chan forceResult
+}
+
+// forceResult carries the outcome of a force-* kick back to the caller.
+// instanceID is populated by kickForceProvision; empty otherwise.
+type forceResult struct {
+	instanceID string
+	err        error
 }
 
 // Reconcile performs one convergence pass: sync the pool to provider truth,
@@ -251,6 +280,180 @@ func (o *Orchestrator) Reconcile(ctx context.Context) ReconcileResult {
 	r.Reaped = o.applyTeardown(ctx)
 	o.reapZombieRunners(ctx)
 	return r
+}
+
+// serveKick dispatches one out-of-band request from the Run-goroutine. The
+// single-writer property of the reconcile loop is preserved because every
+// pool mutation here happens on the same goroutine as the ticker.
+func (o *Orchestrator) serveKick(jobCtx context.Context, req kickReq) {
+	switch req.kind {
+	case kickReconcile:
+		req.reconcile <- o.Reconcile(jobCtx)
+	case kickForceReap:
+		req.force <- forceResult{err: o.doForceReap(jobCtx, req.instanceID)}
+	case kickForceProvision:
+		req.force <- o.doForceProvision(jobCtx)
+	default:
+		// Unreachable in practice; keep the runtime defensive so a future
+		// kind added without a case here can't silently wedge the caller.
+		if req.reconcile != nil {
+			req.reconcile <- ReconcileResult{Errors: []string{fmt.Sprintf("unknown kick kind: %d", req.kind)}}
+		}
+		if req.force != nil {
+			req.force <- forceResult{err: fmt.Errorf("unknown kick kind: %d", req.kind)}
+		}
+	}
+}
+
+// ForceReap immediately destroys the worker with the given instance ID
+// even if billing policy would keep it warm. Cancels any in-flight teardown
+// state and runs provider.Destroy. Drops the node from the pool on success.
+// Audit-logged with the caller identity threaded via WithAuditCaller.
+// Returns an error if the instance isn't in the pool or Destroy fails.
+//
+// Must only be invoked when Run is active; the kick is served from the Run
+// goroutine. Without Run, the call returns "orchestrator not running".
+func (o *Orchestrator) ForceReap(ctx context.Context, instanceID string) error {
+	o.log.Info("force-reap requested", "id", instanceID, "caller", auditCallerFromCtx(ctx))
+	if o.kick == nil {
+		return errors.New("orchestrator not running (no kick channel)")
+	}
+	resultCh := make(chan forceResult, 1)
+	req := kickReq{kind: kickForceReap, instanceID: instanceID, force: resultCh}
+	select {
+	case o.kick <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case r := <-resultCh:
+		return r.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// ForceProvision spawns one extra worker, bypassing scale.max for this
+// single tick. Audit-logged. Returns the new instance ID on success, or an
+// error if Provision fails immediately (async WaitReady errors surface later
+// as worker_reaped events on the StreamEvents stream).
+func (o *Orchestrator) ForceProvision(ctx context.Context) (string, error) {
+	o.log.Info("force-provision requested", "caller", auditCallerFromCtx(ctx))
+	if o.kick == nil {
+		return "", errors.New("orchestrator not running (no kick channel)")
+	}
+	resultCh := make(chan forceResult, 1)
+	req := kickReq{kind: kickForceProvision, force: resultCh}
+	select {
+	case o.kick <- req:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	select {
+	case r := <-resultCh:
+		return r.instanceID, r.err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// doForceReap runs the synchronous Destroy from the Run goroutine. The
+// node is transitioned to StateRemoving (overriding any prior state) before
+// Destroy is called so a concurrent applyTeardown can't pick it up; on
+// success the pool is updated. On Destroy failure the node is left in
+// StateRemoving and the next reconcile's teardown path will retry it via
+// the normal idle-retry behaviour.
+func (o *Orchestrator) doForceReap(ctx context.Context, instanceID string) error {
+	n, ok := o.pool.Get(instanceID)
+	if !ok {
+		return fmt.Errorf("instance %q not in pool", instanceID)
+	}
+	// Force into StateRemoving so applyTeardown / dispatch concurrent paths
+	// won't act on this node. SetState returns false only when the node
+	// has been deleted between Get and SetState — treat that as "already
+	// reaped by someone" and surface a clean error.
+	if !o.pool.SetState(instanceID, StateRemoving) {
+		return fmt.Errorf("instance %q vanished from pool", instanceID)
+	}
+	if err := o.prov.Destroy(ctx, instanceID); err != nil {
+		o.log.Error("force-reap destroy", "id", instanceID, "err", err)
+		// Drop back to Idle so the next teardown tick (or another force-reap)
+		// can retry. Reaping a node twice is harmless — provider.Destroy is
+		// idempotent.
+		o.pool.SetState(instanceID, StateIdle)
+		return fmt.Errorf("destroy %s: %w", instanceID, err)
+	}
+	o.pool.Delete(instanceID)
+	o.log.Info("force-reaped worker", "id", instanceID, "ip", n.IP)
+	o.emit("worker_reaped", map[string]string{attrID: instanceID, attrIP: n.IP})
+	return nil
+}
+
+// doForceProvision spawns one extra worker, bypassing scale.max. Runs
+// provider.Provision synchronously from the Run goroutine so the caller
+// receives the new instance ID before returning; WaitReady is then
+// off-loaded to a wg goroutine the same way provisionOne does, so the
+// daemon doesn't block its reconcile loop on a slow boot.
+func (o *Orchestrator) doForceProvision(ctx context.Context) forceResult {
+	pinner, canPin := o.disp.(HostKeyPinner)
+	var hostPriv string
+	var sshHostPub ssh.PublicKey
+	if canPin {
+		var err error
+		hostPriv, sshHostPub, err = generateHostKey()
+		if err != nil {
+			o.log.Error("force-provision generate host key", "err", err)
+			return forceResult{err: fmt.Errorf("generate host key: %w", err)}
+		}
+	}
+	userData, err := bootstrap.Render(bootstrap.Params{
+		RunnerVersion:  o.cfg.RunnerVersion,
+		ReadyFile:      o.cfg.ReadyFile,
+		HostPrivateKey: hostPriv,
+	})
+	if err != nil {
+		o.log.Error("force-provision render cloud-init", "err", err)
+		return forceResult{err: fmt.Errorf("render cloud-init: %w", err)}
+	}
+	spec := provider.Spec{
+		Tag:           o.cfg.Tag,
+		Name:          o.cfg.Tag + "-" + shortID(),
+		UserData:      userData,
+		AuthorizedKey: o.cfg.AuthorizedKey,
+		Labels:        o.cfg.Labels,
+	}
+	inst, err := o.prov.Provision(ctx, spec)
+	if err != nil {
+		o.log.Error("force-provision", "err", err)
+		return forceResult{err: fmt.Errorf("provision: %w", err)}
+	}
+	o.pool.Put(&Node{
+		InstanceID: inst.ID,
+		State:      StateProvisioning,
+		IP:         inst.IPv4,
+		CreatedAt:  inst.CreatedAt,
+		LastBusy:   o.now(),
+	})
+	o.log.Info("force-provisioned", "id", inst.ID, "ip", inst.IPv4)
+	o.emit("worker_provisioned", map[string]string{attrID: inst.ID, attrIP: inst.IPv4})
+
+	// Seed the pinned host key before the first dial so WaitReady's
+	// handshake is verified, then push WaitReady off the reconcile
+	// goroutine — identical to the in-band provisionOne path.
+	if canPin {
+		pinner.PinHostKey(inst.IPv4, sshHostPub)
+	}
+	id, ip := inst.ID, inst.IPv4
+	o.wg.Go(func() {
+		if err := o.disp.WaitReady(ctx, id, ip); err != nil {
+			o.log.Error("force-provision worker readiness", "id", id, "err", err)
+			return // teardown / orphan sweep will reclaim it
+		}
+		o.pool.SetState(id, StateIdle)
+		o.log.Info("force-provisioned worker ready", "id", id)
+		o.emit("worker_ready", map[string]string{attrID: id, attrIP: ip})
+	})
+	return forceResult{instanceID: inst.ID}
 }
 
 // reapZombieRunners deletes runner registrations that are ours (name carries

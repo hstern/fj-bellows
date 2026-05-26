@@ -16,21 +16,25 @@ import (
 // zero-value response so a forgotten wire-up still produces valid (empty)
 // data without panicking.
 type Backend struct {
-	mu                sync.Mutex
-	healthFn          func(ctx context.Context) control.HealthStatus
-	poolSnapshotFn    func() []control.WorkerView
-	cacheStatusFn     func(ctx context.Context) *control.CacheStatus
-	kickFn            func(ctx context.Context) (control.ReconcileResult, error)
-	subscribeFn       func() (<-chan events.Event, func())
-	subscribeLogsFn   func(filter logbus.Filter) (<-chan logbus.Record, func())
-	logHistoryFn      func(n int, filter logbus.Filter) []logbus.Record
-	healthCall        int
-	poolSnapshotCall  int
-	cacheStatusCall   int
-	kickCall          int
-	subscribeCall     int
-	subscribeLogsCall int
-	logHistoryCall    int
+	mu                 sync.Mutex
+	healthFn           func(ctx context.Context) control.HealthStatus
+	poolSnapshotFn     func() []control.WorkerView
+	cacheStatusFn      func(ctx context.Context) *control.CacheStatus
+	kickFn             func(ctx context.Context) (control.ReconcileResult, error)
+	subscribeFn        func() (<-chan events.Event, func())
+	subscribeLogsFn    func(filter logbus.Filter) (<-chan logbus.Record, func())
+	logHistoryFn       func(n int, filter logbus.Filter) []logbus.Record
+	forceReapFn        func(ctx context.Context, instanceID string) error
+	forceProvisionFn   func(ctx context.Context) (string, error)
+	healthCall         int
+	poolSnapshotCall   int
+	cacheStatusCall    int
+	kickCall           int
+	subscribeCall      int
+	subscribeLogsCall  int
+	logHistoryCall     int
+	forceReapCall      int
+	forceProvisionCall int
 }
 
 // SetHealth installs the response for subsequent Health calls.
@@ -203,6 +207,58 @@ func (b *Backend) LogHistoryCalls() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.logHistoryCall
+}
+
+// SetForceReap installs the response for subsequent ForceReap calls.
+func (b *Backend) SetForceReap(fn func(ctx context.Context, instanceID string) error) {
+	b.mu.Lock()
+	b.forceReapFn = fn
+	b.mu.Unlock()
+}
+
+// ForceReap implements control.Backend.
+func (b *Backend) ForceReap(ctx context.Context, instanceID string) error {
+	b.mu.Lock()
+	fn := b.forceReapFn
+	b.forceReapCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	return fn(ctx, instanceID)
+}
+
+// ForceReapCalls returns the number of times ForceReap has been invoked.
+func (b *Backend) ForceReapCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.forceReapCall
+}
+
+// SetForceProvision installs the response for subsequent ForceProvision calls.
+func (b *Backend) SetForceProvision(fn func(ctx context.Context) (string, error)) {
+	b.mu.Lock()
+	b.forceProvisionFn = fn
+	b.mu.Unlock()
+}
+
+// ForceProvision implements control.Backend.
+func (b *Backend) ForceProvision(ctx context.Context) (string, error) {
+	b.mu.Lock()
+	fn := b.forceProvisionFn
+	b.forceProvisionCall++
+	b.mu.Unlock()
+	if fn == nil {
+		return "", nil
+	}
+	return fn(ctx)
+}
+
+// ForceProvisionCalls returns the number of times ForceProvision has been invoked.
+func (b *Backend) ForceProvisionCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.forceProvisionCall
 }
 
 // HealthCalls returns the number of times Health has been invoked.

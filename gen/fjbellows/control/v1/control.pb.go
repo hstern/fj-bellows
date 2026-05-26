@@ -581,6 +581,174 @@ func (x *ReconcileResponse) GetErrors() []string {
 	return nil
 }
 
+type ForceReapRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// instance_id is the provider's identifier (Linode ID, docker container
+	// ID, etc.) of the worker to destroy. Must be present in the pool.
+	InstanceId    string `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ForceReapRequest) Reset() {
+	*x = ForceReapRequest{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ForceReapRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ForceReapRequest) ProtoMessage() {}
+
+func (x *ForceReapRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ForceReapRequest.ProtoReflect.Descriptor instead.
+func (*ForceReapRequest) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ForceReapRequest) GetInstanceId() string {
+	if x != nil {
+		return x.InstanceId
+	}
+	return ""
+}
+
+// ForceReapResponse is intentionally empty — failure surfaces via the
+// Connect error code, success means "Destroy returned cleanly and the
+// node was dropped from the pool."
+type ForceReapResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ForceReapResponse) Reset() {
+	*x = ForceReapResponse{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ForceReapResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ForceReapResponse) ProtoMessage() {}
+
+func (x *ForceReapResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ForceReapResponse.ProtoReflect.Descriptor instead.
+func (*ForceReapResponse) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{10}
+}
+
+type ForceProvisionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ForceProvisionRequest) Reset() {
+	*x = ForceProvisionRequest{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ForceProvisionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ForceProvisionRequest) ProtoMessage() {}
+
+func (x *ForceProvisionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ForceProvisionRequest.ProtoReflect.Descriptor instead.
+func (*ForceProvisionRequest) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{11}
+}
+
+type ForceProvisionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// instance_id is the provider's identifier for the newly created
+	// worker. Set on success; the worker may still be in StateProvisioning
+	// when this returns (WaitReady runs asynchronously).
+	InstanceId    string `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ForceProvisionResponse) Reset() {
+	*x = ForceProvisionResponse{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ForceProvisionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ForceProvisionResponse) ProtoMessage() {}
+
+func (x *ForceProvisionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ForceProvisionResponse.ProtoReflect.Descriptor instead.
+func (*ForceProvisionResponse) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ForceProvisionResponse) GetInstanceId() string {
+	if x != nil {
+		return x.InstanceId
+	}
+	return ""
+}
+
 type StreamEventsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -589,7 +757,7 @@ type StreamEventsRequest struct {
 
 func (x *StreamEventsRequest) Reset() {
 	*x = StreamEventsRequest{}
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[9]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -601,7 +769,7 @@ func (x *StreamEventsRequest) String() string {
 func (*StreamEventsRequest) ProtoMessage() {}
 
 func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[9]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -614,7 +782,7 @@ func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamEventsRequest.ProtoReflect.Descriptor instead.
 func (*StreamEventsRequest) Descriptor() ([]byte, []int) {
-	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{9}
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{13}
 }
 
 type StreamEventsResponse struct {
@@ -633,7 +801,7 @@ type StreamEventsResponse struct {
 
 func (x *StreamEventsResponse) Reset() {
 	*x = StreamEventsResponse{}
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[10]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -645,7 +813,7 @@ func (x *StreamEventsResponse) String() string {
 func (*StreamEventsResponse) ProtoMessage() {}
 
 func (x *StreamEventsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[10]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -658,7 +826,7 @@ func (x *StreamEventsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamEventsResponse.ProtoReflect.Descriptor instead.
 func (*StreamEventsResponse) Descriptor() ([]byte, []int) {
-	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{10}
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *StreamEventsResponse) GetAt() *timestamppb.Timestamp {
@@ -700,7 +868,7 @@ type StreamLogsRequest struct {
 
 func (x *StreamLogsRequest) Reset() {
 	*x = StreamLogsRequest{}
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[11]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -712,7 +880,7 @@ func (x *StreamLogsRequest) String() string {
 func (*StreamLogsRequest) ProtoMessage() {}
 
 func (x *StreamLogsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[11]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -725,7 +893,7 @@ func (x *StreamLogsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamLogsRequest.ProtoReflect.Descriptor instead.
 func (*StreamLogsRequest) Descriptor() ([]byte, []int) {
-	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{11}
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *StreamLogsRequest) GetInstanceId() string {
@@ -768,7 +936,7 @@ type StreamLogsResponse struct {
 
 func (x *StreamLogsResponse) Reset() {
 	*x = StreamLogsResponse{}
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[12]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -780,7 +948,7 @@ func (x *StreamLogsResponse) String() string {
 func (*StreamLogsResponse) ProtoMessage() {}
 
 func (x *StreamLogsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fjbellows_control_v1_control_proto_msgTypes[12]
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -793,7 +961,7 @@ func (x *StreamLogsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamLogsResponse.ProtoReflect.Descriptor instead.
 func (*StreamLogsResponse) Descriptor() ([]byte, []int) {
-	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{12}
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *StreamLogsResponse) GetAt() *timestamppb.Timestamp {
@@ -867,7 +1035,15 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\x06reaped\x18\x03 \x01(\x05R\x06reaped\x12\x18\n" +
 	"\aadopted\x18\x04 \x01(\x05R\aadopted\x12\x18\n" +
 	"\adropped\x18\x05 \x01(\x05R\adropped\x12\x16\n" +
-	"\x06errors\x18\x06 \x03(\tR\x06errors\"\x15\n" +
+	"\x06errors\x18\x06 \x03(\tR\x06errors\"3\n" +
+	"\x10ForceReapRequest\x12\x1f\n" +
+	"\vinstance_id\x18\x01 \x01(\tR\n" +
+	"instanceId\"\x13\n" +
+	"\x11ForceReapResponse\"\x17\n" +
+	"\x15ForceProvisionRequest\"9\n" +
+	"\x16ForceProvisionResponse\x12\x1f\n" +
+	"\vinstance_id\x18\x01 \x01(\tR\n" +
+	"instanceId\"\x15\n" +
 	"\x13StreamEventsRequest\"\xdd\x01\n" +
 	"\x14StreamEventsResponse\x12*\n" +
 	"\x02at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x12\n" +
@@ -890,12 +1066,14 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"AttrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\xce\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\x99\x06\n" +
 	"\x0eControlService\x12S\n" +
 	"\x06Health\x12#.fjbellows.control.v1.HealthRequest\x1a$.fjbellows.control.v1.HealthResponse\x12b\n" +
 	"\vListWorkers\x12(.fjbellows.control.v1.ListWorkersRequest\x1a).fjbellows.control.v1.ListWorkersResponse\x12Y\n" +
 	"\bGetCache\x12%.fjbellows.control.v1.GetCacheRequest\x1a&.fjbellows.control.v1.GetCacheResponse\x12\\\n" +
-	"\tReconcile\x12&.fjbellows.control.v1.ReconcileRequest\x1a'.fjbellows.control.v1.ReconcileResponse\x12g\n" +
+	"\tReconcile\x12&.fjbellows.control.v1.ReconcileRequest\x1a'.fjbellows.control.v1.ReconcileResponse\x12\\\n" +
+	"\tForceReap\x12&.fjbellows.control.v1.ForceReapRequest\x1a'.fjbellows.control.v1.ForceReapResponse\x12k\n" +
+	"\x0eForceProvision\x12+.fjbellows.control.v1.ForceProvisionRequest\x1a,.fjbellows.control.v1.ForceProvisionResponse\x12g\n" +
 	"\fStreamEvents\x12).fjbellows.control.v1.StreamEventsRequest\x1a*.fjbellows.control.v1.StreamEventsResponse0\x01\x12a\n" +
 	"\n" +
 	"StreamLogs\x12'.fjbellows.control.v1.StreamLogsRequest\x1a(.fjbellows.control.v1.StreamLogsResponse0\x01B\xdb\x01\n" +
@@ -913,50 +1091,58 @@ func file_fjbellows_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_fjbellows_control_v1_control_proto_rawDescData
 }
 
-var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_fjbellows_control_v1_control_proto_goTypes = []any{
-	(*HealthRequest)(nil),         // 0: fjbellows.control.v1.HealthRequest
-	(*HealthResponse)(nil),        // 1: fjbellows.control.v1.HealthResponse
-	(*ListWorkersRequest)(nil),    // 2: fjbellows.control.v1.ListWorkersRequest
-	(*ListWorkersResponse)(nil),   // 3: fjbellows.control.v1.ListWorkersResponse
-	(*Worker)(nil),                // 4: fjbellows.control.v1.Worker
-	(*GetCacheRequest)(nil),       // 5: fjbellows.control.v1.GetCacheRequest
-	(*GetCacheResponse)(nil),      // 6: fjbellows.control.v1.GetCacheResponse
-	(*ReconcileRequest)(nil),      // 7: fjbellows.control.v1.ReconcileRequest
-	(*ReconcileResponse)(nil),     // 8: fjbellows.control.v1.ReconcileResponse
-	(*StreamEventsRequest)(nil),   // 9: fjbellows.control.v1.StreamEventsRequest
-	(*StreamEventsResponse)(nil),  // 10: fjbellows.control.v1.StreamEventsResponse
-	(*StreamLogsRequest)(nil),     // 11: fjbellows.control.v1.StreamLogsRequest
-	(*StreamLogsResponse)(nil),    // 12: fjbellows.control.v1.StreamLogsResponse
-	nil,                           // 13: fjbellows.control.v1.StreamEventsResponse.AttrsEntry
-	nil,                           // 14: fjbellows.control.v1.StreamLogsResponse.AttrsEntry
-	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
+	(*HealthRequest)(nil),          // 0: fjbellows.control.v1.HealthRequest
+	(*HealthResponse)(nil),         // 1: fjbellows.control.v1.HealthResponse
+	(*ListWorkersRequest)(nil),     // 2: fjbellows.control.v1.ListWorkersRequest
+	(*ListWorkersResponse)(nil),    // 3: fjbellows.control.v1.ListWorkersResponse
+	(*Worker)(nil),                 // 4: fjbellows.control.v1.Worker
+	(*GetCacheRequest)(nil),        // 5: fjbellows.control.v1.GetCacheRequest
+	(*GetCacheResponse)(nil),       // 6: fjbellows.control.v1.GetCacheResponse
+	(*ReconcileRequest)(nil),       // 7: fjbellows.control.v1.ReconcileRequest
+	(*ReconcileResponse)(nil),      // 8: fjbellows.control.v1.ReconcileResponse
+	(*ForceReapRequest)(nil),       // 9: fjbellows.control.v1.ForceReapRequest
+	(*ForceReapResponse)(nil),      // 10: fjbellows.control.v1.ForceReapResponse
+	(*ForceProvisionRequest)(nil),  // 11: fjbellows.control.v1.ForceProvisionRequest
+	(*ForceProvisionResponse)(nil), // 12: fjbellows.control.v1.ForceProvisionResponse
+	(*StreamEventsRequest)(nil),    // 13: fjbellows.control.v1.StreamEventsRequest
+	(*StreamEventsResponse)(nil),   // 14: fjbellows.control.v1.StreamEventsResponse
+	(*StreamLogsRequest)(nil),      // 15: fjbellows.control.v1.StreamLogsRequest
+	(*StreamLogsResponse)(nil),     // 16: fjbellows.control.v1.StreamLogsResponse
+	nil,                            // 17: fjbellows.control.v1.StreamEventsResponse.AttrsEntry
+	nil,                            // 18: fjbellows.control.v1.StreamLogsResponse.AttrsEntry
+	(*timestamppb.Timestamp)(nil),  // 19: google.protobuf.Timestamp
 }
 var file_fjbellows_control_v1_control_proto_depIdxs = []int32{
-	15, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
-	15, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
-	15, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
+	19, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
+	19, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
+	19, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
 	4,  // 3: fjbellows.control.v1.ListWorkersResponse.workers:type_name -> fjbellows.control.v1.Worker
-	15, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
-	15, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
-	15, // 6: fjbellows.control.v1.StreamEventsResponse.at:type_name -> google.protobuf.Timestamp
-	13, // 7: fjbellows.control.v1.StreamEventsResponse.attrs:type_name -> fjbellows.control.v1.StreamEventsResponse.AttrsEntry
-	15, // 8: fjbellows.control.v1.StreamLogsResponse.at:type_name -> google.protobuf.Timestamp
-	14, // 9: fjbellows.control.v1.StreamLogsResponse.attrs:type_name -> fjbellows.control.v1.StreamLogsResponse.AttrsEntry
+	19, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
+	19, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
+	19, // 6: fjbellows.control.v1.StreamEventsResponse.at:type_name -> google.protobuf.Timestamp
+	17, // 7: fjbellows.control.v1.StreamEventsResponse.attrs:type_name -> fjbellows.control.v1.StreamEventsResponse.AttrsEntry
+	19, // 8: fjbellows.control.v1.StreamLogsResponse.at:type_name -> google.protobuf.Timestamp
+	18, // 9: fjbellows.control.v1.StreamLogsResponse.attrs:type_name -> fjbellows.control.v1.StreamLogsResponse.AttrsEntry
 	0,  // 10: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
 	2,  // 11: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
 	5,  // 12: fjbellows.control.v1.ControlService.GetCache:input_type -> fjbellows.control.v1.GetCacheRequest
 	7,  // 13: fjbellows.control.v1.ControlService.Reconcile:input_type -> fjbellows.control.v1.ReconcileRequest
-	9,  // 14: fjbellows.control.v1.ControlService.StreamEvents:input_type -> fjbellows.control.v1.StreamEventsRequest
-	11, // 15: fjbellows.control.v1.ControlService.StreamLogs:input_type -> fjbellows.control.v1.StreamLogsRequest
-	1,  // 16: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
-	3,  // 17: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
-	6,  // 18: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
-	8,  // 19: fjbellows.control.v1.ControlService.Reconcile:output_type -> fjbellows.control.v1.ReconcileResponse
-	10, // 20: fjbellows.control.v1.ControlService.StreamEvents:output_type -> fjbellows.control.v1.StreamEventsResponse
-	12, // 21: fjbellows.control.v1.ControlService.StreamLogs:output_type -> fjbellows.control.v1.StreamLogsResponse
-	16, // [16:22] is the sub-list for method output_type
-	10, // [10:16] is the sub-list for method input_type
+	9,  // 14: fjbellows.control.v1.ControlService.ForceReap:input_type -> fjbellows.control.v1.ForceReapRequest
+	11, // 15: fjbellows.control.v1.ControlService.ForceProvision:input_type -> fjbellows.control.v1.ForceProvisionRequest
+	13, // 16: fjbellows.control.v1.ControlService.StreamEvents:input_type -> fjbellows.control.v1.StreamEventsRequest
+	15, // 17: fjbellows.control.v1.ControlService.StreamLogs:input_type -> fjbellows.control.v1.StreamLogsRequest
+	1,  // 18: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
+	3,  // 19: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
+	6,  // 20: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
+	8,  // 21: fjbellows.control.v1.ControlService.Reconcile:output_type -> fjbellows.control.v1.ReconcileResponse
+	10, // 22: fjbellows.control.v1.ControlService.ForceReap:output_type -> fjbellows.control.v1.ForceReapResponse
+	12, // 23: fjbellows.control.v1.ControlService.ForceProvision:output_type -> fjbellows.control.v1.ForceProvisionResponse
+	14, // 24: fjbellows.control.v1.ControlService.StreamEvents:output_type -> fjbellows.control.v1.StreamEventsResponse
+	16, // 25: fjbellows.control.v1.ControlService.StreamLogs:output_type -> fjbellows.control.v1.StreamLogsResponse
+	18, // [18:26] is the sub-list for method output_type
+	10, // [10:18] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name
 	10, // [10:10] is the sub-list for extension extendee
 	0,  // [0:10] is the sub-list for field type_name
@@ -973,7 +1159,7 @@ func file_fjbellows_control_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fjbellows_control_v1_control_proto_rawDesc), len(file_fjbellows_control_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   15,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
