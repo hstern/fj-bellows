@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
+	"gopkg.in/yaml.v3"
 
 	"github.com/hstern/fj-bellows/internal/bootstrap"
 	"github.com/hstern/fj-bellows/internal/config"
@@ -168,6 +170,8 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 		listen:       opts.controlListen,
 		tokenFile:    opts.controlTokenFile,
 		enableWrites: opts.enableControlWrites,
+		configPath:   opts.configPath,
+		cfg:          cfg,
 	}, orch, prov, logBus, log); err != nil {
 		return err
 	}
@@ -188,6 +192,8 @@ type controlOpts struct {
 	listen       string
 	tokenFile    string
 	enableWrites bool
+	configPath   string
+	cfg          *config.Config
 }
 
 // startControlPlane spins up the operator-facing HTTP/RPC server on a side
@@ -223,7 +229,14 @@ func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator
 	if opts.enableWrites && !loopback && token == "" {
 		return fmt.Errorf("-enable-control-writes on non-loopback bind %q requires -control-token-file", opts.listen)
 	}
-	srv := control.NewServer(opts.listen, controlBackend{o: orch, prov: prov, logBus: logBus}, log,
+	backend := &controlBackend{
+		o:          orch,
+		prov:       prov,
+		logBus:     logBus,
+		configPath: opts.configPath,
+		cfg:        opts.cfg,
+	}
+	srv := control.NewServer(opts.listen, backend, log,
 		control.WithBearerToken(token),
 		control.WithControlWrites(opts.enableWrites))
 	go func() {
@@ -237,13 +250,21 @@ func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator
 // controlBackend adapts *orchestrator.Orchestrator (and the live provider,
 // for cache-aware reports) to control.Backend so the orchestrator package
 // stays free of generated-protobuf coupling.
+//
+// configMu protects cfg, which is swapped on a successful ReloadConfig.
+// GetConfig and ReloadConfig both take it; no other adapter method touches
+// the on-disk config struct (the orchestrator owns its own copy).
 type controlBackend struct {
-	o      *orchestrator.Orchestrator
-	prov   provider.Provider
-	logBus *logbus.Bus
+	o          *orchestrator.Orchestrator
+	prov       provider.Provider
+	logBus     *logbus.Bus
+	configPath string
+
+	configMu sync.RWMutex
+	cfg      *config.Config
 }
 
-func (b controlBackend) Health(ctx context.Context) control.HealthStatus {
+func (b *controlBackend) Health(ctx context.Context) control.HealthStatus {
 	s := b.o.Health(ctx)
 	return control.HealthStatus{
 		Healthy:            s.Healthy,
@@ -254,7 +275,7 @@ func (b controlBackend) Health(ctx context.Context) control.HealthStatus {
 	}
 }
 
-func (b controlBackend) PoolSnapshot() []control.WorkerView {
+func (b *controlBackend) PoolSnapshot() []control.WorkerView {
 	in := b.o.PoolSnapshot()
 	out := make([]control.WorkerView, 0, len(in))
 	for _, w := range in {
@@ -273,7 +294,7 @@ func (b controlBackend) PoolSnapshot() []control.WorkerView {
 	return out
 }
 
-func (b controlBackend) Kick(ctx context.Context) (control.ReconcileResult, error) {
+func (b *controlBackend) Kick(ctx context.Context) (control.ReconcileResult, error) {
 	r, err := b.o.Kick(ctx)
 	if err != nil {
 		return control.ReconcileResult{}, err
@@ -288,38 +309,102 @@ func (b controlBackend) Kick(ctx context.Context) (control.ReconcileResult, erro
 	}, nil
 }
 
-func (b controlBackend) Subscribe() (<-chan events.Event, func()) {
+func (b *controlBackend) Subscribe() (<-chan events.Event, func()) {
 	return b.o.Subscribe()
 }
 
-func (b controlBackend) SubscribeLogs(filter logbus.Filter) (<-chan logbus.Record, func()) {
+func (b *controlBackend) SubscribeLogs(filter logbus.Filter) (<-chan logbus.Record, func()) {
 	return b.logBus.SubscribeFiltered(filter)
 }
 
-func (b controlBackend) LogHistory(n int, filter logbus.Filter) []logbus.Record {
+func (b *controlBackend) LogHistory(n int, filter logbus.Filter) []logbus.Record {
 	return b.logBus.History(n, filter)
 }
 
-func (b controlBackend) ForceReap(ctx context.Context, instanceID string) error {
+func (b *controlBackend) ForceReap(ctx context.Context, instanceID string) error {
 	return b.o.ForceReap(ctx, instanceID)
 }
 
-func (b controlBackend) ForceProvision(ctx context.Context) (string, error) {
+func (b *controlBackend) ForceProvision(ctx context.Context) (string, error) {
 	return b.o.ForceProvision(ctx)
 }
 
-func (b controlBackend) Pause(ctx context.Context) {
+func (b *controlBackend) Pause(ctx context.Context) {
 	b.o.Pause(ctx)
 }
 
-func (b controlBackend) Resume(ctx context.Context) {
+func (b *controlBackend) Resume(ctx context.Context) {
 	b.o.Resume(ctx)
+}
+
+// GetConfig serialises the daemon's live config (with secrets redacted) as
+// YAML and returns the path the config was originally loaded from. The
+// orchestrator owns the hot-reloadable subset internally; controlBackend's
+// stored *config.Config is the on-disk source of truth, refreshed on every
+// successful ReloadConfig.
+func (b *controlBackend) GetConfig(_ context.Context) (string, string) {
+	b.configMu.RLock()
+	cfg := b.cfg
+	b.configMu.RUnlock()
+	if cfg == nil {
+		return "", b.configPath
+	}
+	redacted := config.Redact(cfg)
+	out, err := yaml.Marshal(redacted)
+	if err != nil {
+		// Marshal of a struct with primitive fields + a yaml.Node can't
+		// realistically fail; surface a one-line marker rather than
+		// panicking from a control RPC.
+		return fmt.Sprintf("# marshal error: %v\n", err), b.configPath
+	}
+	return string(out), b.configPath
+}
+
+// ReloadConfig re-reads config.yaml from disk, validates it, and hands the
+// hot-reloadable subset to the orchestrator. On success the backend's
+// in-memory *config.Config is swapped so a subsequent GetConfig reflects the
+// new values. On failure (read/parse error or non-hot field changed), the
+// in-memory config and the orchestrator are left untouched.
+func (b *controlBackend) ReloadConfig(_ context.Context) ([]string, error) {
+	newCfg, err := config.Load(b.configPath)
+	if err != nil {
+		return nil, fmt.Errorf("reload %s: %w", b.configPath, err)
+	}
+	// Build the candidate orchestrator config by overlaying the on-disk
+	// values onto whatever the orchestrator is running now. CLI-flag-only
+	// fields (RunnerVersion, drain settings, ReadyFile, AuthorizedKey,
+	// Tag, billing model) keep their startup values; ApplyHotConfig will
+	// reject any drift on those.
+	cur := b.o.CurrentConfig()
+	next := cur
+	next.MaxScale = newCfg.Scale.Max
+	next.Labels = newCfg.Forgejo.Labels
+	next.PollInterval = newCfg.Poll.Interval.D()
+	next.Teardown.IdleTimeout = newCfg.Poll.IdleTimeout.D()
+	next.Teardown.HourMargin = newCfg.Poll.HourMargin.D()
+	next.Teardown.BillingHour = newCfg.Poll.BillingHour.D()
+	// Non-hot fields the on-disk file carries: surfacing a change here
+	// before ApplyHotConfig keeps the error message close to the file
+	// the operator just edited.
+	if newCfg.Tag != cur.Tag {
+		return nil, fmt.Errorf("reload rejected: tag changed (was %q, now %q); restart required",
+			cur.Tag, newCfg.Tag)
+	}
+
+	changed, err := b.o.ApplyHotConfig(next)
+	if err != nil {
+		return nil, err
+	}
+	b.configMu.Lock()
+	b.cfg = newCfg
+	b.configMu.Unlock()
+	return changed, nil
 }
 
 // CacheStatus walks the provider for cache info if it supports it (Linode
 // does; docker doesn't). The type-assertion keeps the orchestrator package
 // free of provider-specific imports.
-func (b controlBackend) CacheStatus(ctx context.Context) *control.CacheStatus {
+func (b *controlBackend) CacheStatus(ctx context.Context) *control.CacheStatus {
 	type cacheReporter interface {
 		CacheStatus(ctx context.Context) *linodeprov.CacheStatus
 	}

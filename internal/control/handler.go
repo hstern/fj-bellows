@@ -242,6 +242,48 @@ func (h *apiHandler) ForceReap(
 	return connect.NewResponse(&controlv1.ForceReapResponse{}), nil
 }
 
+func (h *apiHandler) GetConfig(
+	ctx context.Context,
+	_ *connect.Request[controlv1.GetConfigRequest],
+) (*connect.Response[controlv1.GetConfigResponse], error) {
+	yamlText, path := h.b.GetConfig(ctx)
+	return connect.NewResponse(&controlv1.GetConfigResponse{
+		Yaml:       yamlText,
+		ConfigPath: path,
+	}), nil
+}
+
+// ReloadConfig structurally mirrors ForceProvision (write-gate + audit-caller
+// + backend call + error map) but the error code mapping differs
+// (FailedPrecondition vs Internal); extracting a helper would have to take
+// the error mapper as a func, which is more boilerplate than the duplication
+// it removes.
+//
+//nolint:dupl // see comment above
+func (h *apiHandler) ReloadConfig(
+	ctx context.Context,
+	req *connect.Request[controlv1.ReloadConfigRequest],
+) (*connect.Response[controlv1.ReloadConfigResponse], error) {
+	if !h.enableWrites {
+		return nil, connect.NewError(connect.CodePermissionDenied, errWritesDisabled)
+	}
+	ctx = orchestrator.WithAuditCaller(ctx, auditCaller(req))
+	changed, err := h.b.ReloadConfig(ctx)
+	if err != nil {
+		// "reload rejected" (non-hot field changed) is operator-facing
+		// "your config can't be hot-swapped" — a precondition failure,
+		// not an internal one. Read I/O / parse errors are also
+		// FailedPrecondition because they're on-disk state the operator
+		// is responsible for. We keep one error class for the whole
+		// "can't reload" bucket so clients don't need to switch.
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
+	return connect.NewResponse(&controlv1.ReloadConfigResponse{
+		ChangedFields: changed,
+	}), nil
+}
+
+//nolint:dupl // mirrors ReloadConfig by design; see comment on that function.
 func (h *apiHandler) ForceProvision(
 	ctx context.Context,
 	req *connect.Request[controlv1.ForceProvisionRequest],
