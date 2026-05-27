@@ -81,6 +81,8 @@ transport:
 }
 
 // TestTransportCacheGatewayValidation — each invalid input gets a focused error.
+//
+//nolint:funlen // table-driven: 12 small validation cases inline for readability.
 func TestTransportCacheGatewayValidation(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -76,9 +76,11 @@ func TestSynthSpecsForTransport(t *testing.T) {
 // TestBuildRuleSetCacheGatewayIPsec verifies the cache-gateway transport
 // synthesizes ACCEPT rules for IPsec (udp/500 + udp/4500 + ESP) instead of
 // the legacy tcp/22.
+//
+//nolint:gocyclo // bookkeeping across 3 specs × 2 families; intentional for one assertion site.
 func TestBuildRuleSetCacheGatewayIPsec(t *testing.T) {
 	fw := testFirewallWithTransport(firewallConfig{}, transportCacheGateway)
-	rs, err := fw.buildRuleSet(context.Background(), []string{testCIDR1, "2001:db8::1/128"})
+	rs, err := fw.buildRuleSet(context.Background(), []string{testCIDR1, testCIDRv6})
 	if err != nil {
 		t.Fatalf("buildRuleSet: %v", err)
 	}
@@ -134,7 +136,7 @@ func TestBuildRuleSetCacheGatewayIPsec(t *testing.T) {
 // CIDR set; rule labels must remain unique within the firewall.
 func TestBuildRuleSetCacheGatewayLabelsUnique(t *testing.T) {
 	fw := testFirewallWithTransport(firewallConfig{}, transportCacheGateway)
-	rs, err := fw.buildRuleSet(context.Background(), []string{testCIDR1, "2001:db8::1/128"})
+	rs, err := fw.buildRuleSet(context.Background(), []string{testCIDR1, testCIDRv6})
 	if err != nil {
 		t.Fatalf("buildRuleSet: %v", err)
 	}
@@ -228,7 +230,7 @@ func TestBuildRuleSetCacheGatewayRejectsWhenOverCap(t *testing.T) {
 // TestBuildRuleSetSSHExplicitMatchesDefault — operator-supplied "ssh"
 // produces an identical ruleset to the default empty mode.
 func TestBuildRuleSetSSHExplicitMatchesDefault(t *testing.T) {
-	cidrs := []string{testCIDR1, "2001:db8::1/128"}
+	cidrs := []string{testCIDR1, testCIDRv6}
 	def := testFirewallWithTransport(firewallConfig{}, "")
 	exp := testFirewallWithTransport(firewallConfig{}, transportSSHExplicit)
 	rsDef, err := def.buildRuleSet(context.Background(), cidrs)

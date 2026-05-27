@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -73,8 +74,9 @@ const (
 	TransportCacheGateway = "cache-gateway"
 )
 
-// Egress source labels. "worker-vpc" resolves to the configured worker VPC
-// subnet via the active provider.
+// EgressFromWorkerVPC is the source label for LANEgressRule entries whose
+// traffic originates from the worker VPC subnet. The renderer resolves
+// "worker-vpc" to the configured worker VPC CIDR via the active provider.
 const EgressFromWorkerVPC = "worker-vpc"
 
 func (t *Transport) applyDefaults() {
@@ -102,7 +104,7 @@ func (t *Transport) validate() error {
 
 func (tn *Tunnel) validate() error {
 	if len(tn.Routes) == 0 {
-		return fmt.Errorf("transport.tunnel: routes must list at least one CIDR")
+		return errors.New("transport.tunnel: routes must list at least one CIDR")
 	}
 	for i, r := range tn.Routes {
 		if _, _, err := net.ParseCIDR(r); err != nil {
@@ -127,7 +129,7 @@ func (r *LANEgressRule) validate() error {
 		return fmt.Errorf("unknown from %q (want %q)", r.From, EgressFromWorkerVPC)
 	}
 	if r.To == "" {
-		return fmt.Errorf("to is required")
+		return errors.New("to is required")
 	}
 	if ip := net.ParseIP(r.To); ip == nil {
 		return fmt.Errorf("to %q is not a valid IP address", r.To)
@@ -139,7 +141,7 @@ func (r *LANEgressRule) validate() error {
 	case "tcp", "udp":
 		// ok
 	case "":
-		return fmt.Errorf("proto is required (\"tcp\" or \"udp\")")
+		return errors.New(`proto is required ("tcp" or "udp")`)
 	default:
 		return fmt.Errorf("proto %q must be \"tcp\" or \"udp\"", r.Proto)
 	}

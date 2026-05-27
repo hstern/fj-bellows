@@ -3,12 +3,20 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 func writeTemp(t *testing.T, name, content string) string {
 	t.Helper()
+	// Reject anything that could escape the per-test temp dir. All
+	// callers pass test-supplied literals (e.g. "config.yaml"); this
+	// guard clears the gosec G703 taint without hand-waving it via
+	// //nolint, and protects against a future caller getting clever.
+	if strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		t.Fatalf("writeTemp: unsafe name %q", name)
+	}
 	dir := t.TempDir()
 	p := filepath.Join(dir, name)
 	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {

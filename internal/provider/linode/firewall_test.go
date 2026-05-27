@@ -162,7 +162,7 @@ func mustBuildRuleSet(t *testing.T, cidrs []string) linodego.FirewallRuleSet {
 }
 
 func TestBuildRuleSet(t *testing.T) {
-	rs := mustBuildRuleSet(t, []string{testCIDR1, "2001:db8::1/128", "198.51.100.0/24"})
+	rs := mustBuildRuleSet(t, []string{testCIDR1, testCIDRv6, "198.51.100.0/24"})
 	if rs.InboundPolicy != fwInboundDrop || rs.OutboundPolicy != fwActionAccept {
 		t.Errorf("policies = %q/%q, want DROP/ACCEPT", rs.InboundPolicy, rs.OutboundPolicy)
 	}

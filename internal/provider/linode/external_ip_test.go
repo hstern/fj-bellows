@@ -15,9 +15,10 @@ const (
 	testV4URL = "https://ipv4.example"
 	testV6URL = "https://ipv6.example"
 
-	testCIDR1 = "192.0.2.10/32"
-	testCIDR2 = "198.51.100.5/32"
-	testTag   = "test-deploy"
+	testCIDR1  = "192.0.2.10/32"
+	testCIDR2  = "198.51.100.5/32"
+	testCIDRv6 = "2001:db8::1/128"
+	testTag    = "test-deploy"
 
 	testCIDR3 = "203.0.113.10/32"
 	testCIDR4 = "203.0.113.5/32"
@@ -71,7 +72,7 @@ func TestResolveExternalIPBothFamilies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := []string{testCIDR3, "2001:db8::1/128"}
+	want := []string{testCIDR3, testCIDRv6}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -113,7 +114,7 @@ func TestResolveExternalIPOnlyV6(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(got) != 1 || got[0] != "2001:db8::1/128" {
+	if len(got) != 1 || got[0] != testCIDRv6 {
 		t.Errorf("got %v, want [2001:db8::1/128]", got)
 	}
 }

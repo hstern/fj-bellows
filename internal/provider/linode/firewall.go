@@ -453,6 +453,56 @@ const (
 	maxRulesPerFW   = 25
 )
 
+// buildSynthInboundRules materialises the synthesized ACCEPT rules from
+// per-spec port tuples + the v4/v6 chunked allow_inbound CIDR sets. Each
+// (spec × address-family-chunk) becomes one rule. When chunkRules is zero
+// (degenerate empty allow_inbound) emits one empty placeholder per spec
+// so labels remain unique and the firewall create still succeeds.
+//
+// Lives outside buildRuleSet to keep its cyclomatic complexity bounded;
+// pure function of inputs.
+func buildSynthInboundRules(specs []synthInboundSpec, v4Chunks, v6Chunks [][]string, capHint int) []linodego.FirewallRule {
+	inbound := make([]linodego.FirewallRule, 0, capHint)
+	empty := []string{}
+	if len(v4Chunks)+len(v6Chunks) == 0 {
+		for _, s := range specs {
+			inbound = append(inbound, linodego.FirewallRule{
+				Action:    fwActionAccept,
+				Label:     fmt.Sprintf("fj-bellows-%s-v4-1", s.labelTag),
+				Protocol:  s.proto,
+				Ports:     s.ports,
+				Addresses: linodego.NetworkAddresses{IPv4: &empty, IPv6: &empty},
+			})
+		}
+		return inbound
+	}
+	for _, s := range specs {
+		for i, chunk := range v4Chunks {
+			c := chunk
+			inbound = append(inbound, linodego.FirewallRule{
+				Action:      fwActionAccept,
+				Label:       fmt.Sprintf("fj-bellows-%s-v4-%d", s.labelTag, i+1),
+				Description: "fj-bellows: " + s.descNote + " (v4)",
+				Protocol:    s.proto,
+				Ports:       s.ports,
+				Addresses:   linodego.NetworkAddresses{IPv4: &c, IPv6: &empty},
+			})
+		}
+		for i, chunk := range v6Chunks {
+			c := chunk
+			inbound = append(inbound, linodego.FirewallRule{
+				Action:      fwActionAccept,
+				Label:       fmt.Sprintf("fj-bellows-%s-v6-%d", s.labelTag, i+1),
+				Description: "fj-bellows: " + s.descNote + " (v6)",
+				Protocol:    s.proto,
+				Ports:       s.ports,
+				Addresses:   linodego.NetworkAddresses{IPv4: &empty, IPv6: &c},
+			})
+		}
+	}
+	return inbound
+}
+
 // synthInboundSpec is one synthesized (protocol, ports, label-stem) tuple
 // used to materialise an ACCEPT rule per address family from allow_inbound.
 // Encodes the transport-mode-specific port surface in one place so
@@ -546,44 +596,7 @@ func (m *managedFirewall) buildRuleSet(ctx context.Context, cidrs []string) (lin
 		)
 	}
 
-	inbound := make([]linodego.FirewallRule, 0, totalInbound)
-	empty := []string{}
-	if synthCount == 0 {
-		// One empty placeholder per spec so the labels remain unique.
-		for _, s := range specs {
-			inbound = append(inbound, linodego.FirewallRule{
-				Action:    fwActionAccept,
-				Label:     fmt.Sprintf("fj-bellows-%s-v4-1", s.labelTag),
-				Protocol:  s.proto,
-				Ports:     s.ports,
-				Addresses: linodego.NetworkAddresses{IPv4: &empty, IPv6: &empty},
-			})
-		}
-	}
-	for _, s := range specs {
-		for i, chunk := range v4Chunks {
-			c := chunk
-			inbound = append(inbound, linodego.FirewallRule{
-				Action:      fwActionAccept,
-				Label:       fmt.Sprintf("fj-bellows-%s-v4-%d", s.labelTag, i+1),
-				Description: "fj-bellows: " + s.descNote + " (v4)",
-				Protocol:    s.proto,
-				Ports:       s.ports,
-				Addresses:   linodego.NetworkAddresses{IPv4: &c, IPv6: &empty},
-			})
-		}
-		for i, chunk := range v6Chunks {
-			c := chunk
-			inbound = append(inbound, linodego.FirewallRule{
-				Action:      fwActionAccept,
-				Label:       fmt.Sprintf("fj-bellows-%s-v6-%d", s.labelTag, i+1),
-				Description: "fj-bellows: " + s.descNote + " (v6)",
-				Protocol:    s.proto,
-				Ports:       s.ports,
-				Addresses:   linodego.NetworkAddresses{IPv4: &empty, IPv6: &c},
-			})
-		}
-	}
+	inbound := buildSynthInboundRules(specs, v4Chunks, v6Chunks, totalInbound)
 	for _, r := range cfg.ExtraInbound {
 		built, err := m.buildExtraRule(ctx, r)
 		if err != nil {
