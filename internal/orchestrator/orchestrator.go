@@ -567,6 +567,7 @@ func (o *Orchestrator) syncPool(insts []provider.Instance) (adopted, dropped int
 				InstanceID: in.ID,
 				State:      StateIdle, // adopt as warm; readiness re-confirmed on dispatch
 				IP:         in.IPv4,
+				VPCIP:      in.VPCIPv4,
 				CreatedAt:  in.CreatedAt,
 				LastBusy:   now,
 			})
@@ -722,6 +723,7 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 			InstanceID: inst.ID,
 			State:      StateProvisioning,
 			IP:         inst.IPv4,
+			VPCIP:      inst.VPCIPv4,
 			CreatedAt:  inst.CreatedAt,
 			LastBusy:   o.now(),
 		})

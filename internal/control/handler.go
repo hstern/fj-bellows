@@ -62,6 +62,7 @@ func (h *apiHandler) ListWorkers(
 			InstanceId:     w.InstanceID,
 			State:          w.State,
 			Ip:             w.IP,
+			VpcIp:          w.VPCIP,
 			CreatedAt:      tsOrNil(w.CreatedAt),
 			LastBusy:       tsOrNil(w.LastBusy),
 			CurrentJob:     w.CurrentJob,

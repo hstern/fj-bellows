@@ -129,7 +129,11 @@ type CacheStatus struct {
 type WorkerView struct {
 	InstanceID string
 	State      string
-	IP         string
+	// IP is the public IPv4 (legacy dial address under ssh transport).
+	IP string
+	// VPCIP is the VPC-side IPv4 (dial address under cache-gateway
+	// transport, FJB-54). Empty when no VPC is configured.
+	VPCIP      string
 	CreatedAt  time.Time
 	LastBusy   time.Time
 	CurrentJob string

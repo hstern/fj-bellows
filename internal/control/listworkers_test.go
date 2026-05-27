@@ -54,6 +54,7 @@ func twoWorkerPool() twoWorkerFixture {
 				InstanceID:     "linode-12345",
 				State:          "busy",
 				IP:             "203.0.113.5",
+				VPCIP:          "10.0.0.10",
 				CreatedAt:      created,
 				LastBusy:       lastBusy,
 				CurrentJob:     "job-abc",
@@ -62,9 +63,10 @@ func twoWorkerPool() twoWorkerFixture {
 				BillingModel:   "hourly_round_up",
 			},
 			{
-				InstanceID:     "linode-67890",
-				State:          "idle",
-				IP:             "203.0.113.7",
+				InstanceID: "linode-67890",
+				State:      "idle",
+				IP:         "203.0.113.7",
+				// VPCIP intentionally empty — covers the no-VPC path.
 				CreatedAt:      created.Add(-time.Minute),
 				LastBusy:       lastBusy.Add(-time.Minute),
 				ReapEligibleAt: lastBusy.Add(-time.Minute).Add(5 * time.Minute),
@@ -101,12 +103,19 @@ func TestListWorkers_RPC_PopulatedPool(t *testing.T) {
 		t.Fatalf("worker[0].created_at: want %v got %v", fx.created, got)
 	}
 
+	if w0.VpcIp != "10.0.0.10" {
+		t.Fatalf("worker[0].vpc_ip: want 10.0.0.10 got %q", w0.VpcIp)
+	}
+
 	w1 := resp.Msg.Workers[1]
 	if w1.State != "idle" {
 		t.Fatalf("worker[1].state: want idle got %q", w1.State)
 	}
 	if w1.CurrentJob != "" {
 		t.Fatalf("idle worker must have empty current_job; got %q", w1.CurrentJob)
+	}
+	if w1.VpcIp != "" {
+		t.Fatalf("worker[1].vpc_ip: want empty (no VPC) got %q", w1.VpcIp)
 	}
 }
 

@@ -131,12 +131,13 @@ func redrawWorkers(ctx context.Context, client interface {
 // render "-" when the policy doesn't make them meaningful.
 func renderWorkers(w io.Writer, workers []*controlv1.Worker) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	outln(tw, "INSTANCE\tSTATE\tIP\tAGE\tLAST_BUSY\tJOB\tBILLING\tREAP_AT")
+	outln(tw, "INSTANCE\tSTATE\tIP\tVPC_IP\tAGE\tLAST_BUSY\tJOB\tBILLING\tREAP_AT")
 	for _, wk := range workers {
-		outf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		outf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			wk.InstanceId,
 			wk.State,
 			emptyDash(wk.Ip),
+			emptyDash(wk.VpcIp),
 			ageOrDash(wk.CreatedAt),
 			ageOrDash(wk.LastBusy),
 			emptyDash(wk.CurrentJob),

@@ -237,9 +237,17 @@ type Worker struct {
 	InstanceId string `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
 	// state is one of: provisioning | idle | busy | draining | removing.
 	State string `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
-	// ip is the worker's reachable address; empty for providers that dispatch
-	// by container exec (docker).
+	// ip is the worker's public IPv4 address. Empty for providers that
+	// dispatch by container exec (docker), and empty under future
+	// private-only worker configurations (see FJB-57).
 	Ip string `protobuf:"bytes,3,opt,name=ip,proto3" json:"ip,omitempty"`
+	// vpc_ip is the worker's IPv4 address on the provider VPC, when one is
+	// configured. Empty when no VPC is in use. Under the cache-as-gateway
+	// transport (FJB-54, transport.mode=cache-gateway) this is the address
+	// the orchestrator dials for dispatch; under the legacy SSH-on-public-IP
+	// transport `ip` is the dial address and this field is informational.
+	// Stable across the worker's lifetime once assigned.
+	VpcIp string `protobuf:"bytes,10,opt,name=vpc_ip,json=vpcIp,proto3" json:"vpc_ip,omitempty"`
 	// created_at is the provider's instance creation time. Anchors the
 	// billing-hour timer.
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
@@ -311,6 +319,13 @@ func (x *Worker) GetState() string {
 func (x *Worker) GetIp() string {
 	if x != nil {
 		return x.Ip
+	}
+	return ""
+}
+
+func (x *Worker) GetVpcIp() string {
+	if x != nil {
+		return x.VpcIp
 	}
 	return ""
 }
@@ -1609,12 +1624,14 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\x06paused\x18\x05 \x01(\bR\x06paused\"\x14\n" +
 	"\x12ListWorkersRequest\"M\n" +
 	"\x13ListWorkersResponse\x126\n" +
-	"\aworkers\x18\x01 \x03(\v2\x1c.fjbellows.control.v1.WorkerR\aworkers\"\x94\x03\n" +
+	"\aworkers\x18\x01 \x03(\v2\x1c.fjbellows.control.v1.WorkerR\aworkers\"\xab\x03\n" +
 	"\x06Worker\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x0e\n" +
-	"\x02ip\x18\x03 \x01(\tR\x02ip\x129\n" +
+	"\x02ip\x18\x03 \x01(\tR\x02ip\x12\x15\n" +
+	"\x06vpc_ip\x18\n" +
+	" \x01(\tR\x05vpcIp\x129\n" +
 	"\n" +
 	"created_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x127\n" +
 	"\tlast_busy\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\blastBusy\x12\x1f\n" +

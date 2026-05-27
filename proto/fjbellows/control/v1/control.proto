@@ -162,9 +162,18 @@ message Worker {
   // state is one of: provisioning | idle | busy | draining | removing.
   string state = 2;
 
-  // ip is the worker's reachable address; empty for providers that dispatch
-  // by container exec (docker).
+  // ip is the worker's public IPv4 address. Empty for providers that
+  // dispatch by container exec (docker), and empty under future
+  // private-only worker configurations (see FJB-57).
   string ip = 3;
+
+  // vpc_ip is the worker's IPv4 address on the provider VPC, when one is
+  // configured. Empty when no VPC is in use. Under the cache-as-gateway
+  // transport (FJB-54, transport.mode=cache-gateway) this is the address
+  // the orchestrator dials for dispatch; under the legacy SSH-on-public-IP
+  // transport `ip` is the dial address and this field is informational.
+  // Stable across the worker's lifetime once assigned.
+  string vpc_ip = 10;
 
   // created_at is the provider's instance creation time. Anchors the
   // billing-hour timer.

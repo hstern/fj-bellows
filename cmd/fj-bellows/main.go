@@ -295,6 +295,7 @@ func (b *controlBackend) PoolSnapshot() []control.WorkerView {
 			InstanceID:     w.InstanceID,
 			State:          w.State,
 			IP:             w.IP,
+			VPCIP:          w.VPCIP,
 			CreatedAt:      w.CreatedAt,
 			LastBusy:       w.LastBusy,
 			CurrentJob:     w.CurrentJob,

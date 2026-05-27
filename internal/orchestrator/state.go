@@ -25,7 +25,15 @@ const (
 type Node struct {
 	InstanceID string
 	State      NodeState
-	IP         string
+	// IP is the worker's public IPv4 (the legacy dial address under
+	// transport.mode=ssh). Empty for providers that dispatch by container
+	// exec, and may be empty under future private-only configurations.
+	IP string
+	// VPCIP is the worker's IPv4 on the provider VPC, when one is
+	// configured. Empty when no VPC is in use. Under transport.mode=
+	// cache-gateway (FJB-54) this is the address the orchestrator dials
+	// for dispatch; under transport.mode=ssh it's informational only.
+	VPCIP string
 	// CreatedAt is the provider's creation time; it anchors the billing-hour
 	// timer and is rebuilt from List on restart.
 	CreatedAt time.Time
