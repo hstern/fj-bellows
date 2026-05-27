@@ -167,6 +167,18 @@ type managedFirewall struct {
 	ipProbe externalIPProbe
 	log     *slog.Logger
 
+	// transportMode controls which ports the synthesized inbound ACCEPT
+	// rules cover. Empty or "ssh" (legacy): tcp/22. "cache-gateway"
+	// (FJB-54): udp/500, udp/4500, and ESP (IPENCAP) for the IPsec tunnel
+	// that terminates on the cache nanode. Workers in cache-gateway mode
+	// don't run an IPsec endpoint, but they share this firewall with the
+	// cache so the rules are applied to both — the operator's LAN egress
+	// can address IPsec ports on any instance the firewall is attached
+	// to, but only the cache has a strongSwan listening; sends to worker
+	// IPs land on closed UDP ports (kernel drops). Net effect: same
+	// strict reduction in worker public attack surface either way.
+	transportMode string
+
 	// id and lastApplied are the in-process cache. id == 0 means the firewall
 	// has been deleted by the cleanup path (next Provision lazy-recreates via
 	// the refresh tick). lastApplied is the sorted CIDR set we last pushed;
@@ -175,6 +187,16 @@ type managedFirewall struct {
 	id          int
 	lastApplied []string
 }
+
+// Transport modes. Kept as string constants here so the firewall code
+// doesn't depend on internal/config (which would create a cycle once
+// the orchestrator pulls in linode for tests). Values match
+// config.Transport* exactly; callers (main.go) translate.
+const (
+	transportSSH          = ""              // legacy default — synthesized tcp/22 ACCEPT
+	transportSSHExplicit  = "ssh"           // operator-explicit equivalent of ""
+	transportCacheGateway = "cache-gateway" // FJB-54 — synthesized IPsec ACCEPT
+)
 
 // Sentinel tokens for the firewall config. allow_inbound supports `auto`;
 // the operator's extra-rule addresses additionally support `any` / `any-v4`
@@ -202,8 +224,9 @@ func isAddressSentinel(s string) bool {
 
 // newManagedFirewall constructs the runtime helper. It validates the config
 // (mutual exclusion with firewall_id is enforced by the caller); a zero
-// RefreshInterval is normalised to 1h here.
-func newManagedFirewall(cfg firewallConfig, tag string, client firewallClient, log *slog.Logger) *managedFirewall {
+// RefreshInterval is normalised to 1h here. transportMode controls
+// which ports the synthesized ACCEPT rules cover; empty == legacy ssh.
+func newManagedFirewall(cfg firewallConfig, tag string, client firewallClient, log *slog.Logger, transportMode string) *managedFirewall {
 	if cfg.RefreshInterval <= 0 {
 		cfg.RefreshInterval = time.Hour
 	}
@@ -211,11 +234,12 @@ func newManagedFirewall(cfg firewallConfig, tag string, client firewallClient, l
 		cfg.RefreshInterval = time.Minute
 	}
 	return &managedFirewall{
-		cfg:     cfg,
-		tag:     tag,
-		client:  client,
-		ipProbe: defaultExternalIPProbe(),
-		log:     log,
+		cfg:           cfg,
+		tag:           tag,
+		client:        client,
+		ipProbe:       defaultExternalIPProbe(),
+		log:           log,
+		transportMode: transportMode,
 	}
 }
 
@@ -429,18 +453,52 @@ const (
 	maxRulesPerFW   = 25
 )
 
+// synthInboundSpec is one synthesized (protocol, ports, label-stem) tuple
+// used to materialise an ACCEPT rule per address family from allow_inbound.
+// Encodes the transport-mode-specific port surface in one place so
+// buildRuleSet stays a generic chunker.
+type synthInboundSpec struct {
+	proto    linodego.NetworkProtocol
+	ports    string // empty for protocols without ports (IPENCAP/ESP)
+	labelTag string // suffix in "fj-bellows-<labelTag>-{v4,v6}-N"
+	descNote string // human description fragment after "fj-bellows: "
+}
+
+// synthSpecsForTransport returns the list of (proto, ports) tuples each
+// allow_inbound CIDR should ACCEPT, given the active transport mode.
+// Empty / "ssh" (legacy default) keeps tcp/22; "cache-gateway" switches
+// to the IPsec port set so the cache nanode's strongSwan can receive
+// the tunnel from the LAN side.
+func synthSpecsForTransport(mode string) []synthInboundSpec {
+	switch mode {
+	case transportCacheGateway:
+		return []synthInboundSpec{
+			{proto: linodego.UDP, ports: "500", labelTag: "ipsec-ike", descNote: "udp/500 (IKE) from allow_inbound"},
+			{proto: linodego.UDP, ports: "4500", labelTag: "ipsec-natt", descNote: "udp/4500 (IPsec NAT-T) from allow_inbound"},
+			{proto: linodego.IPENCAP, ports: "", labelTag: "ipsec-esp", descNote: "ESP from allow_inbound"},
+		}
+	default: // transportSSH, transportSSHExplicit, or any unrecognised mode
+		return []synthInboundSpec{
+			{proto: linodego.TCP, ports: "22", labelTag: "ssh", descNote: "tcp/22 from allow_inbound"},
+		}
+	}
+}
+
 // buildRuleSet renders a CIDR set into the firewall ruleset Linode expects.
-// The synthesized inbound rule(s) accept tcp/22 from those CIDRs; the policy
-// defaults to default-deny inbound + unrestricted outbound, but both are
-// overridable via firewallConfig.{Inbound,Outbound}Policy. Operator-supplied
-// extras (firewallConfig.ExtraInbound / .ExtraOutbound) are appended in the
-// order given.
+// The synthesized inbound rule(s) ACCEPT specific (proto, port) tuples from
+// those CIDRs — the tuples come from synthSpecsForTransport, which switches
+// between SSH (legacy) and IPsec (cache-gateway) port surfaces. Default
+// policy is deny-inbound + accept-outbound, both overridable via
+// firewallConfig.{Inbound,Outbound}Policy. Operator-supplied extras
+// (firewallConfig.ExtraInbound / .ExtraOutbound) are appended in the order
+// given.
 //
-// Linode caps each rule at 255 addresses TOTAL (v4+v6 combined; the API error
-// `[rules.inbound[0].addresses] Too many addresses submitted. Max allowed
-// is 255` was observed for a rule mixing 255 v4 + a handful of v6). To avoid
-// the totalling trap we split families into separate rules entirely — every
-// emitted SSH rule is either v4-only or v6-only, capped at 255 entries.
+// Linode caps each rule at 255 addresses TOTAL (v4+v6 combined; the API
+// error `[rules.inbound[0].addresses] Too many addresses submitted. Max
+// allowed is 255` was observed for a rule mixing 255 v4 + a handful of v6).
+// To avoid the totalling trap we split families into separate rules
+// entirely — every emitted rule is either v4-only or v6-only, capped at 255
+// entries.
 //
 // Returns an error if the resulting rule count would exceed Linode's
 // 25-rule-per-firewall cap, or if any extra rule's addresses resolve outside
@@ -450,7 +508,10 @@ func (m *managedFirewall) buildRuleSet(ctx context.Context, cidrs []string) (lin
 	v4, v6 := bucketCIDRs(cidrs)
 	v4Chunks := chunkAddrs(v4, maxAddrsPerRule)
 	v6Chunks := chunkAddrs(v6, maxAddrsPerRule)
-	synthCount := len(v4Chunks) + len(v6Chunks)
+	specs := synthSpecsForTransport(m.transportMode)
+	// One spec yields up to (v4Chunks + v6Chunks) rules; sum across specs.
+	chunkRules := len(v4Chunks) + len(v6Chunks)
+	synthCount := len(specs) * chunkRules
 
 	inboundPolicy := cfg.InboundPolicy
 	if inboundPolicy == "" {
@@ -461,21 +522,21 @@ func (m *managedFirewall) buildRuleSet(ctx context.Context, cidrs []string) (lin
 		outboundPolicy = fwOutboundAccept
 	}
 
-	// Pre-flight rule-count check: synth (chunked from allow_inbound) +
+	// Pre-flight rule-count check: synth (specs × chunks from allow_inbound) +
 	// extras must fit under Linode's 25-rule-per-firewall cap. Done before
 	// any allocation so we error early with a useful message.
 	totalInbound := synthCount + len(cfg.ExtraInbound)
 	if synthCount == 0 {
-		// Degenerate (empty allow_inbound) still emits one empty SSH rule
-		// so the firewall create succeeds. Orchestrator already errors at
-		// Configure if allow_inbound resolves to zero; this branch only
-		// fires in tests + extras-only configs.
-		totalInbound = 1 + len(cfg.ExtraInbound)
+		// Degenerate (empty allow_inbound) still emits one empty rule per
+		// spec so the firewall create succeeds. Orchestrator already
+		// errors at Configure if allow_inbound resolves to zero; this
+		// branch only fires in tests + extras-only configs.
+		totalInbound = len(specs) + len(cfg.ExtraInbound)
 	}
 	if totalInbound > maxRulesPerFW {
 		return linodego.FirewallRuleSet{}, fmt.Errorf(
 			"firewall: inbound rule count (%d synth + %d extra = %d) exceeds Linode's per-firewall cap of %d",
-			max(synthCount, 1), len(cfg.ExtraInbound), totalInbound, maxRulesPerFW,
+			max(synthCount, len(specs)), len(cfg.ExtraInbound), totalInbound, maxRulesPerFW,
 		)
 	}
 	if len(cfg.ExtraOutbound) > maxRulesPerFW {
@@ -488,35 +549,40 @@ func (m *managedFirewall) buildRuleSet(ctx context.Context, cidrs []string) (lin
 	inbound := make([]linodego.FirewallRule, 0, totalInbound)
 	empty := []string{}
 	if synthCount == 0 {
-		inbound = append(inbound, linodego.FirewallRule{
-			Action:    fwActionAccept,
-			Label:     "fj-bellows-ssh-v4-1",
-			Protocol:  linodego.TCP,
-			Ports:     "22",
-			Addresses: linodego.NetworkAddresses{IPv4: &empty, IPv6: &empty},
-		})
+		// One empty placeholder per spec so the labels remain unique.
+		for _, s := range specs {
+			inbound = append(inbound, linodego.FirewallRule{
+				Action:    fwActionAccept,
+				Label:     fmt.Sprintf("fj-bellows-%s-v4-1", s.labelTag),
+				Protocol:  s.proto,
+				Ports:     s.ports,
+				Addresses: linodego.NetworkAddresses{IPv4: &empty, IPv6: &empty},
+			})
+		}
 	}
-	for i, chunk := range v4Chunks {
-		c := chunk
-		inbound = append(inbound, linodego.FirewallRule{
-			Action:      fwActionAccept,
-			Label:       fmt.Sprintf("fj-bellows-ssh-v4-%d", i+1),
-			Description: "fj-bellows: tcp/22 from allow_inbound (v4)",
-			Protocol:    linodego.TCP,
-			Ports:       "22",
-			Addresses:   linodego.NetworkAddresses{IPv4: &c, IPv6: &empty},
-		})
-	}
-	for i, chunk := range v6Chunks {
-		c := chunk
-		inbound = append(inbound, linodego.FirewallRule{
-			Action:      fwActionAccept,
-			Label:       fmt.Sprintf("fj-bellows-ssh-v6-%d", i+1),
-			Description: "fj-bellows: tcp/22 from allow_inbound (v6)",
-			Protocol:    linodego.TCP,
-			Ports:       "22",
-			Addresses:   linodego.NetworkAddresses{IPv4: &empty, IPv6: &c},
-		})
+	for _, s := range specs {
+		for i, chunk := range v4Chunks {
+			c := chunk
+			inbound = append(inbound, linodego.FirewallRule{
+				Action:      fwActionAccept,
+				Label:       fmt.Sprintf("fj-bellows-%s-v4-%d", s.labelTag, i+1),
+				Description: "fj-bellows: " + s.descNote + " (v4)",
+				Protocol:    s.proto,
+				Ports:       s.ports,
+				Addresses:   linodego.NetworkAddresses{IPv4: &c, IPv6: &empty},
+			})
+		}
+		for i, chunk := range v6Chunks {
+			c := chunk
+			inbound = append(inbound, linodego.FirewallRule{
+				Action:      fwActionAccept,
+				Label:       fmt.Sprintf("fj-bellows-%s-v6-%d", s.labelTag, i+1),
+				Description: "fj-bellows: " + s.descNote + " (v6)",
+				Protocol:    s.proto,
+				Ports:       s.ports,
+				Addresses:   linodego.NetworkAddresses{IPv4: &empty, IPv6: &c},
+			})
+		}
 	}
 	for _, r := range cfg.ExtraInbound {
 		built, err := m.buildExtraRule(ctx, r)

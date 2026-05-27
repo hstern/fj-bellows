@@ -75,6 +75,13 @@ type Linode struct {
 	// strictly inbound-debug access.
 	sshAuthorizedKey string
 
+	// transportMode is the active transport architecture (config.Transport.Mode),
+	// captured before Configure via SetTransportMode. Drives the firewall
+	// rule synthesis: empty / "ssh" keeps the legacy tcp/22 ACCEPT;
+	// "cache-gateway" (FJB-54) synthesizes IPsec ACCEPT (udp/500, udp/4500,
+	// ESP) instead.
+	transportMode string
+
 	// workersInFlight counts Provision calls that have entered the
 	// CreateInstance path but not yet returned (success or failure).
 	// Surfaced via Info() for operator debugging — pairs with the
@@ -151,6 +158,16 @@ func (r *capacityFullRing) prune(now time.Time) {
 // for non-Linode providers; harmless when cache is disabled.
 func (l *Linode) SetSSHAuthorizedKey(authKey string) {
 	l.sshAuthorizedKey = authKey
+}
+
+// SetTransportMode propagates the top-level transport mode
+// (config.Transport.Mode) into the Linode provider before Configure
+// runs. Drives firewall rule synthesis: legacy "ssh"/"" keeps tcp/22
+// ACCEPT; "cache-gateway" (FJB-54) switches to IPsec ACCEPT instead.
+// Duck-typed call from cmd/fj-bellows — providers that don't implement
+// this method are unaffected (the docker provider has no firewall).
+func (l *Linode) SetTransportMode(mode string) {
+	l.transportMode = mode
 }
 
 // CacheStatus returns the managed-cache snapshot consumed by the control
@@ -333,7 +350,7 @@ func (c config) validateRequiredFields() error {
 // from Configure so each piece has a clear name and the parent function stays
 // under the cyclomatic-complexity budget.
 func (l *Linode) setupManagedFirewall(ctx context.Context, tag string) error {
-	fw := newManagedFirewall(*l.cfg.Firewall, tag, &l.client, slog.Default())
+	fw := newManagedFirewall(*l.cfg.Firewall, tag, &l.client, slog.Default(), l.transportMode)
 	if err := fw.primeResolved(ctx); err != nil {
 		return fmt.Errorf("linode: firewall: %w", err)
 	}

@@ -124,6 +124,14 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 		// The worker Provision path already does this trim on spec.AuthorizedKey.
 		l.SetSSHAuthorizedKey(strings.TrimSpace(authKey))
 	}
+	// Propagate transport mode into the Linode provider so its managed
+	// firewall synthesizes the right ACCEPT rules (tcp/22 for legacy SSH,
+	// IPsec ports for cache-gateway). Duck-typed so providers that don't
+	// implement the method (e.g. the docker provider, which has no
+	// Linode-style firewall) are unaffected.
+	if tp, ok := prov.(interface{ SetTransportMode(string) }); ok {
+		tp.SetTransportMode(cfg.Transport.Mode)
+	}
 	// Bound the Configure-time network calls (provider sentinel fetches,
 	// firewall API, etc.) so a hung upstream can't wedge startup forever.
 	cfgCtx, cancelCfg := context.WithTimeout(context.Background(), 60*time.Second)
