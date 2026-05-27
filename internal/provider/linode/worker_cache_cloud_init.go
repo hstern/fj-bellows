@@ -70,13 +70,29 @@ func multipartCloudInit(parts []string) string {
 //go:embed worker-cache-extras.yaml.tmpl
 var workerCacheExtrasTemplate string
 
+//go:embed worker-cache-extras-gateway.yaml.tmpl
+var workerCacheExtrasGatewayTemplate string
+
 // renderWorkerCacheExtras fills the worker-side cache cloud-init
-// fragment. Required fields are guarded — an empty CA PEM or cache IP
-// would silently produce broken trust / unreachable cache, so we
-// refuse to render in that state.
+// fragment, selecting the template by transport mode:
+//
+//   - "" / "ssh" (legacy): writes a `/etc/hosts` cache-hostname entry
+//     so workers reach the registry by hosts-file glue.
+//   - "cache-gateway" (FJB-54): writes a systemd-resolved drop-in
+//     pointing DNS at the cache + `ip route` commands for the
+//     configured tunnel CIDRs. No `/etc/hosts` entry — unbound on
+//     the cache nanode answers "cache" authoritatively.
+//
+// Required fields are guarded — an empty CA PEM or cache IP would
+// silently produce broken trust / unreachable cache, so we refuse to
+// render in that state.
 func renderWorkerCacheExtras(x workerExtrasData) (string, error) {
 	if err := validateWorkerExtras(x); err != nil {
 		return "", err
+	}
+	src := workerCacheExtrasTemplate
+	if x.TransportMode == transportCacheGateway {
+		src = workerCacheExtrasGatewayTemplate
 	}
 	tmpl, err := template.New("worker-cache-extras").Funcs(template.FuncMap{
 		"indent": func(spaces int, s string) string {
@@ -87,7 +103,7 @@ func renderWorkerCacheExtras(x workerExtrasData) (string, error) {
 			}
 			return strings.Join(lines, "\n")
 		},
-	}).Parse(workerCacheExtrasTemplate)
+	}).Parse(src)
 	if err != nil {
 		return "", fmt.Errorf("parse worker cache extras template: %w", err)
 	}

@@ -1,0 +1,49 @@
+#cloud-config
+# Worker cache-extras fragment for cache-gateway transport (FJB-54).
+# cloud-init merges this with the base worker user-data the orchestrator
+# rendered.
+#
+# Differences from the legacy SSH-tunnel extras:
+#  - DROPPED: /etc/hosts entry for the cache. unbound on the cache nanode
+#    answers "cache." authoritatively over the VPC, so workers reach the
+#    registry by DNS rather than hosts-file glue.
+#  - ADDED: /etc/systemd/resolved.conf.d/ drop-in pointing DNS at the
+#    cache's VPC IP so the worker resolves "cache" (and the LAN-side
+#    Forgejo hostname via unbound's forward zones) through the cache.
+#  - ADDED: explicit routes for each transport.tunnel.routes CIDR via
+#    the cache's VPC IP, so traffic to LAN destinations crosses the
+#    IPsec tunnel terminated on the cache nanode.
+#  - KEPT: CA + cert.d injection. zot still terminates its own TLS
+#    with the fjb-managed CA; workers still trust it via the system
+#    CA pool. Cache push/pull authz is tracked separately (FJB-55).
+merge_how:
+  - name: list
+    settings: [append]
+  - name: dict
+    settings: [no_replace, recurse_list]
+  - name: str
+    settings: [append]
+write_files:
+  - path: /usr/local/share/ca-certificates/fjb-cache.crt
+    permissions: '0644'
+    content: |
+{{.CACertPEM | indent 6}}
+  - path: /etc/docker/certs.d/{{.CacheHost}}:{{.CachePort}}/ca.crt
+    permissions: '0644'
+    content: |
+{{.CACertPEM | indent 6}}
+  - path: /etc/systemd/resolved.conf.d/fjb-cache.conf
+    permissions: '0644'
+    content: |
+      # fj-bellows cache-gateway DNS — points the worker at unbound on
+      # the cache nanode (FJB-71). The cache resolves "cache" locally
+      # and forwards LAN zones over IPsec.
+      [Resolve]
+      DNS={{.CacheIP}}
+      Domains=~.
+runcmd:
+  - update-ca-certificates
+  - systemctl restart systemd-resolved
+{{- range .TunnelRoutes}}
+  - ip route replace {{.}} via {{$.CacheIP}}
+{{- end}}

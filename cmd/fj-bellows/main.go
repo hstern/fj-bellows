@@ -129,9 +129,7 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 	// IPsec ports for cache-gateway). Duck-typed so providers that don't
 	// implement the method (e.g. the docker provider, which has no
 	// Linode-style firewall) are unaffected.
-	if tp, ok := prov.(interface{ SetTransportMode(string) }); ok {
-		tp.SetTransportMode(cfg.Transport.Mode)
-	}
+	applyTransportToProvider(prov, cfg.Transport)
 	// Bound the Configure-time network calls (provider sentinel fetches,
 	// firewall API, etc.) so a hung upstream can't wedge startup forever.
 	cfgCtx, cancelCfg := context.WithTimeout(context.Background(), 60*time.Second)
@@ -464,6 +462,24 @@ func (b *controlBackend) CacheStatus(ctx context.Context) *control.CacheStatus {
 		BucketRegion:    s.BucketRegion,
 		BucketLabel:     s.BucketLabel,
 		VMState:         s.VMState,
+	}
+}
+
+// applyTransportToProvider propagates the top-level transport config
+// into the active provider via duck-typed interfaces, so providers
+// that don't care (e.g. docker) are unaffected.
+//
+//   - SetTransportMode(string): drives the firewall rule synthesis
+//     (FJB-65) and worker cache-extras template selection (FJB-74).
+//   - SetTunnelRoutes([]string): supplies the LAN-side CIDRs the
+//     worker cloud-init renders as `ip route` commands under
+//     cache-gateway mode (FJB-74). No-op when no tunnel block.
+func applyTransportToProvider(prov provider.Provider, t config.Transport) {
+	if tp, ok := prov.(interface{ SetTransportMode(string) }); ok {
+		tp.SetTransportMode(t.Mode)
+	}
+	if tr, ok := prov.(interface{ SetTunnelRoutes([]string) }); ok && t.Tunnel != nil {
+		tr.SetTunnelRoutes(t.Tunnel.Routes)
 	}
 }
 

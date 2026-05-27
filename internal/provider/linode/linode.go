@@ -79,8 +79,14 @@ type Linode struct {
 	// captured before Configure via SetTransportMode. Drives the firewall
 	// rule synthesis: empty / "ssh" keeps the legacy tcp/22 ACCEPT;
 	// "cache-gateway" (FJB-54) synthesizes IPsec ACCEPT (udp/500, udp/4500,
-	// ESP) instead.
+	// ESP) instead. Also selects the worker cache-extras template (FJB-74).
 	transportMode string
+
+	// tunnelRoutes is config.Transport.Tunnel.Routes, captured before
+	// Configure via SetTunnelRoutes. Rendered into the worker cache-
+	// extras cloud-init under cache-gateway mode (FJB-74). Empty (and
+	// unused) under legacy ssh mode.
+	tunnelRoutes []string
 
 	// workersInFlight counts Provision calls that have entered the
 	// CreateInstance path but not yet returned (success or failure).
@@ -168,6 +174,16 @@ func (l *Linode) SetSSHAuthorizedKey(authKey string) {
 // this method are unaffected (the docker provider has no firewall).
 func (l *Linode) SetTransportMode(mode string) {
 	l.transportMode = mode
+}
+
+// SetTunnelRoutes propagates the operator-configured tunnel-routed
+// CIDRs (config.Transport.Tunnel.Routes) into the Linode provider so
+// the worker cache-extras cloud-init can emit explicit `ip route`
+// commands under cache-gateway mode (FJB-74). Duck-typed from
+// cmd/fj-bellows. Calling under legacy ssh mode is harmless — the
+// routes go unused.
+func (l *Linode) SetTunnelRoutes(routes []string) {
+	l.tunnelRoutes = append([]string(nil), routes...)
 }
 
 // CacheStatus returns the managed-cache snapshot consumed by the control
@@ -417,6 +433,7 @@ func (l *Linode) setupManagedCache(ctx context.Context, tag string) error {
 	// key is supplied via SetSSHAuthorizedKey from cmd/fj-bellows;
 	// empty when no SSH was configured (docker provider).
 	cache.setHardwareContext(fwID, subID, l.sshAuthorizedKey)
+	cache.setTransport(l.transportMode, l.tunnelRoutes)
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		return fmt.Errorf("linode: cache: %w", err)
 	}

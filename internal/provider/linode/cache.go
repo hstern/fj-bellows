@@ -213,6 +213,26 @@ type managedCache struct {
 	// up lazily on first WorkerExtras call (so a fresh-create VM has
 	// time to settle on its IP) and cached. Empty until then.
 	cacheVPCIP string
+
+	// transportMode mirrors the outer Linode.transportMode (FJB-65 /
+	// FJB-74). Drives the worker cache-extras template selection.
+	transportMode string
+
+	// tunnelRoutes mirrors config.Transport.Tunnel.Routes when active
+	// (FJB-74). Rendered into the cache-gateway extras template as
+	// explicit `ip route` commands so workers reach LAN CIDRs via
+	// the cache nanode's IPsec tunnel.
+	tunnelRoutes []string
+}
+
+// setTransport propagates the top-level transport mode + tunnel routes
+// from the Linode provider into the managed cache so workerExtras can
+// pick the right template at provision time. Called from the Linode
+// provider after SetTransportMode / SetTunnelRoutes have populated its
+// own fields.
+func (m *managedCache) setTransport(mode string, routes []string) {
+	m.transportMode = mode
+	m.tunnelRoutes = append([]string(nil), routes...)
 }
 
 func newManagedCache(cfg cacheConfig, tag, region string, client cacheClient, bucket *managedBucket, log *slog.Logger) *managedCache {
@@ -567,6 +587,18 @@ type workerExtrasData struct {
 	CacheHost string
 	CacheIP   string
 	CachePort int
+
+	// TransportMode mirrors config.Transport.Mode and selects which
+	// extras template renders. Empty / "ssh" keeps the legacy
+	// hosts-file + CA path; "cache-gateway" picks the FJB-74 template
+	// (DNS pointer + tunnel routes, no /etc/hosts cache entry).
+	TransportMode string
+
+	// TunnelRoutes is the operator-configured list of LAN-side CIDRs
+	// that workers should reach via the cache nanode's IPsec tunnel
+	// (config.Transport.Tunnel.Routes). Only consumed by the
+	// cache-gateway template; ignored when TransportMode is "ssh".
+	TunnelRoutes []string
 }
 
 // workerExtras returns the data the linode provider's Provision needs
@@ -590,10 +622,12 @@ func (m *managedCache) workerExtras(ctx context.Context) (workerExtrasData, erro
 		m.cacheVPCIP = ip
 	}
 	return workerExtrasData{
-		CACertPEM: string(m.caCertPEM),
-		CacheHost: defaultCacheHostname,
-		CacheIP:   m.cacheVPCIP,
-		CachePort: defaultCachePort,
+		CACertPEM:     string(m.caCertPEM),
+		CacheHost:     defaultCacheHostname,
+		CacheIP:       m.cacheVPCIP,
+		CachePort:     defaultCachePort,
+		TransportMode: m.transportMode,
+		TunnelRoutes:  m.tunnelRoutes,
 	}, nil
 }
 
