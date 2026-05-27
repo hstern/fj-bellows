@@ -80,6 +80,36 @@ func TestRenderUnbound_MarkersAndForwarders(t *testing.T) {
 	}
 }
 
+func TestRenderUnbound_LocalOverrides(t *testing.T) {
+	in := stockInputs()
+	in.LocalOverrides = []LocalDataOverride{
+		{Name: "git.stern.ca", AddrV4: "10.99.0.1"},
+		{Name: "build.stern.ca", AddrV4: "10.99.0.1"},
+	}
+	got, err := RenderUnbound(in)
+	if err != nil {
+		t.Fatalf("RenderUnbound: %v", err)
+	}
+	wantSubstrings := []string{
+		`local-zone: "git.stern.ca." static`,
+		`local-data: "git.stern.ca. IN A 10.99.0.1"`,
+		`local-zone: "build.stern.ca." static`,
+		`local-data: "build.stern.ca. IN A 10.99.0.1"`,
+	}
+	for _, sub := range wantSubstrings {
+		if !strings.Contains(got, sub) {
+			t.Errorf("missing %q in unbound.conf:\n%s", sub, got)
+		}
+	}
+	// Ensure overrides appear BEFORE forward-zones (unbound matches
+	// local-data first; ordering is correctness, not aesthetics).
+	overrideIdx := strings.Index(got, `"git.stern.ca."`)
+	forwardIdx := strings.Index(got, "forward-zone:")
+	if overrideIdx == -1 || forwardIdx == -1 || overrideIdx > forwardIdx {
+		t.Errorf("local-data overrides must precede forward-zone blocks; got override@%d forward@%d", overrideIdx, forwardIdx)
+	}
+}
+
 func TestRenderUnbound_NoForwardZones(t *testing.T) {
 	in := stockInputs()
 	in.DNSForwardZones = nil

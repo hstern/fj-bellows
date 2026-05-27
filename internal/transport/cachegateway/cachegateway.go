@@ -56,6 +56,13 @@ type Inputs struct {
 	// matching takes the default public-resolver path.
 	DNSForwardZones []string
 
+	// LocalOverrides emits authoritative local-data rows in unbound
+	// (FJB-54 WG path). Each entry rewrites a LAN hostname to the
+	// orchestrator's WG IP so the transparent TCP proxy can bridge it
+	// without LAN-CA injection. Empty under the legacy IPsec path,
+	// where workers reach LAN services via routed traffic.
+	LocalOverrides []LocalDataOverride
+
 	// LANGatewayPublicIP is the operator-side IPsec endpoint's public
 	// address — strongSwan-on-cache uses it as `right=` to validate
 	// the initiator's source IP. The LAN-side initiator uses it as
