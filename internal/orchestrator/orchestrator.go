@@ -49,6 +49,13 @@ type Config struct {
 	Teardown      TeardownPolicy
 	AuthorizedKey string
 
+	// TransportMode mirrors config.Transport.Mode (FJB-72). Drives the
+	// orchestrator's choice of dial address: empty / "ssh" uses
+	// Node.IP (the legacy public IPv4 path); "cache-gateway" (FJB-54)
+	// uses Node.VPCIP and assumes an IPsec tunnel exists between the
+	// orchestrator and the cache nanode that fronts the worker VPC.
+	TransportMode string
+
 	// DrainOnShutdown lets in-flight jobs finish on shutdown instead of being
 	// interrupted immediately.
 	DrainOnShutdown bool
@@ -505,8 +512,9 @@ func (o *Orchestrator) doForceProvision(ctx context.Context) forceResult {
 		pinner.PinHostKey(inst.IPv4, sshHostPub)
 	}
 	id, ip := inst.ID, inst.IPv4
+	dialAddr := o.addrForInstance(inst.IPv4, inst.VPCIPv4)
 	o.wg.Go(func() {
-		if err := o.disp.WaitReady(ctx, id, ip); err != nil {
+		if err := o.disp.WaitReady(ctx, id, dialAddr); err != nil {
 			o.log.Error("force-provision worker readiness", "id", id, "err", err)
 			return // teardown / orphan sweep will reclaim it
 		}
@@ -663,7 +671,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 		o.addActive(reg.UUID)
 		defer o.removeActive(reg.UUID)
 		o.emit("job_dispatched", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle, attrRunnerUUID: reg.UUID})
-		if err := o.disp.RunJob(ctx, node.InstanceID, node.IP, reg, job); err != nil {
+		if err := o.disp.RunJob(ctx, node.InstanceID, o.addrFor(&node), reg, job); err != nil {
 			o.log.Error("run job", "handle", job.Handle, "ip", node.IP, "err", err)
 			return
 		}
@@ -736,7 +744,7 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 			pinner.PinHostKey(inst.IPv4, sshHostPub)
 		}
 
-		if err := o.disp.WaitReady(ctx, inst.ID, inst.IPv4); err != nil {
+		if err := o.disp.WaitReady(ctx, inst.ID, o.addrForInstance(inst.IPv4, inst.VPCIPv4)); err != nil {
 			o.log.Error("worker readiness", "id", inst.ID, "err", err)
 			return // leave it; teardown/orphan sweep will reclaim it
 		}

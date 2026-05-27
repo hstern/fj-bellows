@@ -105,6 +105,38 @@ func (o *Orchestrator) Health(_ context.Context) HealthStatus {
 	}
 }
 
+// TransportModeCacheGateway is the value of Config.TransportMode that
+// selects the FJB-54 cache-as-gateway dispatch path: dial workers by
+// VPC IP through the IPsec tunnel terminated on the cache nanode.
+//
+// Mirrors config.TransportCacheGateway as a literal so this package
+// doesn't take a dependency on internal/config.
+const TransportModeCacheGateway = "cache-gateway"
+
+// addrFor returns the address the dispatcher should dial for the given
+// node, branching on the active transport mode. Empty / "ssh" (default)
+// returns the public IPv4 (legacy path); "cache-gateway" (FJB-54)
+// returns the VPC IP, routed via the IPsec tunnel.
+//
+// Defined on Orchestrator (not Node) because the choice is a
+// composition-root concern, not a per-node property.
+func (o *Orchestrator) addrFor(n *Node) string {
+	if o.cfg.TransportMode == TransportModeCacheGateway {
+		return n.VPCIP
+	}
+	return n.IP
+}
+
+// addrForInstance is the just-provisioned counterpart of addrFor when
+// the caller has a provider.Instance in hand but hasn't yet retrieved
+// the Node from the pool. Same selection rule.
+func (o *Orchestrator) addrForInstance(ip4, vpcIP string) string {
+	if o.cfg.TransportMode == TransportModeCacheGateway {
+		return vpcIP
+	}
+	return ip4
+}
+
 func (o *Orchestrator) markTick() {
 	o.mu.Lock()
 	o.lastTickAt = o.now()

@@ -85,6 +85,8 @@ func (d *SSHDispatcher) PinHostKey(ip string, key ssh.PublicKey) {
 }
 
 // WaitReady polls SSH until the readiness sentinel exists.
+//
+//nolint:dupl // intentional shape-match with CacheGatewayDispatcher.WaitReady; the two dispatchers must stay distinct types so only one satisfies HostKeyPinner.
 func (d *SSHDispatcher) WaitReady(ctx context.Context, _, addr string) error {
 	deadline := time.Now().Add(d.ReadyWait)
 	var lastErr error
@@ -313,6 +315,7 @@ func (d *SSHDispatcher) forwardOne(ctx context.Context, workerConn net.Conn, tar
 	wg.Wait()
 }
 
+//nolint:dupl // intentional shape-match with CacheGatewayDispatcher.dial; the two dispatchers must stay distinct types so only one satisfies HostKeyPinner.
 func (d *SSHDispatcher) dial(ctx context.Context, ip string) (*ssh.Client, error) {
 	addr := net.JoinHostPort(ip, strconv.Itoa(d.Port))
 	cfg := &ssh.ClientConfig{
@@ -393,6 +396,8 @@ func shellQuote(s string) string {
 // verifies against it rather than recording the presented key, so even first
 // contact is authoritative. The orchestrator seeds such a pin after generating
 // the worker's host key and injecting its private half via cloud-init.
+//
+//nolint:dupl // intentional shape-match with CacheGatewayDispatcher.tofuHostKeyCallback; the two dispatchers must stay distinct types so only one satisfies HostKeyPinner.
 func (d *SSHDispatcher) tofuHostKeyCallback(addr string) ssh.HostKeyCallback {
 	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
 		d.pinsMu.Lock()

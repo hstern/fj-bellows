@@ -160,6 +160,7 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 		RunnerVersion: opts.runnerVersion,
 		ReadyFile:     bootstrap.DefaultReadyFile,
 		AuthorizedKey: authKey,
+		TransportMode: cfg.Transport.Mode,
 		Teardown: orchestrator.TeardownPolicy{
 			Model:       prov.BillingModel(),
 			IdleTimeout: cfg.Poll.IdleTimeout.D(),
@@ -480,8 +481,32 @@ func sshDispatcherFrom(cfg *config.Config, signer ssh.Signer) *orchestrator.SSHD
 	}
 }
 
-// dispatcherFor selects and constructs the dispatcher matching cfg.Provider.
-// The docker provider needs no SSH; everything else uses SSHDispatcher.
+// cacheGatewayDispatcherFrom builds the cache-gateway dispatcher
+// (FJB-64). Distinct type from SSHDispatcher: deliberately does NOT
+// implement HostKeyPinner so the orchestrator's host-key seeding
+// logic auto-skips, and the dispatch session carries no reverse
+// port-forward or /etc/hosts mutation (workers reach LAN destinations
+// via the cache nanode's DNS resolver + IPsec routing).
+func cacheGatewayDispatcherFrom(cfg *config.Config, signer ssh.Signer) *orchestrator.CacheGatewayDispatcher {
+	return &orchestrator.CacheGatewayDispatcher{
+		User:        cfg.SSH.User,
+		Port:        cfg.SSH.Port,
+		Signer:      signer,
+		ForgejoURL:  cfg.Forgejo.URL,
+		Labels:      cfg.Forgejo.Labels,
+		ReadyFile:   bootstrap.DefaultReadyFile,
+		ReadyWait:   5 * time.Minute,
+		DialTimeout: 15 * time.Second,
+	}
+}
+
+// dispatcherFor selects and constructs the dispatcher matching the
+// active provider + transport mode. Selection order:
+//
+//  1. Docker provider: docker-exec dispatcher (no SSH).
+//  2. transport.mode = cache-gateway: CacheGatewayDispatcher (SSH
+//     dial via worker VPC IP through the IPsec tunnel; FJB-54).
+//  3. Default: SSHDispatcher (legacy SSH-on-public-IP).
 func dispatcherFor(cfg *config.Config, prov provider.Provider, signer ssh.Signer) (orchestrator.Dispatcher, error) {
 	if cfg.Provider == config.ProviderDocker {
 		dp, ok := prov.(*dockerprov.Docker)
@@ -496,6 +521,9 @@ func dispatcherFor(cfg *config.Config, prov provider.Provider, signer ssh.Signer
 			cfg.Forgejo.Labels,
 			dp.WaitTimeout(),
 		), nil
+	}
+	if cfg.Transport.Mode == config.TransportCacheGateway {
+		return cacheGatewayDispatcherFrom(cfg, signer), nil
 	}
 	return sshDispatcherFrom(cfg, signer), nil
 }
