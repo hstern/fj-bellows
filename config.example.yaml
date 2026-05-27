@@ -140,3 +140,39 @@ ssh:
   private_key_file: /etc/fj-bellows/id_ed25519
   user: root
   port: 22
+
+# Transport mode for orchestrator ↔ worker dispatch.
+#
+#   "ssh" (default):    legacy SSH-on-public-IP. Each worker has a public
+#                       IPv4 with TCP/22 open to the orchestrator; the
+#                       dispatch session carries a reverse port-forward
+#                       to a LAN-only Forgejo.
+#
+#   "cache-gateway":    (FJB-54) cache nanode terminates an IPsec tunnel
+#                       from the LAN side and runs DNS + routing for the
+#                       worker VPC. Workers reach LAN services by name
+#                       through the cache; no public inbound on workers.
+#                       Set tunnel.routes + tunnel.lan_egress below.
+#
+# Leave this block out entirely to default to "ssh".
+#
+# transport:
+#   mode: cache-gateway
+#   tunnel:
+#     # LAN-side CIDRs reachable from workers via the IPsec tunnel.
+#     # Worker cloud-init adds an explicit route for each via the cache's
+#     # VPC IP. Everything not in the list takes the worker's default
+#     # gateway (provider NAT egress).
+#     routes:
+#       - 192.168.0.0/24
+#
+#     # Outbound allow-list — traffic permitted to emerge from the
+#     # tunnel onto the LAN. Enforced at two points (cache iptables and
+#     # LAN-side outbound firewall) from this single source. Anything not
+#     # listed is denied. `from: worker-vpc` resolves to the worker VPC
+#     # subnet via the active provider.
+#     lan_egress:
+#       - { from: worker-vpc, to: 192.168.0.2, port: 53,  proto: udp } # LAN DNS
+#       - { from: worker-vpc, to: 192.168.0.2, port: 53,  proto: tcp } # LAN DNS (TCP)
+#       - { from: worker-vpc, to: 192.168.0.7, port: 443, proto: tcp } # Forgejo
+#       - { from: worker-vpc, to: 192.168.0.7, port: 22,  proto: tcp } # git-over-ssh

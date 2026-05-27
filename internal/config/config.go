@@ -28,6 +28,11 @@ type Config struct {
 	Poll Poll `yaml:"poll"`
 	SSH  SSH  `yaml:"ssh"`
 
+	// Transport selects the dispatch transport architecture. Defaults to
+	// "ssh" (legacy SSH-on-public-IP) for back-compat; set Mode to
+	// "cache-gateway" to opt into FJB-54's IPsec + cache-as-gateway path.
+	Transport Transport `yaml:"transport"`
+
 	// Tag is stamped on every provisioned instance so reconcile and the orphan
 	// sweep can find instances this daemon owns.
 	Tag string `yaml:"tag"`
@@ -135,6 +140,7 @@ func (c *Config) applyDefaults() {
 	if c.SSH.Port == 0 {
 		c.SSH.Port = 22
 	}
+	c.Transport.applyDefaults()
 }
 
 // ProviderDocker is the name of the local docker provider, which does not
@@ -162,6 +168,9 @@ func (c *Config) validate() error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("config: missing required fields: %s", strings.Join(missing, ", "))
+	}
+	if err := c.Transport.validate(); err != nil {
+		return fmt.Errorf("config: %w", err)
 	}
 	return nil
 }
