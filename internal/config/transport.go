@@ -5,7 +5,21 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 )
+
+// DefaultWGKeepaliveInterval is the default persistent-keepalive delay
+// for the WireGuard tunnel — more aggressive than WireGuard's 25s. The
+// orchestrator is the NAT-traversing initiator, so the mapping must
+// stay continuously warm; 1s pins it tight at ~150 MB/month, trivial
+// against the cache nanode's 1 TB included transfer. Operators on
+// metered links override via transport.wg.keepalive_interval.
+const DefaultWGKeepaliveInterval = 1 * time.Second
+
+// DefaultWGListenPort is the WireGuard project's de-facto default port
+// — what operator muscle-memory expects, what most Linode firewall
+// examples reference.
+const DefaultWGListenPort = 51820
 
 // Transport configures the dispatch transport.
 //
@@ -27,6 +41,78 @@ import (
 type Transport struct {
 	Mode   string  `yaml:"mode"`
 	Tunnel *Tunnel `yaml:"tunnel"`
+
+	// WG configures the embedded WireGuard tunnel that carries
+	// worker-side traffic destined for the orchestrator's transparent
+	// proxy listeners (FJB-78). Required when Mode == "cache-gateway";
+	// ignored otherwise.
+	WG *WG `yaml:"wg"`
+}
+
+// WG configures the orchestrator's embedded WireGuard tunnel
+// (golang.zx2c4.com/wireguard in netstack mode). The orchestrator is
+// always the initiator (operator-side NAT); the cache nanode is the
+// public-IP listener.
+type WG struct {
+	// PrivateKeyFile is the path to the orchestrator's WG private key
+	// (Curve25519, base64). The daemon load-or-generates it on first
+	// start (mode 0600); operators rotate by removing the file.
+	PrivateKeyFile string `yaml:"private_key_file"`
+
+	// LocalAddr is the orchestrator's tunnel-side IPv4 + prefix
+	// (e.g. "10.99.0.1/32"). The transparent-proxy listeners bind on
+	// this address; the cache nanode's wg-quick config lists it as
+	// the peer's AllowedIPs entry.
+	LocalAddr string `yaml:"local_addr"`
+
+	// KeepaliveInterval is the PersistentKeepalive setting on the
+	// orchestrator → cache peer. Empty = DefaultWGKeepaliveInterval
+	// (1s); operators on metered links bump to 25s (WireGuard's own
+	// default) for ~6 MB/month instead of ~150 MB/month, trading
+	// first-request latency for bandwidth.
+	KeepaliveInterval Duration `yaml:"keepalive_interval"`
+
+	// Peer is the cache nanode WireGuard peer. There is exactly one;
+	// workers don't run WG.
+	Peer WGPeer `yaml:"peer"`
+
+	// Proxies is the list of transparent TCP-proxy listeners. Each
+	// pair binds Listen on the orchestrator's WG interface and dials
+	// Upstream over the orchestrator host's normal network. Workers
+	// dial what they think is a LAN service (Listen address) and the
+	// proxy bridges bytes to the real upstream. TLS terminates
+	// end-to-end with the real upstream — proxy doesn't touch TLS.
+	Proxies []WGProxy `yaml:"proxies"`
+}
+
+// WGPeer describes the cache nanode's WG endpoint.
+type WGPeer struct {
+	// PublicKey is the cache nanode's WG public key (Curve25519,
+	// base64). Operator pastes this after installing wireguard-tools
+	// on the cache.
+	PublicKey string `yaml:"public_key"`
+
+	// Endpoint is the cache nanode's public address (host:port).
+	// Host may be an IP or a DNS name resolvable from the
+	// orchestrator's host network.
+	Endpoint string `yaml:"endpoint"`
+
+	// AllowedIPs is the list of CIDRs routed through this peer.
+	// Includes at least the cache's WG IP (/32); typically also
+	// includes the worker VPC subnet so dispatcher dial-by-VPC-IP
+	// (FJB-64) routes through the same tunnel.
+	AllowedIPs []string `yaml:"allowed_ips"`
+}
+
+// WGProxy is one transparent TCP-proxy listener.
+type WGProxy struct {
+	// Listen is the orchestrator-side address (must be on the WG
+	// interface), e.g. "10.99.0.1:443".
+	Listen string `yaml:"listen"`
+
+	// Upstream is the real LAN destination (host:port). Dialed over
+	// the orchestrator host's normal network.
+	Upstream string `yaml:"upstream"`
 }
 
 // Tunnel is the IPsec + cache-as-gateway tunnel configuration.
@@ -83,23 +169,96 @@ func (t *Transport) applyDefaults() {
 	if t.Mode == "" {
 		t.Mode = TransportSSH
 	}
+	if t.WG != nil && t.WG.KeepaliveInterval == 0 {
+		t.WG.KeepaliveInterval = Duration(DefaultWGKeepaliveInterval)
+	}
 }
 
 func (t *Transport) validate() error {
 	switch t.Mode {
 	case TransportSSH:
-		// Tunnel block is meaningless in SSH mode; we don't error if
-		// present (operators may toggle modes mid-edit) but we ignore it.
+		// Tunnel + WG blocks meaningless in SSH mode; we don't error
+		// if present (operators may toggle modes mid-edit) but we
+		// ignore them.
 		return nil
 	case TransportCacheGateway:
 		if t.Tunnel == nil {
 			return fmt.Errorf("transport: mode %q requires a transport.tunnel block", t.Mode)
 		}
-		return t.Tunnel.validate()
+		if err := t.Tunnel.validate(); err != nil {
+			return err
+		}
+		if t.WG != nil {
+			if err := t.WG.validate(); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		return fmt.Errorf("transport: unknown mode %q (want %q or %q)",
 			t.Mode, TransportSSH, TransportCacheGateway)
 	}
+}
+
+func (w *WG) validate() error {
+	if w.PrivateKeyFile == "" {
+		return errors.New("transport.wg: private_key_file is required")
+	}
+	if w.LocalAddr == "" {
+		return errors.New("transport.wg: local_addr is required")
+	}
+	if _, _, err := net.ParseCIDR(w.LocalAddr); err != nil {
+		return fmt.Errorf("transport.wg.local_addr = %q: %w", w.LocalAddr, err)
+	}
+	if w.KeepaliveInterval < 0 {
+		return errors.New("transport.wg: keepalive_interval must be non-negative")
+	}
+	if err := w.Peer.validate(); err != nil {
+		return fmt.Errorf("transport.wg.peer: %w", err)
+	}
+	for i, p := range w.Proxies {
+		if err := p.validate(); err != nil {
+			return fmt.Errorf("transport.wg.proxies[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func (p *WGPeer) validate() error {
+	if p.PublicKey == "" {
+		return errors.New("public_key is required")
+	}
+	if p.Endpoint == "" {
+		return errors.New("endpoint is required")
+	}
+	if _, _, err := net.SplitHostPort(p.Endpoint); err != nil {
+		return fmt.Errorf("endpoint %q is not host:port: %w", p.Endpoint, err)
+	}
+	if len(p.AllowedIPs) == 0 {
+		return errors.New("allowed_ips must list at least one CIDR")
+	}
+	for i, cidr := range p.AllowedIPs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return fmt.Errorf("allowed_ips[%d] = %q: %w", i, cidr, err)
+		}
+	}
+	return nil
+}
+
+func (px *WGProxy) validate() error {
+	if px.Listen == "" {
+		return errors.New("listen is required")
+	}
+	if _, _, err := net.SplitHostPort(px.Listen); err != nil {
+		return fmt.Errorf("listen %q is not host:port: %w", px.Listen, err)
+	}
+	if px.Upstream == "" {
+		return errors.New("upstream is required")
+	}
+	if _, _, err := net.SplitHostPort(px.Upstream); err != nil {
+		return fmt.Errorf("upstream %q is not host:port: %w", px.Upstream, err)
+	}
+	return nil
 }
 
 func (tn *Tunnel) validate() error {
