@@ -35,6 +35,8 @@ const (
 const (
 	// AgentServiceHealthProcedure is the fully-qualified name of the AgentService's Health RPC.
 	AgentServiceHealthProcedure = "/fjbellows.agent.v1.AgentService/Health"
+	// AgentServiceExecProcedure is the fully-qualified name of the AgentService's Exec RPC.
+	AgentServiceExecProcedure = "/fjbellows.agent.v1.AgentService/Exec"
 )
 
 // AgentServiceClient is a client for the fjbellows.agent.v1.AgentService service.
@@ -45,6 +47,17 @@ type AgentServiceClient interface {
 	// when the call reaches the handler — the field exists so callers can
 	// grep one boolean instead of inspecting the absence of an error.
 	Health(context.Context, *connect.Request[v1.HealthRequest]) (*connect.Response[v1.HealthResponse], error)
+	// Exec runs a single program on the target. Bidi streaming carries
+	// stdin/stdout/stderr/exit-code + signals in the framed envelope below.
+	// The orchestrator opens a matching bidi stream to fjbctl and copies
+	// frames between the two without reinterpretation; see FJB-93 design
+	// doc (docs/designs/remote-shell.md) for the end-to-end picture.
+	//
+	// Phase A (FJB-93 Phase A) of this RPC is **pipe-mode only**: the
+	// handler refuses ExecOpen.tty=true with CodeUnimplemented. PTY +
+	// window resize + interactive shell come in Phase C, on top of the
+	// same envelope.
+	Exec(context.Context) *connect.BidiStreamForClient[v1.ShellMsg, v1.ShellEvent]
 }
 
 // NewAgentServiceClient constructs a client for the fjbellows.agent.v1.AgentService service. By
@@ -64,17 +77,29 @@ func NewAgentServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(agentServiceMethods.ByName("Health")),
 			connect.WithClientOptions(opts...),
 		),
+		exec: connect.NewClient[v1.ShellMsg, v1.ShellEvent](
+			httpClient,
+			baseURL+AgentServiceExecProcedure,
+			connect.WithSchema(agentServiceMethods.ByName("Exec")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // agentServiceClient implements AgentServiceClient.
 type agentServiceClient struct {
 	health *connect.Client[v1.HealthRequest, v1.HealthResponse]
+	exec   *connect.Client[v1.ShellMsg, v1.ShellEvent]
 }
 
 // Health calls fjbellows.agent.v1.AgentService.Health.
 func (c *agentServiceClient) Health(ctx context.Context, req *connect.Request[v1.HealthRequest]) (*connect.Response[v1.HealthResponse], error) {
 	return c.health.CallUnary(ctx, req)
+}
+
+// Exec calls fjbellows.agent.v1.AgentService.Exec.
+func (c *agentServiceClient) Exec(ctx context.Context) *connect.BidiStreamForClient[v1.ShellMsg, v1.ShellEvent] {
+	return c.exec.CallBidiStream(ctx)
 }
 
 // AgentServiceHandler is an implementation of the fjbellows.agent.v1.AgentService service.
@@ -85,6 +110,17 @@ type AgentServiceHandler interface {
 	// when the call reaches the handler — the field exists so callers can
 	// grep one boolean instead of inspecting the absence of an error.
 	Health(context.Context, *connect.Request[v1.HealthRequest]) (*connect.Response[v1.HealthResponse], error)
+	// Exec runs a single program on the target. Bidi streaming carries
+	// stdin/stdout/stderr/exit-code + signals in the framed envelope below.
+	// The orchestrator opens a matching bidi stream to fjbctl and copies
+	// frames between the two without reinterpretation; see FJB-93 design
+	// doc (docs/designs/remote-shell.md) for the end-to-end picture.
+	//
+	// Phase A (FJB-93 Phase A) of this RPC is **pipe-mode only**: the
+	// handler refuses ExecOpen.tty=true with CodeUnimplemented. PTY +
+	// window resize + interactive shell come in Phase C, on top of the
+	// same envelope.
+	Exec(context.Context, *connect.BidiStream[v1.ShellMsg, v1.ShellEvent]) error
 }
 
 // NewAgentServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -100,10 +136,18 @@ func NewAgentServiceHandler(svc AgentServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(agentServiceMethods.ByName("Health")),
 		connect.WithHandlerOptions(opts...),
 	)
+	agentServiceExecHandler := connect.NewBidiStreamHandler(
+		AgentServiceExecProcedure,
+		svc.Exec,
+		connect.WithSchema(agentServiceMethods.ByName("Exec")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/fjbellows.agent.v1.AgentService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case AgentServiceHealthProcedure:
 			agentServiceHealthHandler.ServeHTTP(w, r)
+		case AgentServiceExecProcedure:
+			agentServiceExecHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -115,4 +159,8 @@ type UnimplementedAgentServiceHandler struct{}
 
 func (UnimplementedAgentServiceHandler) Health(context.Context, *connect.Request[v1.HealthRequest]) (*connect.Response[v1.HealthResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.agent.v1.AgentService.Health is not implemented"))
+}
+
+func (UnimplementedAgentServiceHandler) Exec(context.Context, *connect.BidiStream[v1.ShellMsg, v1.ShellEvent]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.agent.v1.AgentService.Exec is not implemented"))
 }
