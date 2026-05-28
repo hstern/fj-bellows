@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -146,7 +147,24 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 	// still see the full strings via the orchestrator config below. See #39.
 	fj := forgejo.New(cfg.Forgejo.URL, cfg.Forgejo.Scope, cfg.Forgejo.Token, forgejo.BareLabels(cfg.Forgejo.Labels)...)
 
-	dispatcher, err := dispatcherFor(cfg, prov, signer)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Boot the WireGuard cache-gateway transport stack (FJB-90) BEFORE
+	// constructing the dispatcher so the cache-gateway dispatcher can
+	// dial worker VPC IPs through the tunnel's netstack (FJB-92). The
+	// stack owns the embedded WG tunnel, ACL registry + DNS resolver
+	// loop, DNS responder, TCP proxy, UDP forwarder, and ICMP bridge.
+	// Returns a closer that's safe to defer-call even when no stack
+	// was started (legacy ssh mode / docker provider); wgStack is nil
+	// in those cases.
+	wgStack, wgClose, err := bootWGStack(ctx, cfg, prov, log)
+	if err != nil {
+		return err
+	}
+	defer wgClose()
+
+	dispatcher, err := dispatcherFor(cfg, prov, signer, wgStack)
 	if err != nil {
 		return err
 	}
@@ -170,20 +188,6 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 		DrainTimeout:    opts.drainTimeout,
 		DestroyOnExit:   opts.destroyOnExit,
 	}, prov, fj, dispatcher, log)
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	// Boot the WireGuard cache-gateway transport stack (FJB-90). The
-	// stack owns the embedded WG tunnel, ACL registry + DNS resolver
-	// loop, DNS responder, TCP proxy, UDP forwarder, and ICMP bridge.
-	// Returns a closer that's safe to defer-call even when no stack
-	// was started (legacy ssh mode / docker provider).
-	wgClose, err := bootWGStack(ctx, cfg, prov, log)
-	if err != nil {
-		return err
-	}
-	defer wgClose()
 
 	if err := startControlPlane(ctx, controlOpts{
 		listen:       opts.controlListen,
@@ -478,22 +482,25 @@ func (b *controlBackend) CacheStatus(ctx context.Context) *control.CacheStatus {
 }
 
 // bootWGStack starts the embedded WireGuard cache-gateway transport
-// (FJB-90) when transport.mode = cache-gateway. Returns a no-op
-// closer (with no error) on any other mode (legacy SSH, docker
-// provider) — callers then run with the pre-FJB-90 dispatch path
-// unchanged.
+// (FJB-90) when transport.mode = cache-gateway. Returns (nil, no-op
+// closer, nil) on any other mode (legacy SSH, docker provider) —
+// callers then run with the pre-FJB-90 dispatch path unchanged.
 //
 // Failures (key unreadable, ACL parse, DNS bind) bubble up as
 // daemon-fatal: the operator chose cache-gateway mode and the stack
 // can't come up; running with a partial transport would be worse
 // than refusing to start.
 //
+// The returned *wgboot.Stack lets the dispatcher inject the tunnel's
+// netstack DialContext (FJB-92) — workers' VPC IPs are unreachable
+// from the host kernel's route table under the netstack transport.
+//
 // The function pulls the cache VPC IP and (when available) the
 // worker VPC subnet from the live provider via duck-typed interfaces
 // — keeps cmd/fj-bellows free of provider-internal types.
-func bootWGStack(ctx context.Context, cfg *config.Config, prov provider.Provider, log *slog.Logger) (func(), error) {
+func bootWGStack(ctx context.Context, cfg *config.Config, prov provider.Provider, log *slog.Logger) (*wgboot.Stack, func(), error) {
 	if cfg.Transport.Mode != config.TransportCacheGateway {
-		return func() {}, nil
+		return nil, func() {}, nil
 	}
 	cache := cacheRenderInputs(ctx, cfg, prov)
 	stack, err := wgboot.Boot(ctx, wgboot.Config{
@@ -504,9 +511,9 @@ func bootWGStack(ctx context.Context, cfg *config.Config, prov provider.Provider
 		Logger:     log,
 	})
 	if err != nil {
-		return func() {}, fmt.Errorf("transport bootstrap: %w", err)
+		return nil, func() {}, fmt.Errorf("transport bootstrap: %w", err)
 	}
-	return func() {
+	return stack, func() {
 		if cerr := stack.Close(); cerr != nil {
 			log.Warn("wgboot: shutdown", "err", cerr)
 		}
@@ -517,6 +524,12 @@ func bootWGStack(ctx context.Context, cfg *config.Config, prov provider.Provider
 // of whatever live provider state is available. Today only the Linode
 // provider carries a managed cache; the function returns whatever it
 // can find and lets the renderer's validate() reject missing fields.
+//
+// FJB-92 added the WorkerVPCSubnet lookup: the renderer needs it to
+// emit the orchestrator → worker reverse-direction ACCEPT rule, and
+// wgboot needs it to include the worker VPC CIDR in the orchestrator's
+// peer AllowedIPs (otherwise the netstack won't encapsulate outbound
+// dispatcher dials).
 func cacheRenderInputs(ctx context.Context, cfg *config.Config, prov provider.Provider) wgboot.CacheRenderInputs {
 	in := wgboot.CacheRenderInputs{}
 	type cacheReporter interface {
@@ -527,12 +540,13 @@ func cacheRenderInputs(ctx context.Context, cfg *config.Config, prov provider.Pr
 			in.CacheVPCIP = s.VPCIP
 		}
 	}
-	// WorkerVPCSubnet is operator-config-only today; the provider's
-	// VPC helper has it but isn't exposed across the orchestrator
-	// boundary yet. The transport.tunnel.routes block carries the
-	// LAN-side CIDRs but not the worker subnet; defer to a follow-up
-	// when the renderer push path actually lands.
-	_ = cfg // currently unused — placeholder for FJB-87
+	type workerVPCReporter interface {
+		WorkerVPCSubnet() string
+	}
+	if wr, ok := prov.(workerVPCReporter); ok {
+		in.WorkerVPCSubnet = wr.WorkerVPCSubnet()
+	}
+	_ = cfg // reserved for future config-driven render inputs (FJB-87 push path)
 	return in
 }
 
@@ -608,7 +622,13 @@ func sshDispatcherFrom(cfg *config.Config, signer ssh.Signer) *orchestrator.SSHD
 // logic auto-skips, and the dispatch session carries no reverse
 // port-forward or /etc/hosts mutation (workers reach LAN destinations
 // via the cache nanode's DNS resolver + IPsec routing).
-func cacheGatewayDispatcherFrom(cfg *config.Config, signer ssh.Signer) *orchestrator.CacheGatewayDispatcher {
+//
+// dialFn — when non-nil — is the netstack DialContext from the WG
+// tunnel (FJB-92): worker VPC IPs are only reachable through the
+// embedded netstack, so the dispatcher dials via the tunnel instead
+// of the host kernel's route table. Nil falls back to the dispatcher's
+// internal net.Dialer (only useful in unit tests with loopback fakes).
+func cacheGatewayDispatcherFrom(cfg *config.Config, signer ssh.Signer, dialFn func(context.Context, string, string) (net.Conn, error)) *orchestrator.CacheGatewayDispatcher {
 	return &orchestrator.CacheGatewayDispatcher{
 		User:        cfg.SSH.User,
 		Port:        cfg.SSH.Port,
@@ -618,6 +638,7 @@ func cacheGatewayDispatcherFrom(cfg *config.Config, signer ssh.Signer) *orchestr
 		ReadyFile:   bootstrap.DefaultReadyFile,
 		ReadyWait:   5 * time.Minute,
 		DialTimeout: 15 * time.Second,
+		DialFn:      dialFn,
 	}
 }
 
@@ -626,9 +647,14 @@ func cacheGatewayDispatcherFrom(cfg *config.Config, signer ssh.Signer) *orchestr
 //
 //  1. Docker provider: docker-exec dispatcher (no SSH).
 //  2. transport.mode = cache-gateway: CacheGatewayDispatcher (SSH
-//     dial via worker VPC IP through the IPsec tunnel; FJB-54).
+//     dial via worker VPC IP through the netstack tunnel; FJB-54,
+//     FJB-92).
 //  3. Default: SSHDispatcher (legacy SSH-on-public-IP).
-func dispatcherFor(cfg *config.Config, prov provider.Provider, signer ssh.Signer) (orchestrator.Dispatcher, error) {
+//
+// wgStack is non-nil iff transport.mode = cache-gateway: it supplies
+// the netstack DialContext the cache-gateway dispatcher must use to
+// reach worker VPC IPs (FJB-92).
+func dispatcherFor(cfg *config.Config, prov provider.Provider, signer ssh.Signer, wgStack *wgboot.Stack) (orchestrator.Dispatcher, error) {
 	if cfg.Provider == config.ProviderDocker {
 		dp, ok := prov.(*dockerprov.Docker)
 		if !ok {
@@ -644,7 +670,11 @@ func dispatcherFor(cfg *config.Config, prov provider.Provider, signer ssh.Signer
 		), nil
 	}
 	if cfg.Transport.Mode == config.TransportCacheGateway {
-		return cacheGatewayDispatcherFrom(cfg, signer), nil
+		var dialFn func(context.Context, string, string) (net.Conn, error)
+		if wgStack != nil && wgStack.Tunnel != nil {
+			dialFn = wgStack.Tunnel.DialContext
+		}
+		return cacheGatewayDispatcherFrom(cfg, signer, dialFn), nil
 	}
 	return sshDispatcherFrom(cfg, signer), nil
 }

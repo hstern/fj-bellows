@@ -243,6 +243,22 @@ func (l *Linode) CacheStatus(ctx context.Context) *CacheStatus {
 	return &s
 }
 
+// WorkerVPCSubnet returns the CIDR (e.g. "10.0.0.0/24") of the VPC
+// subnet workers attach to, or "" when no `vpc:` block is configured.
+// Consumed via duck-typing by cmd/fj-bellows so wgboot can plumb the
+// CIDR into the orchestrator's peer AllowedIPs (FJB-92) and the cache
+// iptables renderer.
+func (l *Linode) WorkerVPCSubnet() string {
+	if l.cfg.VPC == nil {
+		return ""
+	}
+	name := l.cfg.VPC.resolvedWorkerSubnet()
+	if name == "" {
+		return ""
+	}
+	return l.cfg.VPC.Subnets[name].IPv4
+}
+
 func init() {
 	provider.Register("linode", func() provider.Provider { return &Linode{} })
 }

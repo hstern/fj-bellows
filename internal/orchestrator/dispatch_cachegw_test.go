@@ -1,7 +1,12 @@
 package orchestrator
 
 import (
+	"context"
+	"errors"
+	"net"
+	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -36,6 +41,73 @@ func TestSSHDispatcher_StillImplementsHostKeyPinner(t *testing.T) {
 func TestCacheGatewayDispatcher_SatisfiesDispatcher(t *testing.T) {
 	var _ Dispatcher = (*CacheGatewayDispatcher)(nil)
 	_ = t // present to make this a real test fn, not just a global var decl
+}
+
+// TestCacheGatewayDispatcher_UsesInjectedDialFn is the FJB-92 unit test:
+// when the dispatcher is wired with a DialFn (the WG tunnel's netstack
+// DialContext in production), dial() routes through it instead of the
+// host kernel's net.Dialer. We don't run a full SSH handshake — that's
+// covered by the integration tests; we only need to confirm the
+// DialFn was invoked with the expected target.
+func TestCacheGatewayDispatcher_UsesInjectedDialFn(t *testing.T) {
+	const (
+		workerIP = "10.0.0.7"
+		port     = 22
+	)
+	var (
+		gotNetwork string
+		gotAddr    string
+		dialCalled bool
+	)
+	sentinel := errors.New("test sentinel: dialFn invoked")
+	d := &CacheGatewayDispatcher{
+		Port:        port,
+		DialTimeout: 100 * time.Millisecond,
+		DialFn: func(_ context.Context, network, addr string) (net.Conn, error) {
+			dialCalled = true
+			gotNetwork = network
+			gotAddr = addr
+			return nil, sentinel
+		},
+	}
+	_, err := d.dial(t.Context(), workerIP)
+	if !dialCalled {
+		t.Fatal("DialFn was not invoked; dispatcher fell back to host kernel net.Dialer")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want the sentinel returned by DialFn", err)
+	}
+	if gotNetwork != "tcp" {
+		t.Errorf("DialFn network = %q, want %q", gotNetwork, "tcp")
+	}
+	if want := net.JoinHostPort(workerIP, "22"); gotAddr != want {
+		t.Errorf("DialFn addr = %q, want %q", gotAddr, want)
+	}
+}
+
+// TestCacheGatewayDispatcher_FallsBackToNetDialer covers the test-only
+// fallback path: a dispatcher without DialFn uses the host net.Dialer.
+// The DialTimeout makes the dial deterministic — we point at a
+// guaranteed-unreachable bogon, count on the timeout firing, and
+// assert the error mentions the address we passed in. Sufficient to
+// prove that "no DialFn → fall back to net.Dialer" without coupling
+// the test to OS-specific routing.
+func TestCacheGatewayDispatcher_FallsBackToNetDialer(t *testing.T) {
+	d := &CacheGatewayDispatcher{
+		Port:        22,
+		DialTimeout: 50 * time.Millisecond,
+	}
+	// 192.0.2.0/24 is TEST-NET-1 — guaranteed unreachable.
+	const target = "192.0.2.1"
+	_, err := d.dial(t.Context(), target)
+	if err == nil {
+		t.Fatal("expected dial error against unreachable host")
+	}
+	// Net dialer with a tight timeout surfaces a context-deadline or
+	// network error containing the target host:port string.
+	if want := net.JoinHostPort(target, "22"); !strings.Contains(err.Error(), want) {
+		t.Errorf("err = %v, want substring %q (so we know the fallback dialer ran)", err, want)
+	}
 }
 
 func TestAddrFor(t *testing.T) {
