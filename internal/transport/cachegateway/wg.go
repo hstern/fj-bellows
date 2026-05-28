@@ -3,13 +3,14 @@ package cachegateway
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 )
 
 // WGInputs feeds RenderWGQuick. Kept separate from Inputs because the
-// WG path doesn't share many fields with the IPsec path — keeping the
-// two struct shapes distinct makes the dependencies obvious and
-// avoids "is this field set?" surprises during the pivot.
+// iptables renderer and the wg-quick renderer consume disjoint subsets
+// of the cache-side state — keeping the two struct shapes distinct
+// makes the dependencies obvious.
 type WGInputs struct {
 	// CachePrivateKey is the cache nanode's WG private key (Curve25519,
 	// base64). Generated + persisted on the cache; the operator pastes
@@ -17,41 +18,37 @@ type WGInputs struct {
 	// block.
 	CachePrivateKey string
 
-	// CacheWGAddr is the cache nanode's tunnel-side IPv4 + prefix
-	// (e.g. "10.99.0.2/32"). One /32 host on the WG mesh.
-	CacheWGAddr string
+	// CacheWGAddr is the cache nanode's tunnel-side address — a single
+	// host inside the overlay prefix (e.g. 100.64.0.2 when the overlay
+	// is 100.64.0.0/30). Rendered as Address = <addr>/32.
+	CacheWGAddr netip.Addr
 
 	// ListenPort is the UDP port the cache's WG interface listens on.
 	// Inbound from anywhere — WG drops unauthenticated packets, so
 	// wide-open is safe and matches the Linode firewall rule fjb
-	// applies (FJB-65, post-WG-pivot).
+	// applies.
 	ListenPort int
 
 	// OrchestratorPublicKey is the orchestrator's WG public key
-	// (Curve25519, base64). Operator pastes after running fj-bellows
-	// once (the daemon generates on first start, logs the public
-	// key, and waits for the peer to come up).
+	// (Curve25519, base64).
 	OrchestratorPublicKey string
 
-	// OrchestratorAllowedIPs is the list of CIDRs routed through the
-	// orchestrator peer from the cache's side. Typically one /32 (the
-	// orchestrator's WG IP); no LAN subnet — the orchestrator is the
-	// transparent-proxy gateway, not a routing peer for LAN networks.
-	OrchestratorAllowedIPs []string
-
-	// WorkerVPCSubnet is the cache's view of the worker VPC (e.g.
-	// "10.0.0.0/24"). Currently unused in the wg-quick render itself
-	// (the iptables FORWARD chain owns worker-traffic gating, see
-	// RenderCacheIPTables) — kept on the inputs struct for forward
-	// compatibility with PostUp/PostDown one-liners that may want it.
-	WorkerVPCSubnet string
+	// AllowedIPs is the union of destination prefixes routed through
+	// the orchestrator peer from the cache side. Computed by the caller
+	// from the ACL registry's snapshot (orchestrator /32 + each
+	// ACL-resolved CIDR/IP). One comma-separated AllowedIPs line is
+	// emitted in the [Peer] block.
+	//
+	// Must contain at least one prefix (the orchestrator /32 is the
+	// minimum useful set).
+	AllowedIPs []netip.Prefix
 }
 
 func (i WGInputs) validate() error {
 	if i.CachePrivateKey == "" {
 		return errors.New("cachegateway: CachePrivateKey is required")
 	}
-	if i.CacheWGAddr == "" {
+	if !i.CacheWGAddr.IsValid() {
 		return errors.New("cachegateway: CacheWGAddr is required")
 	}
 	if i.ListenPort < 1 || i.ListenPort > 65535 {
@@ -60,8 +57,13 @@ func (i WGInputs) validate() error {
 	if i.OrchestratorPublicKey == "" {
 		return errors.New("cachegateway: OrchestratorPublicKey is required")
 	}
-	if len(i.OrchestratorAllowedIPs) == 0 {
-		return errors.New("cachegateway: OrchestratorAllowedIPs must list at least one CIDR")
+	if len(i.AllowedIPs) == 0 {
+		return errors.New("cachegateway: AllowedIPs must list at least one prefix")
+	}
+	for _, p := range i.AllowedIPs {
+		if !p.IsValid() {
+			return errors.New("cachegateway: AllowedIPs contains an invalid prefix")
+		}
 	}
 	return nil
 }
@@ -99,16 +101,35 @@ func RenderWGQuick(in WGInputs) (string, error) {
 	b.WriteString("# the initiator (NAT-traversing); we only listen + learn its\n")
 	b.WriteString("# endpoint from the first handshake.\n\n")
 	b.WriteString("[Interface]\n")
-	fmt.Fprintf(&b, "Address = %s\n", in.CacheWGAddr)
+	fmt.Fprintf(&b, "Address = %s/%d\n", in.CacheWGAddr, hostBits(in.CacheWGAddr))
 	fmt.Fprintf(&b, "ListenPort = %d\n", in.ListenPort)
 	fmt.Fprintf(&b, "PrivateKey = %s\n\n", in.CachePrivateKey)
 	b.WriteString("[Peer]\n")
 	b.WriteString("# Orchestrator (initiator, behind operator-side NAT).\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", in.OrchestratorPublicKey)
-	fmt.Fprintf(&b, "AllowedIPs = %s\n", strings.Join(in.OrchestratorAllowedIPs, ", "))
+	fmt.Fprintf(&b, "AllowedIPs = %s\n", joinPrefixes(in.AllowedIPs))
 	b.WriteString("# Endpoint intentionally omitted — orchestrator dials us first,\n")
 	b.WriteString("# we learn its source IP:port from the wire.\n")
 	b.WriteString("# PersistentKeepalive intentionally omitted — only the orchestrator\n")
 	b.WriteString("# side runs keepalive (it's the side traversing NAT).\n")
 	return b.String(), nil
+}
+
+// hostBits returns the host-route prefix length for the address family
+// (32 for v4, 128 for v6).
+func hostBits(a netip.Addr) int {
+	if a.Is6() && !a.Is4In6() {
+		return 128
+	}
+	return 32
+}
+
+// joinPrefixes renders a netip.Prefix slice in wg-quick's expected
+// AllowedIPs shape: comma-separated, single space after each comma.
+func joinPrefixes(prefixes []netip.Prefix) string {
+	parts := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
+		parts = append(parts, p.String())
+	}
+	return strings.Join(parts, ", ")
 }
