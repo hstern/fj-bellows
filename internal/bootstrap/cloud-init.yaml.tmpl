@@ -8,6 +8,41 @@ packages:
   - docker.io
   - curl
   - ca-certificates
+{{- if .FJBAgentDownloadURL}}
+# fjbagent (FJB-94) — runs as the unprivileged `fjb` system user. The token
+# below is the per-deployment shared secret; the orchestrator presents it on
+# the Authorization header for every Connect RPC. WG already encrypts and
+# authenticates the orchestrator↔cache leg, and the cache↔worker leg is on
+# the private VPC subnet, so plain HTTP/2 cleartext is acceptable.
+groups:
+  - fjb
+users:
+  - name: fjb
+    system: true
+    no_create_home: true
+    shell: /usr/sbin/nologin
+    primary_group: fjb
+write_files:
+  - path: /etc/fjbagent/auth.token
+    permissions: '0600'
+    owner: 'fjb:fjb'
+    content: |
+      {{.FJBAgentToken}}
+  - path: /etc/default/fjbagent
+    permissions: '0644'
+    content: |
+      # Resolved by cloud-init at boot from the VPC IP cloud-init exposes
+      # via instance-data; the orchestrator dials this address. Bound to
+      # 0.0.0.0 so workers don't need to know their own VPC IP upfront —
+      # the cache-gateway routing in FJB-54 makes the VPC subnet the only
+      # reachable surface, and the WG ACL further constrains what can
+      # land on :9001.
+      FJBAGENT_LISTEN=0.0.0.0:{{.FJBAgentListenPort}}
+  - path: /etc/systemd/system/fjbagent.service
+    permissions: '0644'
+    content: |
+{{.FJBAgentServiceUnit | indent 6}}
+{{- end}}
 runcmd:
   - systemctl enable --now docker
 {{- if .HostPrivateKey}}
@@ -37,4 +72,19 @@ runcmd:
     url="https://code.forgejo.org/forgejo/runner/releases/download/v{{.RunnerVersion}}/forgejo-runner-{{.RunnerVersion}}-linux-${rarch}"
     curl -fsSL -o /usr/local/bin/forgejo-runner "$url"
     chmod +x /usr/local/bin/forgejo-runner
+{{- if .FJBAgentDownloadURL}}
+  - |
+    set -eu
+    arch="$(uname -m)"
+    case "$arch" in
+      x86_64) rarch=amd64 ;;
+      aarch64|arm64) rarch=arm64 ;;
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+    esac
+    url="{{.FJBAgentDownloadURL}}"
+    curl -fsSL -o /usr/local/bin/fjbagent "$url"
+    chmod +x /usr/local/bin/fjbagent
+  - systemctl daemon-reload
+  - systemctl enable --now fjbagent
+{{- end}}
   - touch {{.ReadyFile}}

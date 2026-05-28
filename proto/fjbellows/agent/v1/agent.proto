@@ -17,7 +17,17 @@ import "google/protobuf/timestamp.proto";
 // and authenticates the orchestrator↔cache leg, the cache↔worker leg is on
 // the private VPC subnet, and adding TLS would mean another cert lifecycle.
 //
-// FJB-94 ships only Health; FJB-93 will add Exec, FJB-97 will reuse Health
+// **Wire compatibility.** Workers are provisioned with the agent version
+// stamped into the fj-bellows daemon at provision time; an orchestrator
+// upgrade does not retroactively replace the agent on already-running
+// workers. The orchestrator therefore MUST keep speaking older versions of
+// this proto. Discipline:
+//   - Never renumber, rename, or repurpose an existing field.
+//   - New fields use new numbers; readers must tolerate their absence.
+//   - Behaviour changes go through new RPCs or new oneof variants, never
+//     by changing the meaning of an existing one.
+//
+// FJB-94 ships only Health; FJB-93 added Exec, FJB-97 will reuse Health
 // for the gRPC-layer reachability probe.
 service AgentService {
   // Health returns a readiness snapshot of the agent process. Used by the

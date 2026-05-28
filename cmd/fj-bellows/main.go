@@ -45,6 +45,12 @@ func main() {
 	controlListen := flag.String("control-listen", "127.0.0.1:9876", "control plane listen address (TCP); empty disables")
 	controlTokenFile := flag.String("control-token-file", "", "bearer-token file for the control plane (required for non-loopback binds; mode 0600)")
 	enableControlWrites := flag.Bool("enable-control-writes", false, "expose mutating control RPCs (ForceReap, ForceProvision); off by default")
+	// fjbagent (FJB-94). The agent's version implicitly tracks this
+	// orchestrator's build (main.version), so there is no per-deployment
+	// version choice — only a token file (required) and an optional URL
+	// template override (default points at the matching github release).
+	fjbAgentTokenFile := flag.String("fjbagent-token-file", "", "bearer-token file for fjbagent on workers (mode 0600); empty disables agent install")
+	fjbAgentURLTmpl := flag.String("fjbagent-url", "", "URL template for the fjbagent binary; supports {{.Version}} (resolved from this build) and $rarch (resolved by cloud-init). Empty uses the default github releases URL.")
 	flag.Parse()
 
 	// Wrap the stderr text handler with a logbus tee so the control plane's
@@ -65,6 +71,8 @@ func main() {
 		controlListen:       *controlListen,
 		controlTokenFile:    *controlTokenFile,
 		enableControlWrites: *enableControlWrites,
+		fjbAgentTokenFile:   *fjbAgentTokenFile,
+		fjbAgentURLTmpl:     *fjbAgentURLTmpl,
 	}
 	if err := run(opts, log, logBus); err != nil {
 		log.Error("fatal", "err", err)
@@ -82,7 +90,16 @@ type runOpts struct {
 	controlListen       string
 	controlTokenFile    string
 	enableControlWrites bool
+	fjbAgentTokenFile   string
+	fjbAgentURLTmpl     string
 }
+
+// version is the fj-bellows daemon's build version, stamped at link
+// time via -ldflags "-X main.version=<git describe output>". It also
+// drives the version of fjbagent installed on workers via cloud-init,
+// since agent and orchestrator share a proto and must be built from
+// the same commit.
+var version = "dev"
 
 func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 	cfg, err := config.Load(opts.configPath)
@@ -169,15 +186,22 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 		return err
 	}
 
+	fjbAgentToken, fjbAgentURL, err := loadFJBAgentSettings(opts, version)
+	if err != nil {
+		return err
+	}
+
 	orch := orchestrator.New(orchestrator.Config{
-		Tag:           cfg.Tag,
-		MaxScale:      cfg.Scale.Max,
-		Labels:        cfg.Forgejo.Labels,
-		PollInterval:  cfg.Poll.Interval.D(),
-		RunnerVersion: opts.runnerVersion,
-		ReadyFile:     bootstrap.DefaultReadyFile,
-		AuthorizedKey: authKey,
-		TransportMode: cfg.Transport.Mode,
+		Tag:                 cfg.Tag,
+		MaxScale:            cfg.Scale.Max,
+		Labels:              cfg.Forgejo.Labels,
+		PollInterval:        cfg.Poll.Interval.D(),
+		RunnerVersion:       opts.runnerVersion,
+		ReadyFile:           bootstrap.DefaultReadyFile,
+		AuthorizedKey:       authKey,
+		TransportMode:       cfg.Transport.Mode,
+		FJBAgentDownloadURL: fjbAgentURL,
+		FJBAgentToken:       fjbAgentToken,
 		Teardown: orchestrator.TeardownPolicy{
 			Model:       prov.BillingModel(),
 			IdleTimeout: cfg.Poll.IdleTimeout.D(),
@@ -742,4 +766,28 @@ func acquireLock(path string) (func(), error) {
 		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		_ = f.Close()
 	}, nil
+}
+
+// loadFJBAgentSettings reads the fjbagent token from disk (if configured)
+// and resolves the binary download URL against the daemon's own build
+// version. Returns the empty-string pair when -fjbagent-token-file is
+// unset (agent install disabled).
+func loadFJBAgentSettings(opts runOpts, buildVersion string) (token, url string, err error) {
+	if opts.fjbAgentTokenFile == "" {
+		// Empty token file = agent install disabled; nothing to load.
+		return "", "", nil
+	}
+	tok, err := os.ReadFile(opts.fjbAgentTokenFile)
+	if err != nil {
+		return "", "", fmt.Errorf("read fjbagent token: %w", err)
+	}
+	t := strings.TrimSpace(string(tok))
+	if t == "" {
+		return "", "", fmt.Errorf("fjbagent token file %s is empty", opts.fjbAgentTokenFile)
+	}
+	resolvedURL, err := bootstrap.ResolveAgentDownloadURL(opts.fjbAgentURLTmpl, buildVersion)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve fjbagent URL: %w", err)
+	}
+	return t, resolvedURL, nil
 }
