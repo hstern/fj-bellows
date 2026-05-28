@@ -37,9 +37,6 @@ func TestWG_FullyConfigured(t *testing.T) {
       allowed_ips:
         - 10.99.0.2/32
         - 10.0.0.0/24
-    proxies:
-      - { listen: 10.99.0.1:443, upstream: git.stern.ca:443 }
-      - { listen: 10.99.0.1:22,  upstream: git.stern.ca:22  }
     acl:
       - tcp://forgejo.stern.ca:22
       - tcp://nexus.stern.ca:80,443
@@ -64,9 +61,6 @@ func TestWG_FullyConfigured(t *testing.T) {
 	}
 	if len(wg.Peer.AllowedIPs) != 2 {
 		t.Errorf("len(AllowedIPs) = %d, want 2", len(wg.Peer.AllowedIPs))
-	}
-	if len(wg.Proxies) != 2 {
-		t.Errorf("len(Proxies) = %d, want 2", len(wg.Proxies))
 	}
 	if len(wg.ACL) != 3 {
 		t.Errorf("len(ACL) = %d, want 3", len(wg.ACL))
@@ -268,36 +262,6 @@ func TestWG_Validation(t *testing.T) {
       allowed_ips: [bad-cidr]
 `,
 			wantSub: `allowed_ips[0] = "bad-cidr"`,
-		},
-		{
-			name: "proxy missing listen",
-			wgBlock: `
-  wg:
-    private_key_file: /tmp/k
-    local_addr: 10.99.0.1/32
-    peer:
-      public_key: AbcDefGhiJklMnoPqrStuVwxYzAbcDefGhiJklMnoPqs=
-      endpoint: 172.234.203.50:51820
-      allowed_ips: [10.99.0.2/32]
-    proxies:
-      - { upstream: git.stern.ca:443 }
-`,
-			wantSub: "listen is required",
-		},
-		{
-			name: "proxy missing upstream",
-			wgBlock: `
-  wg:
-    private_key_file: /tmp/k
-    local_addr: 10.99.0.1/32
-    peer:
-      public_key: AbcDefGhiJklMnoPqrStuVwxYzAbcDefGhiJklMnoPqs=
-      endpoint: 172.234.203.50:51820
-      allowed_ips: [10.99.0.2/32]
-    proxies:
-      - { listen: 10.99.0.1:443 }
-`,
-			wantSub: "upstream is required",
 		},
 		{
 			name: "negative keepalive",
