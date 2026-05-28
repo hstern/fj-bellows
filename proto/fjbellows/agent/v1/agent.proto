@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package fjbellows.agent.v1;
+
+option go_package = "github.com/hstern/fj-bellows/gen/fjbellows/agent/v1;agentv1";
+
+import "google/protobuf/timestamp.proto";
+
+// AgentService runs on every worker and cache VM. The orchestrator dials it
+// over the WG fabric (direct WG peer for cache, via cache-gateway routing for
+// workers) and uses it to drive operator-side control RPCs that need code
+// running on the target — interactive shell, command exec, reachability
+// probes, and a future log-tail surface.
+//
+// Auth is a per-deployment shared secret presented in the Authorization header
+// (Bearer scheme). The wire is plain HTTP/2 cleartext — WG already encrypts
+// and authenticates the orchestrator↔cache leg, the cache↔worker leg is on
+// the private VPC subnet, and adding TLS would mean another cert lifecycle.
+//
+// FJB-94 ships only Health; FJB-93 will add Exec, FJB-97 will reuse Health
+// for the gRPC-layer reachability probe.
+service AgentService {
+  // Health returns a readiness snapshot of the agent process. Used by the
+  // orchestrator's readiness gate and the e2e harness to assert "agent is
+  // up and responding to RPCs". The response always populates `ready=true`
+  // when the call reaches the handler — the field exists so callers can
+  // grep one boolean instead of inspecting the absence of an error.
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  // ready is true on every successful invocation; the field is present so
+  // operator tooling can do `.ready` instead of `error == nil`. It exists
+  // for future-proofing too — a future agent may want to return ready=false
+  // while still being reachable (e.g. during a quiesce window).
+  bool ready = 1;
+
+  // build_version is the agent binary's version string. Populated from
+  // -ldflags "-X main.version=…" at link time; "dev" when unset.
+  string build_version = 2;
+
+  // started_at is when the agent process started. Subtracting this from
+  // now gives the operator-visible uptime.
+  google.protobuf.Timestamp started_at = 3;
+
+  // hostname is the OS hostname as reported by os.Hostname() at startup.
+  // Useful when the orchestrator's name → addr map drifts from what the
+  // VM actually thinks it is.
+  string hostname = 4;
+}
