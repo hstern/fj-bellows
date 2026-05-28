@@ -5,10 +5,14 @@ import (
 	"testing"
 )
 
+// testValidGatewayExtras returns a workerExtrasData valid for the
+// cache-gateway template — ACL-derived AllowedIPsCIDRs + the default
+// orchestrator WG address.
 func testValidGatewayExtras() workerExtrasData {
 	x := testValidWorkerExtras()
 	x.TransportMode = transportCacheGateway
-	x.TunnelRoutes = []string{"192.168.0.0/24", "10.10.0.0/16"}
+	x.AllowedIPsCIDRs = []string{testCIDRLan192, testCIDRLan10}
+	x.OrchestratorWGAddr = defaultOrchestratorWGAddr
 	return x
 }
 
@@ -34,12 +38,12 @@ func TestRenderWorkerCacheExtras_SSHKeepsHostsEntry(t *testing.T) {
 			t.Errorf("missing %q in SSH-mode extras:\n%s", sub, got)
 		}
 	}
-	// SSH-mode template MUST NOT contain the new resolved.conf or
+	// SSH-mode template MUST NOT contain the new resolv.conf or
 	// route plumbing.
 	notWanted := []string{
-		"resolved.conf.d",
+		"resolv.conf",
 		"ip route replace",
-		"systemctl restart systemd-resolved",
+		"nameserver 100.64.0.1",
 	}
 	for _, sub := range notWanted {
 		if strings.Contains(got, sub) {
@@ -48,11 +52,12 @@ func TestRenderWorkerCacheExtras_SSHKeepsHostsEntry(t *testing.T) {
 	}
 }
 
-// TestRenderWorkerCacheExtras_CacheGatewayDropsHostsAddsDNSAndRoutes
-// — cache-gateway mode picks the new template: keeps CA + cert.d,
-// drops /etc/hosts entry, adds resolved.conf drop-in + ip route
-// commands for each TunnelRoute.
-func TestRenderWorkerCacheExtras_CacheGatewayDropsHostsAddsDNSAndRoutes(t *testing.T) {
+// TestRenderWorkerCacheExtras_CacheGatewayResolvConfAndRoutes pins the
+// FJB-88 shape: cache-gateway mode emits exactly one /etc/resolv.conf
+// nameserver line pointing at the orchestrator's WG address, one
+// `ip route replace` per AllowedIPsCIDR, and keeps CA + cert.d
+// injection unchanged.
+func TestRenderWorkerCacheExtras_CacheGatewayResolvConfAndRoutes(t *testing.T) {
 	got, err := renderWorkerCacheExtras(testValidGatewayExtras())
 	if err != nil {
 		t.Fatalf("renderWorkerCacheExtras: %v", err)
@@ -67,21 +72,27 @@ func TestRenderWorkerCacheExtras_CacheGatewayDropsHostsAddsDNSAndRoutes(t *testi
 	if !strings.Contains(got, "- update-ca-certificates") {
 		t.Errorf("update-ca-certificates runcmd missing under cache-gateway:\n%s", got)
 	}
-	// DROPPED: /etc/hosts cache entry.
-	if strings.Contains(got, defaultCacheHostname+"\n") && strings.Contains(got, "10.0.0.42 "+defaultCacheHostname) {
-		t.Errorf("unexpected /etc/hosts entry under cache-gateway:\n%s", got)
+	// DROPPED: /etc/hosts cache entry + legacy systemd-resolved drop-in.
+	if strings.Contains(got, "path: /etc/hosts") {
+		t.Errorf("unexpected /etc/hosts write_files entry under cache-gateway:\n%s", got)
 	}
-	// ADDED: resolved.conf drop-in pointing at cache.
-	if !strings.Contains(got, "path: /etc/systemd/resolved.conf.d/fjb-cache.conf") {
-		t.Errorf("resolved.conf drop-in missing under cache-gateway:\n%s", got)
+	if strings.Contains(got, "systemd/resolved.conf.d") {
+		t.Errorf("legacy resolved.conf.d drop-in must be gone:\n%s", got)
 	}
-	if !strings.Contains(got, "DNS=10.0.0.42") {
-		t.Errorf("DNS= line not pointing at cache VPC IP:\n%s", got)
+	if strings.Contains(got, "systemctl restart systemd-resolved") {
+		t.Errorf("legacy systemd-resolved restart must be gone:\n%s", got)
 	}
-	if !strings.Contains(got, "systemctl restart systemd-resolved") {
-		t.Errorf("systemd-resolved restart missing:\n%s", got)
+
+	// ADDED: /etc/resolv.conf with single nameserver line.
+	if !strings.Contains(got, "path: /etc/resolv.conf") {
+		t.Errorf("resolv.conf write_files entry missing:\n%s", got)
 	}
-	// ADDED: ip route for each TunnelRoute, via cache VPC IP.
+	nameserverLine := "nameserver " + defaultOrchestratorWGAddr
+	if c := strings.Count(got, nameserverLine); c != 1 {
+		t.Errorf("expected exactly 1 %q line, got %d:\n%s", nameserverLine, c, got)
+	}
+
+	// ADDED: ip route for each AllowedIPsCIDR, via cache VPC IP.
 	wantRoutes := []string{
 		"ip route replace 192.168.0.0/24 via 10.0.0.42",
 		"ip route replace 10.10.0.0/16 via 10.0.0.42",
@@ -91,24 +102,40 @@ func TestRenderWorkerCacheExtras_CacheGatewayDropsHostsAddsDNSAndRoutes(t *testi
 			t.Errorf("missing route %q under cache-gateway:\n%s", sub, got)
 		}
 	}
+	// One `ip route replace` line per CIDR, no more, no less.
+	if c := strings.Count(got, "ip route replace"); c != len(wantRoutes) {
+		t.Errorf("expected %d `ip route replace` lines, got %d:\n%s", len(wantRoutes), c, got)
+	}
 }
 
-// TestRenderWorkerCacheExtras_CacheGatewayNoRoutes — empty TunnelRoutes
-// is valid; the template emits no route commands but everything else
-// still renders.
-func TestRenderWorkerCacheExtras_CacheGatewayNoRoutes(t *testing.T) {
+// TestRenderWorkerCacheExtras_CacheGatewayRejectsEmptyAllowedIPs —
+// FJB-88 validation: a cache-gateway worker with zero AllowedIPs CIDRs
+// has no path to reach anything across WG. Refuse rather than
+// silently provision a broken worker.
+func TestRenderWorkerCacheExtras_CacheGatewayRejectsEmptyAllowedIPs(t *testing.T) {
 	x := testValidGatewayExtras()
-	x.TunnelRoutes = nil
-	got, err := renderWorkerCacheExtras(x)
-	if err != nil {
-		t.Fatalf("renderWorkerCacheExtras: %v", err)
+	x.AllowedIPsCIDRs = nil
+	_, err := renderWorkerCacheExtras(x)
+	if err == nil {
+		t.Fatal("expected error when AllowedIPsCIDRs is empty under cache-gateway")
 	}
-	if strings.Contains(got, "ip route replace") {
-		t.Errorf("unexpected route command when TunnelRoutes is empty:\n%s", got)
+	if !strings.Contains(err.Error(), "AllowedIPsCIDRs") {
+		t.Errorf("error should mention AllowedIPsCIDRs, got: %v", err)
 	}
-	// DNS pointer + resolved.conf still present.
-	if !strings.Contains(got, "DNS=10.0.0.42") {
-		t.Errorf("DNS pointer missing without tunnel routes:\n%s", got)
+}
+
+// TestRenderWorkerCacheExtras_CacheGatewayRejectsEmptyOrchestratorAddr —
+// FJB-88 validation: without an OrchestratorWGAddr the resolv.conf
+// line would render as `nameserver ` and break DNS on the worker.
+func TestRenderWorkerCacheExtras_CacheGatewayRejectsEmptyOrchestratorAddr(t *testing.T) {
+	x := testValidGatewayExtras()
+	x.OrchestratorWGAddr = ""
+	_, err := renderWorkerCacheExtras(x)
+	if err == nil {
+		t.Fatal("expected error when OrchestratorWGAddr is empty under cache-gateway")
+	}
+	if !strings.Contains(err.Error(), "OrchestratorWGAddr") {
+		t.Errorf("error should mention OrchestratorWGAddr, got: %v", err)
 	}
 }
 
@@ -129,6 +156,9 @@ func TestWrapWorkerUserDataForCache_CacheGatewayProducesMergeable(t *testing.T) 
 	}
 	if !strings.Contains(out, "ip route replace") {
 		t.Errorf("cache-gateway route plumbing missing from wrapped output")
+	}
+	if !strings.Contains(out, "nameserver "+defaultOrchestratorWGAddr) {
+		t.Errorf("resolv.conf nameserver line missing from wrapped output")
 	}
 	if !strings.Contains(out, "echo base") {
 		t.Errorf("base user-data dropped during wrap")

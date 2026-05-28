@@ -78,14 +78,18 @@ var workerCacheExtrasGatewayTemplate string
 //
 //   - "" / "ssh" (legacy): writes a `/etc/hosts` cache-hostname entry
 //     so workers reach the registry by hosts-file glue.
-//   - "cache-gateway" (FJB-54): writes a systemd-resolved drop-in
-//     pointing DNS at the cache + `ip route` commands for the
-//     configured tunnel CIDRs. No `/etc/hosts` entry — unbound on
-//     the cache nanode answers "cache" authoritatively.
+//   - "cache-gateway" (FJB-54 / FJB-88): writes `/etc/resolv.conf`
+//     pointing the worker at the orchestrator's WG overlay address
+//     (where the DNS responder lives) and emits one `ip route replace
+//     <cidr> via <CacheIP>` per AllowedIPs CIDR from the ACL registry.
+//     No /etc/hosts entry — the orchestrator's DNS responder answers
+//     "cache" authoritatively over the WG path.
 //
 // Required fields are guarded — an empty CA PEM or cache IP would
 // silently produce broken trust / unreachable cache, so we refuse to
-// render in that state.
+// render in that state. Under cache-gateway, an empty AllowedIPsCIDRs
+// is also a hard error: a worker with no routes can reach nothing
+// across WG, which would silently break every job.
 func renderWorkerCacheExtras(x workerExtrasData) (string, error) {
 	if err := validateWorkerExtras(x); err != nil {
 		return "", err
@@ -131,6 +135,20 @@ func validateWorkerExtras(x workerExtrasData) error {
 	}
 	if x.CachePort == 0 {
 		missing = append(missing, "CachePort")
+	}
+	if x.TransportMode == transportCacheGateway {
+		// FJB-88: under cache-gateway, the worker reaches everything
+		// through WG via the cache. No CIDRs = no routes = unreachable
+		// upstreams. Refuse to render rather than provision a broken
+		// worker. The orchestrator (FJB-90) is responsible for ensuring
+		// the ACL registry has resolved at least one entry before
+		// Provision runs.
+		if len(x.AllowedIPsCIDRs) == 0 {
+			missing = append(missing, "AllowedIPsCIDRs")
+		}
+		if x.OrchestratorWGAddr == "" {
+			missing = append(missing, "OrchestratorWGAddr")
+		}
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("worker cache extras: missing required field(s): %s", strings.Join(missing, ", "))

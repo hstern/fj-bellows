@@ -1,18 +1,20 @@
 #cloud-config
-# Worker cache-extras fragment for cache-gateway transport (FJB-54).
+# Worker cache-extras fragment for cache-gateway transport (FJB-54 / FJB-88).
 # cloud-init merges this with the base worker user-data the orchestrator
 # rendered.
 #
 # Differences from the legacy SSH-tunnel extras:
-#  - DROPPED: /etc/hosts entry for the cache. unbound on the cache nanode
-#    answers "cache." authoritatively over the VPC, so workers reach the
+#  - DROPPED: /etc/hosts entry for the cache. The orchestrator's DNS
+#    responder (bound on the WG overlay at 100.64.0.1:53) answers
+#    "cache" authoritatively over the WG path, so workers reach the
 #    registry by DNS rather than hosts-file glue.
-#  - ADDED: /etc/systemd/resolved.conf.d/ drop-in pointing DNS at the
-#    cache's VPC IP so the worker resolves "cache" (and the LAN-side
-#    Forgejo hostname via unbound's forward zones) through the cache.
-#  - ADDED: explicit routes for each transport.tunnel.routes CIDR via
-#    the cache's VPC IP, so traffic to LAN destinations crosses the
-#    IPsec tunnel terminated on the cache nanode.
+#  - REPLACED: the prior systemd-resolved drop-in is gone. We write
+#    /etc/resolv.conf directly to a single nameserver line pointing at
+#    the orchestrator's WG overlay address — no resolved restart, no
+#    drop-in management. Matches transport.md "Worker route derivation".
+#  - ADDED: explicit routes for each AllowedIPs CIDR via the cache's
+#    VPC IP, so traffic to ACL-resolved destinations crosses WG (the
+#    cache nanode forwards out wg0 under FJB-FORWARD).
 #  - KEPT: CA + cert.d injection. zot still terminates its own TLS
 #    with the fjb-managed CA; workers still trust it via the system
 #    CA pool. Cache push/pull authz is tracked separately (FJB-55).
@@ -32,18 +34,15 @@ write_files:
     permissions: '0644'
     content: |
 {{.CACertPEM | indent 6}}
-  - path: /etc/systemd/resolved.conf.d/fjb-cache.conf
+  # /etc/resolv.conf: single nameserver pointing at the orchestrator's
+  # WG overlay address (FJB-83 responder). Kept comment-free so the
+  # file matches the transport.md "one line" contract exactly.
+  - path: /etc/resolv.conf
     permissions: '0644'
     content: |
-      # fj-bellows cache-gateway DNS — points the worker at unbound on
-      # the cache nanode (FJB-71). The cache resolves "cache" locally
-      # and forwards LAN zones over IPsec.
-      [Resolve]
-      DNS={{.CacheIP}}
-      Domains=~.
+      nameserver {{.OrchestratorWGAddr}}
 runcmd:
   - update-ca-certificates
-  - systemctl restart systemd-resolved
-{{- range .TunnelRoutes}}
+{{- range .AllowedIPsCIDRs}}
   - ip route replace {{.}} via {{$.CacheIP}}
 {{- end}}

@@ -83,9 +83,16 @@ type Linode struct {
 	transportMode string
 
 	// tunnelRoutes is config.Transport.Tunnel.Routes, captured before
-	// Configure via SetTunnelRoutes. Rendered into the worker cache-
-	// extras cloud-init under cache-gateway mode (FJB-74). Empty (and
-	// unused) under legacy ssh mode.
+	// Configure via SetTunnelRoutes. Originally rendered into the
+	// worker cache-extras cloud-init under cache-gateway mode (FJB-74).
+	//
+	// FJB-88 replaced that path: workers now get routes from the ACL
+	// registry's AllowedIPs set, not from operator-supplied static
+	// tunnel routes. SetTunnelRoutes still exists (cmd/fj-bellows wires
+	// it duck-typed) but the value is no longer propagated to the
+	// managedCache — kept here only to avoid breaking the wiring contract
+	// before FJB-90 reshapes it. Will be removed once FJB-90 wires the
+	// ACL registry into the provider explicitly.
 	tunnelRoutes []string
 
 	// workersInFlight counts Provision calls that have entered the
@@ -174,6 +181,28 @@ func (l *Linode) SetSSHAuthorizedKey(authKey string) {
 // this method are unaffected (the docker provider has no firewall).
 func (l *Linode) SetTransportMode(mode string) {
 	l.transportMode = mode
+}
+
+// SetACLSource wires the orchestrator's ACL snapshot adapter into the
+// Linode provider's managed cache (FJB-88 / FJB-90). The provider
+// reads it on every Provision so the worker cloud-init's `ip route
+// replace` lines reflect the live AllowedIPs set the orchestrator
+// computed from the deployment's ACL.
+//
+// Duck-typed from cmd/fj-bellows: providers that don't implement this
+// method are unaffected. No-op when the managed cache isn't enabled —
+// the cache pointer is nil before Configure has run, and ssh-mode
+// deployments never call this. Safe to call before or after Configure;
+// the source is read at Provision time, not stashed at wire time.
+func (l *Linode) SetACLSource(src ACLSnapshotSource) {
+	if l.cache == nil {
+		// Cache not configured yet (or this provider doesn't use one).
+		// Stash on l so a later Configure can re-apply; today we accept
+		// the no-op and rely on cmd/fj-bellows ordering Configure
+		// before SetACLSource. Logged as an aid for FJB-90 wiring.
+		return
+	}
+	l.cache.setACLSource(src)
 }
 
 // SetTunnelRoutes propagates the operator-configured tunnel-routed
@@ -433,7 +462,14 @@ func (l *Linode) setupManagedCache(ctx context.Context, tag string) error {
 	// key is supplied via SetSSHAuthorizedKey from cmd/fj-bellows;
 	// empty when no SSH was configured (docker provider).
 	cache.setHardwareContext(fwID, subID, l.sshAuthorizedKey)
-	cache.setTransport(l.transportMode, l.tunnelRoutes)
+	cache.setTransport(l.transportMode)
+	// FJB-88: the worker cache-extras template now reads AllowedIPs
+	// CIDRs from the ACL registry, not from operator-supplied tunnel
+	// routes. The orchestrator wires acl.Registry → managedCache.acl
+	// Snapshot via setACLSource (tracked in FJB-90). Until that lands,
+	// AllowedIPsCIDRs is empty under cache-gateway and validation
+	// rejects the render — surfaces the missing wiring loudly instead
+	// of silently provisioning routeless workers.
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		return fmt.Errorf("linode: cache: %w", err)
 	}

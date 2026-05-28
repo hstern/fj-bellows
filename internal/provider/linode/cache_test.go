@@ -653,6 +653,108 @@ func TestWorkerExtrasLooksUpAndCachesVPCIP(t *testing.T) {
 	}
 }
 
+// Shared test-CIDR constants — extracted to satisfy goconst (and keep
+// the renames easy if real LAN ranges show up later). Picked to match
+// the existing testdata in worker_cache_cloud_init_gateway_test.go.
+const (
+	testCIDRLan192 = "192.168.0.0/24"
+	testCIDRLan10  = "10.10.0.0/16"
+	testCacheVPCIP = "10.0.0.42"
+)
+
+// stubACLSnapshot is a hand-rolled ACLSnapshotSource for tests:
+// it returns whatever CIDRs the test seeds. Lets tests exercise the
+// FJB-88 sort/dedupe path through workerExtras without pulling in
+// the orchestrator's acl.Registry.
+type stubACLSnapshot struct {
+	cidrs []string
+}
+
+func (s *stubACLSnapshot) AllowedIPsCIDRs() []string {
+	return append([]string(nil), s.cidrs...)
+}
+
+func TestWorkerExtrasPullsAllowedIPsFromACLSource(t *testing.T) {
+	// FJB-88: when an ACLSnapshotSource is wired, workerExtras populates
+	// AllowedIPsCIDRs from it and sorts/dedupes for byte-stable output.
+	ctx := context.Background()
+	fc := newFakeCacheClient()
+	fb := newFakeBucketClient()
+	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
+	cache := newTestManagedCache(t, fc, bucket)
+	cache.setHardwareContext(7777, 8888, "")
+	if err := cache.ensureAtConfigure(ctx); err != nil {
+		t.Fatalf("ensureAtConfigure: %v", err)
+	}
+	subnetID := 8888
+	fc.configs[cache.linodeID] = []linodego.InstanceConfig{{
+		ID: 1,
+		Interfaces: []linodego.InstanceConfigInterface{{
+			Purpose:  linodego.InterfacePurposeVPC,
+			SubnetID: &subnetID,
+			IPv4:     &linodego.VPCIPv4{VPC: testCacheVPCIP},
+		}},
+	}}
+
+	// Intentionally unsorted + duplicated. workerExtras must canonicalize.
+	cache.setACLSource(&stubACLSnapshot{cidrs: []string{
+		testCIDRLan192,
+		testCIDRLan10,
+		testCIDRLan192, // dup
+		testCIDRLan10,  // dup
+	}})
+
+	x, err := cache.workerExtras(ctx)
+	if err != nil {
+		t.Fatalf("workerExtras: %v", err)
+	}
+	want := []string{testCIDRLan10, testCIDRLan192}
+	if len(x.AllowedIPsCIDRs) != len(want) {
+		t.Fatalf("AllowedIPsCIDRs = %v, want %v", x.AllowedIPsCIDRs, want)
+	}
+	for i, w := range want {
+		if x.AllowedIPsCIDRs[i] != w {
+			t.Errorf("AllowedIPsCIDRs[%d] = %q, want %q", i, x.AllowedIPsCIDRs[i], w)
+		}
+	}
+	if x.OrchestratorWGAddr != defaultOrchestratorWGAddr {
+		t.Errorf("OrchestratorWGAddr = %q, want %q", x.OrchestratorWGAddr, defaultOrchestratorWGAddr)
+	}
+}
+
+func TestWorkerExtrasEmptyWhenNoACLSource(t *testing.T) {
+	// Without an ACLSnapshotSource wired (e.g. ssh mode, or pre-FJB-90
+	// boot), AllowedIPsCIDRs is empty and the legacy ssh template still
+	// renders fine. The cache-gateway validate path catches the empty-set
+	// case loudly at render time.
+	ctx := context.Background()
+	fc := newFakeCacheClient()
+	fb := newFakeBucketClient()
+	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
+	cache := newTestManagedCache(t, fc, bucket)
+	cache.setHardwareContext(7777, 8888, "")
+	if err := cache.ensureAtConfigure(ctx); err != nil {
+		t.Fatalf("ensureAtConfigure: %v", err)
+	}
+	subnetID := 8888
+	fc.configs[cache.linodeID] = []linodego.InstanceConfig{{
+		ID: 1,
+		Interfaces: []linodego.InstanceConfigInterface{{
+			Purpose:  linodego.InterfacePurposeVPC,
+			SubnetID: &subnetID,
+			IPv4:     &linodego.VPCIPv4{VPC: testCacheVPCIP},
+		}},
+	}}
+
+	x, err := cache.workerExtras(ctx)
+	if err != nil {
+		t.Fatalf("workerExtras: %v", err)
+	}
+	if len(x.AllowedIPsCIDRs) != 0 {
+		t.Errorf("AllowedIPsCIDRs = %v, want empty (no ACL source)", x.AllowedIPsCIDRs)
+	}
+}
+
 func TestWorkerExtrasErrorsWhenVPCIPNotAssigned(t *testing.T) {
 	// Cache VM exists but its VPC interface hasn't been assigned an
 	// IP yet (e.g. still booting). workerExtras should surface this

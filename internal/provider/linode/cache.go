@@ -218,21 +218,53 @@ type managedCache struct {
 	// FJB-74). Drives the worker cache-extras template selection.
 	transportMode string
 
-	// tunnelRoutes mirrors config.Transport.Tunnel.Routes when active
-	// (FJB-74). Rendered into the cache-gateway extras template as
-	// explicit `ip route` commands so workers reach LAN CIDRs via
-	// the cache nanode's IPsec tunnel.
-	tunnelRoutes []string
+	// aclSnapshot is the source of AllowedIPs CIDRs the cache-gateway
+	// worker cloud-init renders into `ip route replace ... via
+	// <cacheVPCIP>` lines (FJB-88). The orchestrator owns the ACL
+	// registry; this provider only reads a snapshot at provision time.
+	// Modeled as an interface so the provider stays decoupled from the
+	// concrete acl.Registry / acl.Snapshot types — orchestrator wiring
+	// (FJB-90) injects an adapter. nil when no ACL source has been
+	// wired (legacy ssh mode, or cache-gateway mode pre-FJB-90).
+	aclSnapshot ACLSnapshotSource
 }
 
-// setTransport propagates the top-level transport mode + tunnel routes
-// from the Linode provider into the managed cache so workerExtras can
-// pick the right template at provision time. Called from the Linode
-// provider after SetTransportMode / SetTunnelRoutes have populated its
-// own fields.
-func (m *managedCache) setTransport(mode string, routes []string) {
+// ACLSnapshotSource is the narrow read-only view of the ACL registry
+// the worker cloud-init renderer needs: the de-duplicated, sorted set
+// of CIDR strings that compose AllowedIPs at the moment Provision runs.
+// FJB-90 supplies a real adapter over the orchestrator's acl.Registry;
+// tests use stubs.
+//
+// Implementations must:
+//   - return CIDRs in canonical string form ("192.168.0.0/24",
+//     "10.0.0.5/32") so they paste verbatim into `ip route replace`,
+//   - return them deduplicated and sorted (stable ordering keeps the
+//     rendered cloud-init byte-stable for goldens and reduces churn
+//     in cloud-init diff on tick),
+//   - exclude the cache's own /32 (workers reach the cache via the
+//     VPC, not via WG), per transport.md "Worker route derivation".
+//
+// Exported so cmd/fj-bellows can build an adapter without importing
+// internal linode types. The provider holds it by interface only.
+type ACLSnapshotSource interface {
+	AllowedIPsCIDRs() []string
+}
+
+// setTransport propagates the top-level transport mode from the Linode
+// provider into the managed cache so workerExtras can pick the right
+// template at provision time. Called from the Linode provider after
+// SetTransportMode has populated its own field.
+func (m *managedCache) setTransport(mode string) {
 	m.transportMode = mode
-	m.tunnelRoutes = append([]string(nil), routes...)
+}
+
+// setACLSource wires the ACL registry adapter the orchestrator built
+// (FJB-90) into the managed cache. Idempotent — replacing nil with a
+// real source is the common path; subsequent updates replace whatever
+// was there. Called from Linode.SetACLSource so workerExtras can read
+// the live AllowedIPs set on every Provision.
+func (m *managedCache) setACLSource(src ACLSnapshotSource) {
+	m.aclSnapshot = src
 }
 
 func newManagedCache(cfg cacheConfig, tag, region string, client cacheClient, bucket *managedBucket, log *slog.Logger) *managedCache {
@@ -590,16 +622,37 @@ type workerExtrasData struct {
 
 	// TransportMode mirrors config.Transport.Mode and selects which
 	// extras template renders. Empty / "ssh" keeps the legacy
-	// hosts-file + CA path; "cache-gateway" picks the FJB-74 template
-	// (DNS pointer + tunnel routes, no /etc/hosts cache entry).
+	// hosts-file + CA path; "cache-gateway" picks the FJB-88 template
+	// (resolv.conf pointing at the orchestrator's WG IP + one
+	// `ip route` per ACL-derived CIDR, no /etc/hosts cache entry).
 	TransportMode string
 
-	// TunnelRoutes is the operator-configured list of LAN-side CIDRs
-	// that workers should reach via the cache nanode's IPsec tunnel
-	// (config.Transport.Tunnel.Routes). Only consumed by the
-	// cache-gateway template; ignored when TransportMode is "ssh".
-	TunnelRoutes []string
+	// AllowedIPsCIDRs is the deduplicated, sorted set of CIDR strings
+	// the worker should route via the cache VM (FJB-88). One entry
+	// becomes one `ip route replace <cidr> via <CacheIP>` line under
+	// the cache-gateway template. Sourced from the ACL registry's
+	// snapshot at Provision time; ignored by the legacy ssh template.
+	// May be empty in tests; validateWorkerExtras enforces non-empty
+	// under cache-gateway mode (workers need at least one route to
+	// reach anything across WG).
+	AllowedIPsCIDRs []string
+
+	// OrchestratorWGAddr is the orchestrator's WG overlay address —
+	// where the worker's resolv.conf points and where the DNS
+	// responder (FJB-83) listens. Defaults to 100.64.0.1 (the
+	// transport.md baseline overlay); a future configurable
+	// transport.wg.overlay_prefix would feed this. Carried as a field
+	// so a non-default deployment doesn't need a template change, even
+	// though v1 hardcodes the default.
+	OrchestratorWGAddr string
 }
+
+// defaultOrchestratorWGAddr is the default WG overlay address the
+// orchestrator binds inside wireguard-go's netstack — the worker's
+// single nameserver under cache-gateway mode. See transport.md:
+// "Overlay addressing" — the /30 baseline is orchestrator=.1 / cache=.2
+// inside RFC 6598 CGNAT space.
+const defaultOrchestratorWGAddr = "100.64.0.1"
 
 // workerExtras returns the data the linode provider's Provision needs
 // to wrap each worker's cloud-init with cache trust + hostname
@@ -621,13 +674,26 @@ func (m *managedCache) workerExtras(ctx context.Context) (workerExtrasData, erro
 		}
 		m.cacheVPCIP = ip
 	}
+	var cidrs []string
+	if m.aclSnapshot != nil {
+		// Defensive copy + sort/dedupe so the rendered cloud-init is
+		// byte-stable regardless of what the snapshot source returns.
+		// The ACLSnapshotSource contract already promises sorted +
+		// deduped, but this is the boundary where breaking it would
+		// silently produce noisy rerenders — cheap to enforce.
+		raw := m.aclSnapshot.AllowedIPsCIDRs()
+		cidrs = append(cidrs, raw...)
+		slices.Sort(cidrs)
+		cidrs = slices.Compact(cidrs)
+	}
 	return workerExtrasData{
-		CACertPEM:     string(m.caCertPEM),
-		CacheHost:     defaultCacheHostname,
-		CacheIP:       m.cacheVPCIP,
-		CachePort:     defaultCachePort,
-		TransportMode: m.transportMode,
-		TunnelRoutes:  m.tunnelRoutes,
+		CACertPEM:          string(m.caCertPEM),
+		CacheHost:          defaultCacheHostname,
+		CacheIP:            m.cacheVPCIP,
+		CachePort:          defaultCachePort,
+		TransportMode:      m.transportMode,
+		AllowedIPsCIDRs:    cidrs,
+		OrchestratorWGAddr: defaultOrchestratorWGAddr,
 	}, nil
 }
 
