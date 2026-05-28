@@ -34,6 +34,16 @@ import (
 var version = "dev"
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "fjbagent: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// run does the real work in a function with no os.Exit so deferred cleanup
+// (the signal-context cancel) actually executes on error paths. main is a
+// thin wrapper that translates the returned error into an exit code.
+func run() error {
 	listen := flag.String("listen", "127.0.0.1:9001", "host:port to bind the agent's ConnectRPC server (typically the target's VPC IP or WG inner address)")
 	tokenFile := flag.String("token-file", "", "path to the bearer-token file (mode 0600); empty disables auth (test-only)")
 	logLevel := flag.String("log-level", "info", "slog level: debug|info|warn|error")
@@ -47,8 +57,7 @@ func main() {
 	if *tokenFile != "" {
 		tok, err := agent.LoadToken(*tokenFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "fjbagent: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		opts = append(opts, agent.WithBearerToken(tok))
 	} else {
@@ -61,10 +70,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := srv.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "fjbagent: %v\n", err)
-		os.Exit(1)
-	}
+	return srv.Run(ctx)
 }
 
 func parseLevel(s string) slog.Level {
