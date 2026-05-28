@@ -591,7 +591,39 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	if err != nil {
 		return provider.Instance{}, fmt.Errorf("linode: create instance: %w", err)
 	}
-	return toInstance(*inst), nil
+	pi := toInstance(*inst)
+	// Cache-gateway transport dispatches by VPC IP (FJB-92), so populate
+	// VPCIPv4 from the just-created instance's config interfaces. The
+	// create response's IPv4 list does not include the VPC NIC's IP.
+	if vpcIP, ipErr := lookupWorkerVPCIP(ctx, &l.client, inst.ID); ipErr == nil {
+		pi.VPCIPv4 = vpcIP
+	} else {
+		slog.Default().Debug("linode: lookup worker VPC IP after create", "id", inst.ID, "err", ipErr)
+	}
+	return pi, nil
+}
+
+// lookupWorkerVPCIP returns the VPC interface IPv4 for a freshly-created
+// worker linode. Mirrors the cache-side lookupCacheVPCIP path — both
+// query ListInstanceConfigs and select the InterfacePurposeVPC entry.
+func lookupWorkerVPCIP(ctx context.Context, c cacheClient, linodeID int) (string, error) {
+	configs, err := c.ListInstanceConfigs(ctx, linodeID, nil)
+	if err != nil {
+		return "", fmt.Errorf("list configs for worker linode %d: %w", linodeID, err)
+	}
+	for i := range configs {
+		for j := range configs[i].Interfaces {
+			iface := configs[i].Interfaces[j]
+			if iface.Purpose != linodego.InterfacePurposeVPC {
+				continue
+			}
+			if iface.IPv4 == nil || iface.IPv4.VPC == "" {
+				continue
+			}
+			return iface.IPv4.VPC, nil
+		}
+	}
+	return "", fmt.Errorf("worker linode %d has no VPC interface IPv4 assigned yet", linodeID)
 }
 
 // shouldRetryWithoutPlacementGroup applies the FJB-11 flexible-
