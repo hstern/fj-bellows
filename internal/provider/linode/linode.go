@@ -95,6 +95,12 @@ type Linode struct {
 	// ACL registry into the provider explicitly.
 	tunnelRoutes []string
 
+	// wgListenPort is config.Transport.WG.ListenPort, captured before
+	// Configure via SetWGListenPort. Drives the synthesized cache-gateway
+	// firewall rule's UDP port (FJB-89). Zero defaults to 51820 inside
+	// synthSpecsForTransport. Unused under legacy ssh mode.
+	wgListenPort int
+
 	// workersInFlight counts Provision calls that have entered the
 	// CreateInstance path but not yet returned (success or failure).
 	// Surfaced via Info() for operator debugging — pairs with the
@@ -213,6 +219,16 @@ func (l *Linode) SetACLSource(src ACLSnapshotSource) {
 // routes go unused.
 func (l *Linode) SetTunnelRoutes(routes []string) {
 	l.tunnelRoutes = append([]string(nil), routes...)
+}
+
+// SetWGListenPort propagates the operator-configured WireGuard listen
+// port (config.Transport.WG.ListenPort) into the Linode provider so
+// the synthesized cache-gateway firewall rule covers the right UDP
+// port (FJB-89). Duck-typed from cmd/fj-bellows. Zero defaults to
+// 51820 inside the firewall renderer; calling under legacy ssh mode
+// is harmless — the value is unused.
+func (l *Linode) SetWGListenPort(port int) {
+	l.wgListenPort = port
 }
 
 // CacheStatus returns the managed-cache snapshot consumed by the control
@@ -395,7 +411,7 @@ func (c config) validateRequiredFields() error {
 // from Configure so each piece has a clear name and the parent function stays
 // under the cyclomatic-complexity budget.
 func (l *Linode) setupManagedFirewall(ctx context.Context, tag string) error {
-	fw := newManagedFirewall(*l.cfg.Firewall, tag, &l.client, slog.Default(), l.transportMode)
+	fw := newManagedFirewall(*l.cfg.Firewall, tag, &l.client, slog.Default(), l.transportMode, l.wgListenPort)
 	if err := fw.primeResolved(ctx); err != nil {
 		return fmt.Errorf("linode: firewall: %w", err)
 	}

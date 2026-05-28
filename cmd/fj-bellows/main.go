@@ -474,12 +474,18 @@ func (b *controlBackend) CacheStatus(ctx context.Context) *control.CacheStatus {
 //   - SetTunnelRoutes([]string): supplies the LAN-side CIDRs the
 //     worker cloud-init renders as `ip route` commands under
 //     cache-gateway mode (FJB-74). No-op when no tunnel block.
+//   - SetWGListenPort(int): supplies the cache nanode's WireGuard
+//     listen port so the firewall rule synthesis covers it (FJB-89).
+//     No-op when no wg block.
 func applyTransportToProvider(prov provider.Provider, t config.Transport) {
 	if tp, ok := prov.(interface{ SetTransportMode(string) }); ok {
 		tp.SetTransportMode(t.Mode)
 	}
 	if tr, ok := prov.(interface{ SetTunnelRoutes([]string) }); ok && t.Tunnel != nil {
 		tr.SetTunnelRoutes(t.Tunnel.Routes)
+	}
+	if wp, ok := prov.(interface{ SetWGListenPort(int) }); ok && t.WG != nil {
+		wp.SetWGListenPort(t.WG.ListenPort)
 	}
 }
 

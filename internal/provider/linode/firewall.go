@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -169,15 +170,23 @@ type managedFirewall struct {
 
 	// transportMode controls which ports the synthesized inbound ACCEPT
 	// rules cover. Empty or "ssh" (legacy): tcp/22. "cache-gateway"
-	// (FJB-54): udp/500, udp/4500, and ESP (IPENCAP) for the IPsec tunnel
-	// that terminates on the cache nanode. Workers in cache-gateway mode
-	// don't run an IPsec endpoint, but they share this firewall with the
-	// cache so the rules are applied to both — the operator's LAN egress
-	// can address IPsec ports on any instance the firewall is attached
-	// to, but only the cache has a strongSwan listening; sends to worker
-	// IPs land on closed UDP ports (kernel drops). Net effect: same
-	// strict reduction in worker public attack surface either way.
+	// (FJB-54 / FJB-89): udp/<wgListenPort> for the WireGuard tunnel
+	// that terminates on the cache nanode. Workers in cache-gateway
+	// mode don't run a WG endpoint, but they share this firewall with
+	// the cache so the rules are applied to both — the operator's NAT
+	// egress can address the WG port on any instance the firewall is
+	// attached to, but only the cache has wireguard listening; sends
+	// to worker IPs land on closed UDP ports (kernel drops). The WG
+	// protocol itself drops unauthenticated packets, so the inbound
+	// ACCEPT rule is from 0.0.0.0/0 — wide-open source is the standard
+	// WG firewall pattern.
 	transportMode string
+
+	// wgListenPort is the UDP port the cache nanode's WG listener
+	// binds to (config.Transport.WG.ListenPort). Zero defaults to
+	// DefaultWGListenPort (51820) inside synthSpecsForTransport. Only
+	// consulted when transportMode == "cache-gateway".
+	wgListenPort int
 
 	// id and lastApplied are the in-process cache. id == 0 means the firewall
 	// has been deleted by the cleanup path (next Provision lazy-recreates via
@@ -226,7 +235,10 @@ func isAddressSentinel(s string) bool {
 // (mutual exclusion with firewall_id is enforced by the caller); a zero
 // RefreshInterval is normalised to 1h here. transportMode controls
 // which ports the synthesized ACCEPT rules cover; empty == legacy ssh.
-func newManagedFirewall(cfg firewallConfig, tag string, client firewallClient, log *slog.Logger, transportMode string) *managedFirewall {
+// wgListenPort is the cache nanode's WireGuard listen port (zero defaults
+// to the WireGuard project's de-facto 51820 inside synthSpecsForTransport);
+// only consulted when transportMode == "cache-gateway".
+func newManagedFirewall(cfg firewallConfig, tag string, client firewallClient, log *slog.Logger, transportMode string, wgListenPort int) *managedFirewall {
 	if cfg.RefreshInterval <= 0 {
 		cfg.RefreshInterval = time.Hour
 	}
@@ -240,6 +252,7 @@ func newManagedFirewall(cfg firewallConfig, tag string, client firewallClient, l
 		ipProbe:       defaultExternalIPProbe(),
 		log:           log,
 		transportMode: transportMode,
+		wgListenPort:  wgListenPort,
 	}
 }
 
@@ -514,18 +527,34 @@ type synthInboundSpec struct {
 	descNote string // human description fragment after "fj-bellows: "
 }
 
+// defaultWGListenPort is the WireGuard project's de-facto default port.
+// Mirrored here (rather than imported from internal/config) so the
+// firewall package stays independent of the config package (avoiding the
+// cycle main.go already navigates with the transport-mode constants).
+const defaultWGListenPort = 51820
+
 // synthSpecsForTransport returns the list of (proto, ports) tuples each
-// allow_inbound CIDR should ACCEPT, given the active transport mode.
-// Empty / "ssh" (legacy default) keeps tcp/22; "cache-gateway" switches
-// to the IPsec port set so the cache nanode's strongSwan can receive
-// the tunnel from the LAN side.
-func synthSpecsForTransport(mode string) []synthInboundSpec {
+// allow_inbound CIDR should ACCEPT, given the active transport mode and
+// the configured WG listen port. Empty / "ssh" (legacy default) keeps
+// tcp/22; "cache-gateway" (FJB-89) returns a single udp/<wgListenPort>
+// rule so the cache nanode's WireGuard listener can receive the tunnel
+// from the orchestrator's NAT egress. wgListenPort == 0 falls back to
+// defaultWGListenPort (51820).
+func synthSpecsForTransport(mode string, wgListenPort int) []synthInboundSpec {
 	switch mode {
 	case transportCacheGateway:
+		port := wgListenPort
+		if port == 0 {
+			port = defaultWGListenPort
+		}
+		portStr := strconv.Itoa(port)
 		return []synthInboundSpec{
-			{proto: linodego.UDP, ports: "500", labelTag: "ipsec-ike", descNote: "udp/500 (IKE) from allow_inbound"},
-			{proto: linodego.UDP, ports: "4500", labelTag: "ipsec-natt", descNote: "udp/4500 (IPsec NAT-T) from allow_inbound"},
-			{proto: linodego.IPENCAP, ports: "", labelTag: "ipsec-esp", descNote: "ESP from allow_inbound"},
+			{
+				proto:    linodego.UDP,
+				ports:    portStr,
+				labelTag: "wg",
+				descNote: "udp/" + portStr + " (WireGuard) from allow_inbound",
+			},
 		}
 	default: // transportSSH, transportSSHExplicit, or any unrecognised mode
 		return []synthInboundSpec{
@@ -537,7 +566,8 @@ func synthSpecsForTransport(mode string) []synthInboundSpec {
 // buildRuleSet renders a CIDR set into the firewall ruleset Linode expects.
 // The synthesized inbound rule(s) ACCEPT specific (proto, port) tuples from
 // those CIDRs — the tuples come from synthSpecsForTransport, which switches
-// between SSH (legacy) and IPsec (cache-gateway) port surfaces. Default
+// between SSH (legacy, tcp/22) and cache-gateway (udp/<wg.listen_port>,
+// FJB-89) port surfaces. Default
 // policy is deny-inbound + accept-outbound, both overridable via
 // firewallConfig.{Inbound,Outbound}Policy. Operator-supplied extras
 // (firewallConfig.ExtraInbound / .ExtraOutbound) are appended in the order
@@ -558,7 +588,7 @@ func (m *managedFirewall) buildRuleSet(ctx context.Context, cidrs []string) (lin
 	v4, v6 := bucketCIDRs(cidrs)
 	v4Chunks := chunkAddrs(v4, maxAddrsPerRule)
 	v6Chunks := chunkAddrs(v6, maxAddrsPerRule)
-	specs := synthSpecsForTransport(m.transportMode)
+	specs := synthSpecsForTransport(m.transportMode, m.wgListenPort)
 	// One spec yields up to (v4Chunks + v6Chunks) rules; sum across specs.
 	chunkRules := len(v4Chunks) + len(v6Chunks)
 	synthCount := len(specs) * chunkRules

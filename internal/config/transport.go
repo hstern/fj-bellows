@@ -59,6 +59,13 @@ type WG struct {
 	// start (mode 0600); operators rotate by removing the file.
 	PrivateKeyFile string `yaml:"private_key_file"`
 
+	// ListenPort is the UDP port the cache nanode's WireGuard listener
+	// binds to. Empty/zero = DefaultWGListenPort (51820). Drives the
+	// Linode firewall's synthesized inbound ACCEPT rule under
+	// cache-gateway mode (FJB-89) so the cache's WG port is reachable
+	// from the orchestrator's NAT egress.
+	ListenPort int `yaml:"listen_port"`
+
 	// LocalAddr is the orchestrator's tunnel-side IPv4 + prefix
 	// (e.g. "10.99.0.1/32"). The transparent-proxy listeners bind on
 	// this address; the cache nanode's wg-quick config lists it as
@@ -172,6 +179,9 @@ func (t *Transport) applyDefaults() {
 	if t.WG != nil && t.WG.KeepaliveInterval == 0 {
 		t.WG.KeepaliveInterval = Duration(DefaultWGKeepaliveInterval)
 	}
+	if t.WG != nil && t.WG.ListenPort == 0 {
+		t.WG.ListenPort = DefaultWGListenPort
+	}
 }
 
 func (t *Transport) validate() error {
@@ -212,6 +222,9 @@ func (w *WG) validate() error {
 	}
 	if w.KeepaliveInterval < 0 {
 		return errors.New("transport.wg: keepalive_interval must be non-negative")
+	}
+	if w.ListenPort < 0 || w.ListenPort > 65535 {
+		return fmt.Errorf("transport.wg: listen_port %d out of range (want 1-65535, or 0 for default)", w.ListenPort)
 	}
 	if err := w.Peer.validate(); err != nil {
 		return fmt.Errorf("transport.wg.peer: %w", err)

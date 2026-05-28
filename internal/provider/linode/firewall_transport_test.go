@@ -12,6 +12,13 @@ import (
 
 // testFirewallWithTransport mirrors testFirewall but stamps a transport mode.
 func testFirewallWithTransport(cfg firewallConfig, mode string) *managedFirewall {
+	return testFirewallWithTransportAndPort(cfg, mode, 0)
+}
+
+// testFirewallWithTransportAndPort lets a test override the WG listen port,
+// for the FJB-89 configurability assertions. Zero falls back to the default
+// inside synthSpecsForTransport.
+func testFirewallWithTransportAndPort(cfg firewallConfig, mode string, wgListenPort int) *managedFirewall {
 	return &managedFirewall{
 		cfg: cfg,
 		ipProbe: externalIPProbe{
@@ -21,36 +28,51 @@ func testFirewallWithTransport(cfg firewallConfig, mode string) *managedFirewall
 		},
 		log:           slog.Default(),
 		transportMode: mode,
+		wgListenPort:  wgListenPort,
 	}
 }
 
 func TestSynthSpecsForTransport(t *testing.T) {
 	cases := []struct {
-		mode       string
-		wantCount  int
-		wantProtos []linodego.NetworkProtocol
-		wantPorts  []string
+		name         string
+		mode         string
+		wgListenPort int
+		wantCount    int
+		wantProtos   []linodego.NetworkProtocol
+		wantPorts    []string
 	}{
 		{
+			name:       "default ssh (empty)",
 			mode:       "",
 			wantCount:  1,
 			wantProtos: []linodego.NetworkProtocol{linodego.TCP},
 			wantPorts:  []string{"22"},
 		},
 		{
+			name:       "explicit ssh",
 			mode:       transportSSHExplicit,
 			wantCount:  1,
 			wantProtos: []linodego.NetworkProtocol{linodego.TCP},
 			wantPorts:  []string{"22"},
 		},
 		{
+			name:       "cache-gateway default WG port",
 			mode:       transportCacheGateway,
-			wantCount:  3,
-			wantProtos: []linodego.NetworkProtocol{linodego.UDP, linodego.UDP, linodego.IPENCAP},
-			wantPorts:  []string{"500", "4500", ""},
+			wantCount:  1,
+			wantProtos: []linodego.NetworkProtocol{linodego.UDP},
+			wantPorts:  []string{"51820"},
+		},
+		{
+			name:         "cache-gateway custom WG port",
+			mode:         transportCacheGateway,
+			wgListenPort: 51821,
+			wantCount:    1,
+			wantProtos:   []linodego.NetworkProtocol{linodego.UDP},
+			wantPorts:    []string{"51821"},
 		},
 		{
 			// Unrecognised mode falls back to SSH behaviour for safety.
+			name:       "unknown mode falls back to ssh",
 			mode:       "wireguard-mesh",
 			wantCount:  1,
 			wantProtos: []linodego.NetworkProtocol{linodego.TCP},
@@ -58,8 +80,8 @@ func TestSynthSpecsForTransport(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		t.Run(tc.mode, func(t *testing.T) {
-			got := synthSpecsForTransport(tc.mode)
+		t.Run(tc.name, func(t *testing.T) {
+			got := synthSpecsForTransport(tc.mode, tc.wgListenPort)
 			if len(got) != tc.wantCount {
 				t.Fatalf("len=%d, want %d", len(got), tc.wantCount)
 			}
@@ -73,57 +95,49 @@ func TestSynthSpecsForTransport(t *testing.T) {
 	}
 }
 
-// TestBuildRuleSetCacheGatewayIPsec verifies the cache-gateway transport
-// synthesizes ACCEPT rules for IPsec (udp/500 + udp/4500 + ESP) instead of
-// the legacy tcp/22.
+// TestBuildRuleSetCacheGatewayWG verifies the cache-gateway transport
+// synthesizes a single ACCEPT rule per address family for udp/<wg listen
+// port> (FJB-89), replacing the IPsec port set that lived here before.
 //
-//nolint:gocyclo // bookkeeping across 3 specs × 2 families; intentional for one assertion site.
-func TestBuildRuleSetCacheGatewayIPsec(t *testing.T) {
+//nolint:gocyclo // exhaustive single-site assertion of proto/ports/family + leftover-IPsec absence checks.
+func TestBuildRuleSetCacheGatewayWG(t *testing.T) {
 	fw := testFirewallWithTransport(firewallConfig{}, transportCacheGateway)
 	rs, err := fw.buildRuleSet(context.Background(), []string{testCIDR1, testCIDRv6})
 	if err != nil {
 		t.Fatalf("buildRuleSet: %v", err)
 	}
-	// 3 specs × (1 v4 chunk + 1 v6 chunk) = 6 inbound rules.
-	if len(rs.Inbound) != 6 {
-		t.Fatalf("len(Inbound) = %d, want 6 (3 specs × 2 families)", len(rs.Inbound))
+	// 1 spec × (1 v4 chunk + 1 v6 chunk) = 2 inbound rules.
+	if len(rs.Inbound) != 2 {
+		t.Fatalf("len(Inbound) = %d, want 2 (1 WG spec × 2 families)", len(rs.Inbound))
 	}
-	// Group rules by (proto, ports) to verify each IPsec spec produced
-	// exactly the expected family split.
-	type key struct {
-		proto linodego.NetworkProtocol
-		ports string
-	}
-	families := map[key]struct{ v4Total, v6Total int }{}
+	var v4Total, v6Total int
 	for _, r := range rs.Inbound {
 		if r.Action != fwActionAccept {
 			t.Errorf("rule %q: action=%q, want ACCEPT", r.Label, r.Action)
 		}
-		k := key{r.Protocol, r.Ports}
-		f := families[k]
-		f.v4Total += len(*r.Addresses.IPv4)
-		f.v6Total += len(*r.Addresses.IPv6)
-		families[k] = f
-	}
-	wantKeys := []key{
-		{linodego.UDP, "500"},
-		{linodego.UDP, "4500"},
-		{linodego.IPENCAP, ""},
-	}
-	for _, k := range wantKeys {
-		f, ok := families[k]
-		if !ok {
-			t.Errorf("missing IPsec spec %v in rules", k)
-			continue
+		if r.Protocol != linodego.UDP {
+			t.Errorf("rule %q: proto=%s, want UDP", r.Label, r.Protocol)
 		}
-		if f.v4Total != 1 || f.v6Total != 1 {
-			t.Errorf("spec %v: v4=%d v6=%d, want 1 + 1", k, f.v4Total, f.v6Total)
+		if r.Ports != "51820" {
+			t.Errorf("rule %q: ports=%q, want %q", r.Label, r.Ports, "51820")
 		}
+		v4Total += len(*r.Addresses.IPv4)
+		v6Total += len(*r.Addresses.IPv6)
+	}
+	if v4Total != 1 || v6Total != 1 {
+		t.Errorf("address bucketing: v4=%d v6=%d, want 1 + 1", v4Total, v6Total)
 	}
 	// No tcp/22 rule should exist in cache-gateway mode.
+	// Likewise no leftover IPsec (udp/500, udp/4500, ESP) rules.
 	for _, r := range rs.Inbound {
 		if r.Protocol == linodego.TCP && r.Ports == "22" {
 			t.Errorf("found legacy tcp/22 rule under cache-gateway: %+v", r)
+		}
+		if r.Protocol == linodego.UDP && (r.Ports == "500" || r.Ports == "4500") {
+			t.Errorf("found stale IPsec rule under cache-gateway: %+v", r)
+		}
+		if r.Protocol == linodego.IPENCAP {
+			t.Errorf("found stale ESP/IPENCAP rule under cache-gateway: %+v", r)
 		}
 	}
 	// Default policies still applied.
@@ -132,8 +146,27 @@ func TestBuildRuleSetCacheGatewayIPsec(t *testing.T) {
 	}
 }
 
-// TestBuildRuleSetCacheGatewayLabelsUnique — three specs share the same
-// CIDR set; rule labels must remain unique within the firewall.
+// TestBuildRuleSetCacheGatewayCustomWGPort verifies the WG listen port
+// is plumbed through synthSpecsForTransport into the rendered ruleset.
+func TestBuildRuleSetCacheGatewayCustomWGPort(t *testing.T) {
+	const customPort = 51821
+	fw := testFirewallWithTransportAndPort(firewallConfig{}, transportCacheGateway, customPort)
+	rs, err := fw.buildRuleSet(context.Background(), []string{testCIDR1})
+	if err != nil {
+		t.Fatalf("buildRuleSet: %v", err)
+	}
+	if len(rs.Inbound) != 1 {
+		t.Fatalf("len(Inbound) = %d, want 1", len(rs.Inbound))
+	}
+	r := rs.Inbound[0]
+	if r.Protocol != linodego.UDP || r.Ports != "51821" {
+		t.Errorf("rule = (%s, %q), want (UDP, %q)", r.Protocol, r.Ports, "51821")
+	}
+}
+
+// TestBuildRuleSetCacheGatewayLabelsUnique — the WG spec shares the same
+// CIDR set across families; rule labels must remain unique within the
+// firewall.
 func TestBuildRuleSetCacheGatewayLabelsUnique(t *testing.T) {
 	fw := testFirewallWithTransport(firewallConfig{}, transportCacheGateway)
 	rs, err := fw.buildRuleSet(context.Background(), []string{testCIDR1, testCIDRv6})
@@ -149,24 +182,22 @@ func TestBuildRuleSetCacheGatewayLabelsUnique(t *testing.T) {
 			t.Errorf("label %q appears %d times, want 1", label, n)
 		}
 	}
-	// Spot-check the label scheme matches the spec stems.
-	wantSubstrings := []string{"ipsec-ike", "ipsec-natt", "ipsec-esp"}
-	for _, sub := range wantSubstrings {
-		found := false
-		for label := range labels {
-			if containsSubstring(label, sub) {
-				found = true
-				break
-			}
+	// Spot-check the WG label stem is present.
+	found := false
+	for label := range labels {
+		if containsSubstring(label, "wg") {
+			found = true
+			break
 		}
-		if !found {
-			t.Errorf("no rule label contains %q", sub)
-		}
+	}
+	if !found {
+		t.Errorf("no rule label contains %q; got labels %v", "wg", labels)
 	}
 }
 
 // TestBuildRuleSetCacheGatewayChunking — 300 v4 entries should chunk into
-// 2 rules per spec, so total 3 specs × 2 chunks = 6 v4 rules (no v6).
+// 2 rules for the one WG spec, so total 1 spec × 2 chunks = 2 v4 rules
+// (no v6).
 func TestBuildRuleSetCacheGatewayChunking(t *testing.T) {
 	cidrs := make([]string, 300)
 	for i := range cidrs {
@@ -178,9 +209,9 @@ func TestBuildRuleSetCacheGatewayChunking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildRuleSet: %v", err)
 	}
-	// Each spec produces 2 v4 rules (ceil(300/255)) and 0 v6.
-	if len(rs.Inbound) != 6 {
-		t.Fatalf("len(Inbound) = %d, want 6 (3 specs × 2 v4 chunks)", len(rs.Inbound))
+	// One WG spec × ceil(300/255) = 2 v4 rules, 0 v6.
+	if len(rs.Inbound) != 2 {
+		t.Fatalf("len(Inbound) = %d, want 2 (1 WG spec × 2 v4 chunks)", len(rs.Inbound))
 	}
 }
 
@@ -204,11 +235,11 @@ func TestBuildRuleSetCacheGatewayHonoursPolicyOverrides(t *testing.T) {
 	}
 }
 
-// TestBuildRuleSetCacheGatewayRejectsWhenOverCap — IPsec mode tripples the
-// synth rule count, so the 25-rule cap is hit sooner with extras.
+// TestBuildRuleSetCacheGatewayRejectsWhenOverCap — even with the single
+// WG spec, an oversized extras list still trips the 25-rule cap. The
+// pre-flight check fires before any per-rule work.
 func TestBuildRuleSetCacheGatewayRejectsWhenOverCap(t *testing.T) {
-	// 8 extras + 3 IPsec specs × 1 v4 chunk = 11 inbound rules. Fine.
-	// But 25 extras + 3 specs = 28, over the cap.
+	// 1 WG spec × 1 v4 chunk + 25 extras = 26 inbound rules, over the cap.
 	extras := make([]extraRule, 25)
 	for i := range extras {
 		extras[i] = extraRule{
