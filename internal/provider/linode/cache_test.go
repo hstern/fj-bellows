@@ -509,6 +509,75 @@ func TestRenderCacheCloudInitIPTablesBakeIn(t *testing.T) {
 	}
 }
 
+// FJB-99 Phase A: when OrchestratorWGPubkey is set, the rendered
+// cloud-init installs wireguard + awscli, embeds the wg-bootstrap
+// script with the orchestrator pubkey baked into [Peer].PublicKey,
+// and runs the script from runcmd. When empty (ssh-mode), none of
+// those entries leak in.
+func TestRenderCacheCloudInitWGBootstrap(t *testing.T) {
+	const orchPubkey = "ZmFrZS1vcmNoZXN0cmF0b3ItcHViLWtleS0xMjM0NTY3OD0="
+	withWG, err := renderCacheCloudInit(cacheCloudInitParams{
+		Bucket:               "fjb-cache-test",
+		Region:               testBucketRegion,
+		Endpoint:             "https://us-ord-1.linodeobjects.com",
+		AccessKey:            "AK",
+		SecretKey:            "SK",
+		ZotVersion:           testStubZotVersion,
+		ServerCertPEM:        testStubPEM,
+		ServerKeyPEM:         testStubPEM,
+		OrchestratorWGPubkey: orchPubkey,
+		OrchestratorWGAddr:   "100.64.0.1",
+		CacheWGAddr:          "100.64.0.2",
+		WGListenPort:         51820,
+	})
+	if err != nil {
+		t.Fatalf("render with WG: %v", err)
+	}
+	for _, want := range []string{
+		"- wireguard",
+		"- awscli",
+		"/usr/local/sbin/fjb-wg-bootstrap.sh",
+		"wg genkey",
+		"Address = 100.64.0.2/32",
+		"ListenPort = 51820",
+		"PublicKey = " + orchPubkey,
+		"AllowedIPs = 100.64.0.1/32",
+		"PersistentKeepalive = 25",
+		"systemctl enable --now wg-quick@wg0",
+		"s3://fjb-cache-test/wg-pubkey.txt",
+		"--endpoint-url 'https://us-ord-1.linodeobjects.com'",
+	} {
+		if !strings.Contains(withWG, want) {
+			t.Errorf("WG render missing %q\n---\n%s", want, withWG)
+		}
+	}
+
+	withoutWG, err := renderCacheCloudInit(cacheCloudInitParams{
+		Bucket:        "b",
+		Region:        "r",
+		Endpoint:      testStubEndpoint,
+		AccessKey:     "AK",
+		SecretKey:     "SK",
+		ZotVersion:    testStubZotVersion,
+		ServerCertPEM: testStubPEM,
+		ServerKeyPEM:  testStubPEM,
+	})
+	if err != nil {
+		t.Fatalf("render without WG: %v", err)
+	}
+	for _, unwanted := range []string{
+		"wireguard",
+		"awscli",
+		"fjb-wg-bootstrap.sh",
+		"wg-pubkey.txt",
+		"wg-quick@wg0",
+	} {
+		if strings.Contains(withoutWG, unwanted) {
+			t.Errorf("ssh-mode render leaked WG substring %q\n---\n%s", unwanted, withoutWG)
+		}
+	}
+}
+
 // FJB-98: renderIPTablesForCacheGateway returns an empty script for
 // non-cache-gateway transport or when the worker VPC subnet hasn't
 // been wired yet — both branches are reachable in real deployments
