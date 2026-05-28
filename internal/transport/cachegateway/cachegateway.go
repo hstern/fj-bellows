@@ -78,11 +78,15 @@ type Inputs struct {
 }
 
 // validate runs the basic sanity checks for the iptables renderer.
+//
+// CacheVPCIP is intentionally optional: the renderer doesn't emit it
+// into the script body (it's reserved for future PostUp hooks). Cache
+// cloud-init bake-in (FJB-98) needs to render the script at cache
+// create time, before any VPC IP has been assigned — relaxing the
+// requirement makes that flow possible without inventing a placeholder.
+// When supplied it still has to be a valid IPv4/IPv6 literal.
 func (i Inputs) validate() error {
-	if i.CacheVPCIP == "" {
-		return errors.New("cachegateway: CacheVPCIP is required")
-	}
-	if net.ParseIP(i.CacheVPCIP) == nil {
+	if i.CacheVPCIP != "" && net.ParseIP(i.CacheVPCIP) == nil {
 		return errors.New("cachegateway: CacheVPCIP is not a valid IP")
 	}
 	if i.WorkerVPCSubnet == "" {

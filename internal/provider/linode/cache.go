@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,8 @@ import (
 	"text/template"
 
 	"github.com/linode/linodego"
+
+	"github.com/hstern/fj-bellows/internal/transport/cachegateway"
 )
 
 // cacheClient is the slice of *linodego.Client the managed-cache code
@@ -191,6 +194,12 @@ type managedCache struct {
 	vpcSubnetID   int
 	authorizedKey string
 
+	// workerVPCSubnet is the CIDR (e.g. "10.0.0.0/24") of the VPC subnet
+	// workers attach to. Used at cache-create time to bake the
+	// fjb-iptables FORWARD chain into cloud-init (FJB-98). Empty when
+	// no VPC is configured — the iptables bake-in is then skipped.
+	workerVPCSubnet string
+
 	// linodeID is the cache VM's Linode ID. Populated by ensureAt-
 	// Configure (find-or-adopt), cleared by maybeCleanupCache.
 	linodeID int
@@ -284,10 +293,11 @@ func newManagedCache(cfg cacheConfig, tag, region string, client cacheClient, bu
 // the constructor because the provider creates the managedCache before
 // the firewall + VPC helpers exist on l, and one-shot setters keep the
 // dependency direction one-way.
-func (m *managedCache) setHardwareContext(firewallID, vpcSubnetID int, authorizedKey string) {
+func (m *managedCache) setHardwareContext(firewallID, vpcSubnetID int, authorizedKey, workerVPCSubnet string) {
 	m.firewallID = firewallID
 	m.vpcSubnetID = vpcSubnetID
 	m.authorizedKey = authorizedKey
+	m.workerVPCSubnet = workerVPCSubnet
 }
 
 // ensure brings the cache VM (and its bucket + scoped key)
@@ -360,16 +370,21 @@ func (m *managedCache) createFreshCacheLinode(ctx context.Context, pair cacheCer
 	if err != nil {
 		return fmt.Errorf("bucket: %w", err)
 	}
+	iptablesScript, err := m.renderIPTablesForCacheGateway()
+	if err != nil {
+		return fmt.Errorf("render fjb-iptables: %w", err)
+	}
 	userData, err := renderCacheCloudInit(cacheCloudInitParams{
-		Bucket:        creds.Bucket,
-		Region:        creds.Region,
-		Endpoint:      creds.Endpoint,
-		AccessKey:     creds.AccessKey,
-		SecretKey:     creds.SecretKey,
-		ZotVersion:    m.cfg.resolvedZotVersion(),
-		ReadyFile:     defaultCacheReadyFile,
-		ServerCertPEM: string(pair.ServerCertPEM),
-		ServerKeyPEM:  string(pair.ServerKeyPEM),
+		Bucket:         creds.Bucket,
+		Region:         creds.Region,
+		Endpoint:       creds.Endpoint,
+		AccessKey:      creds.AccessKey,
+		SecretKey:      creds.SecretKey,
+		ZotVersion:     m.cfg.resolvedZotVersion(),
+		ReadyFile:      defaultCacheReadyFile,
+		ServerCertPEM:  string(pair.ServerCertPEM),
+		ServerKeyPEM:   string(pair.ServerKeyPEM),
+		IPTablesScript: iptablesScript,
 	})
 	if err != nil {
 		return fmt.Errorf("render cloud-init: %w", err)
@@ -386,6 +401,34 @@ func (m *managedCache) createFreshCacheLinode(ctx context.Context, pair cacheCer
 	m.linodeID = inst.ID
 	m.log.Info("managed cache: created", "id", inst.ID, "label", inst.Label)
 	return nil
+}
+
+// renderIPTablesForCacheGateway returns the fjb-iptables.sh content
+// that the cache cloud-init drops into /usr/local/sbin/ and runs at
+// first boot (FJB-98). Empty when the deployment isn't cache-gateway
+// mode or the VPC subnet isn't known — the template then skips the
+// iptables-persistent install + script execution entirely.
+//
+// At cache-create time the ACL registry hasn't been wired yet (that
+// happens after Configure, when wgboot starts and calls SetACLSource),
+// so AllowedIPs is empty here. The skeleton (sysctl + chain + the
+// FJB-92 orchestrator → worker reverse-direction rule + DROP) still
+// installs, which is what's load-bearing for the orchestrator-side
+// dispatcher. Per-prefix worker-egress ACCEPT rules are added at
+// runtime by the wgboot push path (separate ticket; see FJB-98
+// "Out of scope").
+func (m *managedCache) renderIPTablesForCacheGateway() (string, error) {
+	if m.transportMode != "cache-gateway" || m.workerVPCSubnet == "" {
+		return "", nil
+	}
+	orchAddr, err := netip.ParseAddr(defaultOrchestratorWGAddr)
+	if err != nil {
+		return "", fmt.Errorf("parse orchestrator WG addr %q: %w", defaultOrchestratorWGAddr, err)
+	}
+	return cachegateway.RenderCacheIPTables(cachegateway.Inputs{
+		WorkerVPCSubnet:    m.workerVPCSubnet,
+		OrchestratorWGAddr: orchAddr,
+	})
 }
 
 // buildCreateOpts assembles the InstanceCreateOptions payload for the
@@ -572,6 +615,13 @@ type cacheCloudInitParams struct {
 	// these via the CA distributed in the multipart worker cloud-init.
 	ServerCertPEM string
 	ServerKeyPEM  string
+
+	// IPTablesScript is the rendered fjb-iptables.sh content (FJB-98)
+	// embedded into the cloud-init under /usr/local/sbin/. Empty under
+	// ssh-mode deployments — the template skips both the script
+	// write_files entry and the iptables-persistent install when this
+	// field is empty.
+	IPTablesScript string
 }
 
 // renderCacheCloudInit fills the embedded template. Defaults to the

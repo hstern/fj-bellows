@@ -31,7 +31,6 @@ func TestValidateRejectsMissingFields(t *testing.T) {
 		mutate  func(*Inputs)
 		wantSub string
 	}{
-		{"no cache VPC IP", func(i *Inputs) { i.CacheVPCIP = "" }, "CacheVPCIP is required"},
 		{"bad cache VPC IP", func(i *Inputs) { i.CacheVPCIP = "not-an-ip" }, "not a valid IP"},
 		{"no worker VPC subnet", func(i *Inputs) { i.WorkerVPCSubnet = "" }, "WorkerVPCSubnet is required"},
 		{"bad worker VPC subnet", func(i *Inputs) { i.WorkerVPCSubnet = "not-a-cidr" }, "not a valid CIDR"},

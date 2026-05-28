@@ -493,7 +493,7 @@ func (l *Linode) setupManagedCache(ctx context.Context, tag string) error {
 	// operator debugging only (the dispatcher's tunnel is gone). The
 	// key is supplied via SetSSHAuthorizedKey from cmd/fj-bellows;
 	// empty when no SSH was configured (docker provider).
-	cache.setHardwareContext(fwID, subID, l.sshAuthorizedKey)
+	cache.setHardwareContext(fwID, subID, l.sshAuthorizedKey, l.WorkerVPCSubnet())
 	cache.setTransport(l.transportMode)
 	// FJB-88: the worker cache-extras template now reads AllowedIPs
 	// CIDRs from the ACL registry, not from operator-supplied tunnel

@@ -18,6 +18,9 @@ package_update: true
 packages:
   - curl
   - ca-certificates
+{{- if .IPTablesScript}}
+  - iptables-persistent
+{{- end}}
 write_files:
   - path: /etc/zot/config.json
     permissions: '0640'
@@ -60,6 +63,12 @@ write_files:
     permissions: '0600'
     content: |
 {{.ServerKeyPEM | indent 6}}
+{{- if .IPTablesScript}}
+  - path: /usr/local/sbin/fjb-iptables.sh
+    permissions: '0750'
+    content: |
+{{.IPTablesScript | indent 6}}
+{{- end}}
   - path: /etc/systemd/system/zot.service
     permissions: '0644'
     content: |
@@ -100,6 +109,10 @@ runcmd:
     curl -fsSL -o /usr/local/bin/zot "$url"
     chmod +x /usr/local/bin/zot
   - mkdir -p /var/lib/zot
+{{- if .IPTablesScript}}
+  - /usr/local/sbin/fjb-iptables.sh
+  - netfilter-persistent save
+{{- end}}
   - systemctl daemon-reload
   - systemctl enable --now zot.service
   - touch {{.ReadyFile}}
