@@ -45,6 +45,16 @@ type CacheGatewayDispatcher struct {
 	ReadyWait   time.Duration
 	DialTimeout time.Duration
 
+	// DialFn is the network dialer the dispatcher uses to reach worker
+	// VPC IPs. Under FJB-92 the orchestrator wires this to the
+	// embedded WG tunnel's netstack DialContext so packets to 10.0.0.X
+	// are encapsulated and routed via the cache nanode, instead of
+	// hitting the host's kernel route table (where there is no route to
+	// the worker VPC). Nil falls back to a plain net.Dialer so unit
+	// tests that don't care about routing keep working; cmd/fj-bellows
+	// always sets it in production.
+	DialFn func(ctx context.Context, network, addr string) (net.Conn, error)
+
 	// Log is currently unused — there are no per-conn warnings to
 	// emit (no reverse tunnel, no /etc/hosts mutation). Reserved for
 	// future diagnostics so callers can pre-wire a logger.
@@ -129,8 +139,6 @@ func (d *CacheGatewayDispatcher) RunJob(ctx context.Context, _, addr string, reg
 // dial opens an SSH connection to the worker at the given VPC address.
 // TOFU host-key policy: the first successful handshake records the key;
 // subsequent dials reject any mismatch.
-//
-//nolint:dupl // intentional shape-match with SSHDispatcher.dial; the two dispatchers must stay distinct types so only one satisfies HostKeyPinner.
 func (d *CacheGatewayDispatcher) dial(ctx context.Context, addr string) (*ssh.Client, error) {
 	target := net.JoinHostPort(addr, strconv.Itoa(d.Port))
 	cfg := &ssh.ClientConfig{
@@ -139,8 +147,13 @@ func (d *CacheGatewayDispatcher) dial(ctx context.Context, addr string) (*ssh.Cl
 		HostKeyCallback: d.tofuHostKeyCallback(target),
 		Timeout:         d.DialTimeout,
 	}
-	dialer := net.Dialer{Timeout: d.DialTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", target)
+	dialCtx := ctx
+	if d.DialTimeout > 0 {
+		var cancel context.CancelFunc
+		dialCtx, cancel = context.WithTimeout(ctx, d.DialTimeout)
+		defer cancel()
+	}
+	conn, err := d.dialNet(dialCtx, "tcp", target)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", target, err)
 	}
@@ -150,6 +163,18 @@ func (d *CacheGatewayDispatcher) dial(ctx context.Context, addr string) (*ssh.Cl
 		return nil, fmt.Errorf("ssh handshake %s: %w", target, err)
 	}
 	return ssh.NewClient(c, chans, reqs), nil
+}
+
+// dialNet is the net-layer dial used by dial(). It prefers an injected
+// DialFn (the WG tunnel's netstack DialContext under FJB-92) so worker
+// VPC IPs are reachable; falls back to a plain net.Dialer for tests
+// that don't wire one.
+func (d *CacheGatewayDispatcher) dialNet(ctx context.Context, network, addr string) (net.Conn, error) {
+	if d.DialFn != nil {
+		return d.DialFn(ctx, network, addr)
+	}
+	dialer := net.Dialer{Timeout: d.DialTimeout}
+	return dialer.DialContext(ctx, network, addr)
 }
 
 //nolint:dupl // intentional shape-match with SSHDispatcher.tofuHostKeyCallback; the two dispatchers must stay distinct types so only one satisfies HostKeyPinner.

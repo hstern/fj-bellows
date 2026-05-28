@@ -259,7 +259,7 @@ func planBoot(cfg Config, log *slog.Logger) (*bootPlan, error) {
 		return nil, err
 	}
 
-	peerAllowed, err := composePeerAllowedIPs(overlayPrefix, cfg.Transport.WG.Peer.AllowedIPs)
+	peerAllowed, err := composePeerAllowedIPs(overlayPrefix, cfg.Transport.WG.Peer.AllowedIPs, cfg.Cache.WorkerVPCSubnet)
 	if err != nil {
 		return nil, err
 	}
@@ -299,8 +299,23 @@ func parseACL(cfg Config, localAddr netip.Addr) ([]acl.Entry, error) {
 	return entries, nil
 }
 
-func composePeerAllowedIPs(overlay netip.Prefix, raw []string) ([]netip.Prefix, error) {
+// composePeerAllowedIPs builds the orchestrator-side peer AllowedIPs:
+// the overlay CIDR (host route to the cache), plus any operator-supplied
+// extras, plus the worker VPC CIDR when known (FJB-92). The worker VPC
+// CIDR is what makes the netstack encapsulate outbound packets the
+// dispatcher dials at 10.0.0.X — without it, those addresses are
+// invisible to the netstack and the dial fails with "no route".
+func composePeerAllowedIPs(overlay netip.Prefix, raw []string, workerVPC string) ([]netip.Prefix, error) {
 	out := []netip.Prefix{overlay}
+	if workerVPC != "" {
+		pfx, err := netip.ParsePrefix(workerVPC)
+		if err != nil {
+			return nil, fmt.Errorf("wgboot: parse worker VPC CIDR %q: %w", workerVPC, err)
+		}
+		if !slices.Contains(out, pfx) {
+			out = append(out, pfx)
+		}
+	}
 	for _, r := range raw {
 		pfx, err := netip.ParsePrefix(r)
 		if err != nil {

@@ -194,6 +194,76 @@ func TestACLSourceContractMatchesProvider(_ *testing.T) {
 	var _ ACLSource = (*registryAdapter)(nil)
 }
 
+// FJB-92: composePeerAllowedIPs derives the orchestrator-side peer
+// AllowedIPs from {overlay /32, worker VPC CIDR, operator extras}.
+// The worker VPC CIDR is what tells the embedded netstack to
+// encapsulate outbound packets for the dispatcher's worker dials;
+// without it, 10.0.0.X is unreachable from the orchestrator process.
+func TestComposePeerAllowedIPs_IncludesWorkerVPC(t *testing.T) {
+	overlay := netip.MustParsePrefix("100.64.0.0/30")
+	got, err := composePeerAllowedIPs(overlay, []string{"192.168.1.0/24"}, "10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("composePeerAllowedIPs: %v", err)
+	}
+	want := []netip.Prefix{
+		netip.MustParsePrefix("100.64.0.0/30"),
+		netip.MustParsePrefix("10.0.0.0/24"),
+		netip.MustParsePrefix("192.168.1.0/24"),
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("AllowedIPs = %v, want %v", got, want)
+	}
+}
+
+// Empty worker VPC CIDR (e.g. no `vpc:` block configured) is permitted —
+// the function still returns the overlay + operator extras. The
+// dispatcher's host-kernel fallback path takes over in that case.
+func TestComposePeerAllowedIPs_OmitsWorkerVPCWhenEmpty(t *testing.T) {
+	overlay := netip.MustParsePrefix("100.64.0.0/30")
+	got, err := composePeerAllowedIPs(overlay, nil, "")
+	if err != nil {
+		t.Fatalf("composePeerAllowedIPs: %v", err)
+	}
+	want := []netip.Prefix{overlay}
+	if !slices.Equal(got, want) {
+		t.Errorf("AllowedIPs = %v, want %v", got, want)
+	}
+}
+
+// A bogus worker VPC CIDR surfaces a clear wrapped error rather than
+// silently dropping the entry — config validation should have caught it
+// upstream, but the inner function defends anyway.
+func TestComposePeerAllowedIPs_RejectsBadWorkerVPC(t *testing.T) {
+	overlay := netip.MustParsePrefix("100.64.0.0/30")
+	_, err := composePeerAllowedIPs(overlay, nil, "not-a-cidr")
+	if err == nil {
+		t.Fatal("composePeerAllowedIPs(bad worker VPC) should error")
+	}
+	if !strings.Contains(err.Error(), "worker VPC CIDR") {
+		t.Errorf("err = %v, want substring 'worker VPC CIDR'", err)
+	}
+}
+
+// De-dupe: if the operator already listed the worker VPC CIDR under
+// transport.wg.peer.allowed_ips, the worker VPC plumb-through must not
+// double up the entry. composePeerAllowedIPs uses slices.Contains for
+// this; the test guards against a future refactor accidentally
+// emitting duplicates.
+func TestComposePeerAllowedIPs_DedupesWorkerVPC(t *testing.T) {
+	overlay := netip.MustParsePrefix("100.64.0.0/30")
+	got, err := composePeerAllowedIPs(overlay, []string{"10.0.0.0/24"}, "10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("composePeerAllowedIPs: %v", err)
+	}
+	want := []netip.Prefix{
+		netip.MustParsePrefix("100.64.0.0/30"),
+		netip.MustParsePrefix("10.0.0.0/24"),
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("AllowedIPs = %v, want %v (dedupe failed)", got, want)
+	}
+}
+
 // realLookup smoke test: with a synthetic context cancellation we get
 // the expected error path, not a panic.
 func TestRealLookup_RespectsCancelledContext(t *testing.T) {

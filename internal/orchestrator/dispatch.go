@@ -315,7 +315,6 @@ func (d *SSHDispatcher) forwardOne(ctx context.Context, workerConn net.Conn, tar
 	wg.Wait()
 }
 
-//nolint:dupl // intentional shape-match with CacheGatewayDispatcher.dial; the two dispatchers must stay distinct types so only one satisfies HostKeyPinner.
 func (d *SSHDispatcher) dial(ctx context.Context, ip string) (*ssh.Client, error) {
 	addr := net.JoinHostPort(ip, strconv.Itoa(d.Port))
 	cfg := &ssh.ClientConfig{
