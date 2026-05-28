@@ -27,6 +27,7 @@ import (
 	"github.com/hstern/fj-bellows/internal/forgejo"
 	"github.com/hstern/fj-bellows/internal/orchestrator"
 	"github.com/hstern/fj-bellows/internal/provider"
+	"github.com/hstern/fj-bellows/internal/transport/wgboot"
 
 	// Register in-tree providers.
 	dockerprov "github.com/hstern/fj-bellows/internal/provider/docker"
@@ -172,6 +173,17 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Boot the WireGuard cache-gateway transport stack (FJB-90). The
+	// stack owns the embedded WG tunnel, ACL registry + DNS resolver
+	// loop, DNS responder, TCP proxy, UDP forwarder, and ICMP bridge.
+	// Returns a closer that's safe to defer-call even when no stack
+	// was started (legacy ssh mode / docker provider).
+	wgClose, err := bootWGStack(ctx, cfg, prov, log)
+	if err != nil {
+		return err
+	}
+	defer wgClose()
 
 	if err := startControlPlane(ctx, controlOpts{
 		listen:       opts.controlListen,
@@ -463,6 +475,93 @@ func (b *controlBackend) CacheStatus(ctx context.Context) *control.CacheStatus {
 		BucketLabel:     s.BucketLabel,
 		VMState:         s.VMState,
 	}
+}
+
+// bootWGStack starts the embedded WireGuard cache-gateway transport
+// (FJB-90) when transport.mode = cache-gateway. Returns a no-op
+// closer (with no error) on any other mode (legacy SSH, docker
+// provider) — callers then run with the pre-FJB-90 dispatch path
+// unchanged.
+//
+// Failures (key unreadable, ACL parse, DNS bind) bubble up as
+// daemon-fatal: the operator chose cache-gateway mode and the stack
+// can't come up; running with a partial transport would be worse
+// than refusing to start.
+//
+// The function pulls the cache VPC IP and (when available) the
+// worker VPC subnet from the live provider via duck-typed interfaces
+// — keeps cmd/fj-bellows free of provider-internal types.
+func bootWGStack(ctx context.Context, cfg *config.Config, prov provider.Provider, log *slog.Logger) (func(), error) {
+	if cfg.Transport.Mode != config.TransportCacheGateway {
+		return func() {}, nil
+	}
+	cache := cacheRenderInputs(ctx, cfg, prov)
+	stack, err := wgboot.Boot(ctx, wgboot.Config{
+		Transport:  cfg.Transport,
+		ForgejoURL: cfg.Forgejo.URL,
+		ACLSink:    aclSinkFor(prov),
+		Cache:      cache,
+		Logger:     log,
+	})
+	if err != nil {
+		return func() {}, fmt.Errorf("transport bootstrap: %w", err)
+	}
+	return func() {
+		if cerr := stack.Close(); cerr != nil {
+			log.Warn("wgboot: shutdown", "err", cerr)
+		}
+	}, nil
+}
+
+// cacheRenderInputs pulls the cache-side facts the renderer needs out
+// of whatever live provider state is available. Today only the Linode
+// provider carries a managed cache; the function returns whatever it
+// can find and lets the renderer's validate() reject missing fields.
+func cacheRenderInputs(ctx context.Context, cfg *config.Config, prov provider.Provider) wgboot.CacheRenderInputs {
+	in := wgboot.CacheRenderInputs{}
+	type cacheReporter interface {
+		CacheStatus(ctx context.Context) *linodeprov.CacheStatus
+	}
+	if cr, ok := prov.(cacheReporter); ok {
+		if s := cr.CacheStatus(ctx); s != nil {
+			in.CacheVPCIP = s.VPCIP
+		}
+	}
+	// WorkerVPCSubnet is operator-config-only today; the provider's
+	// VPC helper has it but isn't exposed across the orchestrator
+	// boundary yet. The transport.tunnel.routes block carries the
+	// LAN-side CIDRs but not the worker subnet; defer to a follow-up
+	// when the renderer push path actually lands.
+	_ = cfg // currently unused — placeholder for FJB-87
+	return in
+}
+
+// aclSinkFor returns a sink func that hands the registry adapter to
+// the provider's SetACLSource method via duck-typing. Providers that
+// don't carry a managed cache return a no-op sink (sink = nil).
+func aclSinkFor(prov provider.Provider) func(wgboot.ACLSource) {
+	type setter interface {
+		SetACLSource(linodeprov.ACLSnapshotSource)
+	}
+	s, ok := prov.(setter)
+	if !ok {
+		return nil
+	}
+	return func(src wgboot.ACLSource) {
+		// linodeprov.ACLSnapshotSource and wgboot.ACLSource share the
+		// AllowedIPsCIDRs() string-slice method shape; adapt via an
+		// inline shim so we don't tie the two packages together.
+		s.SetACLSource(aclSnapshotShim{src: src})
+	}
+}
+
+// aclSnapshotShim bridges wgboot.ACLSource → linodeprov.ACLSnapshotSource.
+type aclSnapshotShim struct {
+	src wgboot.ACLSource
+}
+
+func (a aclSnapshotShim) AllowedIPsCIDRs() []string {
+	return a.src.AllowedIPsCIDRs()
 }
 
 // applyTransportToProvider propagates the top-level transport config
