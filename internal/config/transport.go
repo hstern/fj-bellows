@@ -99,17 +99,6 @@ type WG struct {
 	// workers don't run WG.
 	Peer WGPeer `yaml:"peer"`
 
-	// Proxies is the list of transparent TCP-proxy listeners. Each
-	// pair binds Listen on the orchestrator's WG interface and dials
-	// Upstream over the orchestrator host's normal network. Workers
-	// dial what they think is a LAN service (Listen address) and the
-	// proxy bridges bytes to the real upstream. TLS terminates
-	// end-to-end with the real upstream — proxy doesn't touch TLS.
-	//
-	// Deprecated by FJB-54 ACL slice (FJB-82+). New deployments use
-	// ACL below; Proxies remains for the in-flight migration window.
-	Proxies []WGProxy `yaml:"proxies"`
-
 	// ACL is the operator-declared allow-list of (protocol, host,
 	// port-or-icmp-spec) entries that gates what workers may reach
 	// through the orchestrator's transparent proxy. See the FJB-54
@@ -141,17 +130,6 @@ type WGPeer struct {
 	// includes the worker VPC subnet so dispatcher dial-by-VPC-IP
 	// (FJB-64) routes through the same tunnel.
 	AllowedIPs []string `yaml:"allowed_ips"`
-}
-
-// WGProxy is one transparent TCP-proxy listener.
-type WGProxy struct {
-	// Listen is the orchestrator-side address (must be on the WG
-	// interface), e.g. "10.99.0.1:443".
-	Listen string `yaml:"listen"`
-
-	// Upstream is the real LAN destination (host:port). Dialed over
-	// the orchestrator host's normal network.
-	Upstream string `yaml:"upstream"`
 }
 
 // Tunnel is the IPsec + cache-as-gateway tunnel configuration.
@@ -269,11 +247,6 @@ func (w *WG) validate() error {
 	if err := w.Peer.validate(); err != nil {
 		return fmt.Errorf("transport.wg.peer: %w", err)
 	}
-	for i, p := range w.Proxies {
-		if err := p.validate(); err != nil {
-			return fmt.Errorf("transport.wg.proxies[%d]: %w", i, err)
-		}
-	}
 	if _, err := acl.Parse(w.ACL); err != nil {
 		return fmt.Errorf("transport.wg.acl: %w", err)
 	}
@@ -297,22 +270,6 @@ func (p *WGPeer) validate() error {
 		if _, _, err := net.ParseCIDR(cidr); err != nil {
 			return fmt.Errorf("allowed_ips[%d] = %q: %w", i, cidr, err)
 		}
-	}
-	return nil
-}
-
-func (px *WGProxy) validate() error {
-	if px.Listen == "" {
-		return errors.New("listen is required")
-	}
-	if _, _, err := net.SplitHostPort(px.Listen); err != nil {
-		return fmt.Errorf("listen %q is not host:port: %w", px.Listen, err)
-	}
-	if px.Upstream == "" {
-		return errors.New("upstream is required")
-	}
-	if _, _, err := net.SplitHostPort(px.Upstream); err != nil {
-		return fmt.Errorf("upstream %q is not host:port: %w", px.Upstream, err)
 	}
 	return nil
 }
