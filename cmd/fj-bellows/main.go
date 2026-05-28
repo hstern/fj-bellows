@@ -28,6 +28,7 @@ import (
 	"github.com/hstern/fj-bellows/internal/forgejo"
 	"github.com/hstern/fj-bellows/internal/orchestrator"
 	"github.com/hstern/fj-bellows/internal/provider"
+	"github.com/hstern/fj-bellows/internal/transport/wg"
 	"github.com/hstern/fj-bellows/internal/transport/wgboot"
 
 	// Register in-tree providers.
@@ -132,6 +133,15 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 	// implement the method (e.g. the docker provider, which has no
 	// Linode-style firewall) are unaffected.
 	applyTransportToProvider(prov, cfg.Transport)
+	// Under cache-gateway mode, load (or generate) the orchestrator's WG
+	// keypair BEFORE Configure runs. Configure provisions the cache VM,
+	// and its cloud-init needs the orchestrator's public key baked in
+	// so wg-quick on the cache can come up referencing the right peer
+	// (FJB-99 Phase A). Phase B will move the wgboot.Boot call to AFTER
+	// Configure and have it reuse this same key.
+	if err := plumbOrchestratorWGPubkey(prov, cfg.Transport); err != nil {
+		return err
+	}
 	// Bound the Configure-time network calls (provider sentinel fetches,
 	// firewall API, etc.) so a hung upstream can't wedge startup forever.
 	cfgCtx, cancelCfg := context.WithTimeout(context.Background(), 60*time.Second)
@@ -600,6 +610,29 @@ func applyTransportToProvider(prov provider.Provider, t config.Transport) {
 	if wp, ok := prov.(interface{ SetWGListenPort(int) }); ok && t.WG != nil {
 		wp.SetWGListenPort(t.WG.ListenPort)
 	}
+}
+
+// plumbOrchestratorWGPubkey loads (or generates) the orchestrator's WG
+// keypair under cache-gateway mode and pushes the public key into the
+// provider so the cache cloud-init can bake it in as the WG peer
+// pubkey (FJB-99 Phase A). Duck-typed for the same reason as
+// applyTransportToProvider; providers that don't carry a managed cache
+// skip the push.
+//
+// No-op for ssh-mode deployments (no WG block configured) and for
+// providers without SetOrchestratorWGPubkey (e.g. docker).
+func plumbOrchestratorWGPubkey(prov provider.Provider, t config.Transport) error {
+	if t.Mode != config.TransportCacheGateway || t.WG == nil {
+		return nil
+	}
+	priv, err := wg.LoadOrGenerateKey(t.WG.PrivateKeyFile)
+	if err != nil {
+		return fmt.Errorf("orchestrator wg key: %w", err)
+	}
+	if sp, ok := prov.(interface{ SetOrchestratorWGPubkey(string) }); ok {
+		sp.SetOrchestratorWGPubkey(priv.PublicKey().String())
+	}
+	return nil
 }
 
 // sshDispatcherFrom builds the SSH dispatcher from config.

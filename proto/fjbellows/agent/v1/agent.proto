@@ -1,0 +1,182 @@
+syntax = "proto3";
+
+package fjbellows.agent.v1;
+
+option go_package = "github.com/hstern/fj-bellows/gen/fjbellows/agent/v1;agentv1";
+
+import "google/protobuf/timestamp.proto";
+
+// AgentService runs on every worker and cache VM. The orchestrator dials it
+// over the WG fabric (direct WG peer for cache, via cache-gateway routing for
+// workers) and uses it to drive operator-side control RPCs that need code
+// running on the target — interactive shell, command exec, reachability
+// probes, and a future log-tail surface.
+//
+// Auth is a per-deployment shared secret presented in the Authorization header
+// (Bearer scheme). The wire is plain HTTP/2 cleartext — WG already encrypts
+// and authenticates the orchestrator↔cache leg, the cache↔worker leg is on
+// the private VPC subnet, and adding TLS would mean another cert lifecycle.
+//
+// FJB-94 ships only Health; FJB-93 will add Exec, FJB-97 will reuse Health
+// for the gRPC-layer reachability probe.
+service AgentService {
+  // Health returns a readiness snapshot of the agent process. Used by the
+  // orchestrator's readiness gate and the e2e harness to assert "agent is
+  // up and responding to RPCs". The response always populates `ready=true`
+  // when the call reaches the handler — the field exists so callers can
+  // grep one boolean instead of inspecting the absence of an error.
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Exec runs a single program on the target. Bidi streaming carries
+  // stdin/stdout/stderr/exit-code + signals in the framed envelope below.
+  // The orchestrator opens a matching bidi stream to fjbctl and copies
+  // frames between the two without reinterpretation; see FJB-93 design
+  // doc (docs/designs/remote-shell.md) for the end-to-end picture.
+  //
+  // Phase A (FJB-93 Phase A) of this RPC is **pipe-mode only**: the
+  // handler refuses ExecOpen.tty=true with CodeUnimplemented. PTY +
+  // window resize + interactive shell come in Phase C, on top of the
+  // same envelope.
+  rpc Exec(stream ShellMsg) returns (stream ShellEvent);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  // ready is true on every successful invocation; the field is present so
+  // operator tooling can do `.ready` instead of `error == nil`. It exists
+  // for future-proofing too — a future agent may want to return ready=false
+  // while still being reachable (e.g. during a quiesce window).
+  bool ready = 1;
+
+  // build_version is the agent binary's version string. Populated from
+  // -ldflags "-X main.version=…" at link time; "dev" when unset.
+  string build_version = 2;
+
+  // started_at is when the agent process started. Subtracting this from
+  // now gives the operator-visible uptime.
+  google.protobuf.Timestamp started_at = 3;
+
+  // hostname is the OS hostname as reported by os.Hostname() at startup.
+  // Useful when the orchestrator's name → addr map drifts from what the
+  // VM actually thinks it is.
+  string hostname = 4;
+}
+
+// ShellMsg is the client→server frame on the Exec bidi stream. Exactly one
+// ExecOpen must be the first message; subsequent messages may interleave
+// Stdin / Resize / Signal / CloseStdin in any order until the server closes
+// the stream after sending Exit.
+message ShellMsg {
+  oneof kind {
+    ExecOpen   open        = 1;
+    ExecStdin  stdin       = 2;
+    ExecResize resize      = 3;
+    ExecSignal signal      = 4;
+    ExecCloseStdin close_stdin = 5;
+  }
+}
+
+// ShellEvent is the server→client frame. Opened arrives first (sentinel,
+// matches the StreamEvents convention so the open call returns
+// immediately even before fork+exec lands). Stdout and Stderr interleave
+// freely. Exit is always last and ends the stream.
+message ShellEvent {
+  oneof kind {
+    ExecOpened opened = 1;
+    ExecStdout stdout = 2;
+    ExecStderr stderr = 3;
+    ExecExit   exit   = 4;
+  }
+}
+
+// ExecOpen is the first ShellMsg on every Exec stream. argv[0] is the
+// program to run; an empty argv asks for a login shell (deferred to a
+// later phase). env passes additional environment vars beyond the agent
+// process's own; $TERM is set from `term` when `tty` is true.
+message ExecOpen {
+  // target identifies which worker/cache to run on. This field is only
+  // meaningful on the fjbctl→orchestrator hop; the orchestrator strips
+  // it before forwarding the Open to the agent. Empty on the agent hop.
+  string target = 1;
+
+  // argv is the program + args. argv[0] is exec'd directly; no shell
+  // interpolation. Pass `sh -c "..."` for shell semantics.
+  repeated string argv = 2;
+
+  // env is a map of additional environment variables. Empty by default;
+  // the agent does NOT pass the orchestrator's environment through.
+  map<string, string> env = 3;
+
+  // tty asks the agent to allocate a PTY for the child and wire stdin/
+  // stdout (no separate stderr under PTY) to the PTY master. Phase A
+  // returns CodeUnimplemented if true; PTY support lands in Phase C.
+  bool tty = 4;
+
+  // term is the $TERM value to set on the child when tty=true. Ignored
+  // when tty=false.
+  string term = 5;
+
+  // winsize is the initial PTY window size when tty=true. Ignored
+  // otherwise.
+  Winsize winsize = 6;
+}
+
+// Winsize carries terminal columns and rows.
+message Winsize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+// ExecStdin pumps bytes to the child's stdin. Streaming; the client may
+// send any number of these. CloseStdin signals EOF.
+message ExecStdin {
+  bytes data = 1;
+}
+
+// ExecStdout / ExecStderr carry bytes from the child's stdout / stderr.
+// Frame size is at the server's discretion (default 32 KiB chunks); the
+// receiver should not assume line boundaries.
+message ExecStdout {
+  bytes data = 1;
+}
+
+message ExecStderr {
+  bytes data = 1;
+}
+
+// ExecResize updates the PTY window size mid-session. Only meaningful
+// when the Open had tty=true.
+message ExecResize {
+  Winsize winsize = 1;
+}
+
+// ExecSignal forwards a signal to the child's process group. Valid
+// names: SIGINT, SIGTERM, SIGQUIT, SIGHUP. Unknown names are ignored
+// (logged on the agent side).
+message ExecSignal {
+  string name = 1;
+}
+
+// ExecCloseStdin closes the child's stdin (EOF on the read side). The
+// stream stays open for stdout/stderr and the terminal Exit.
+message ExecCloseStdin {}
+
+// ExecOpened is the sentinel server→client frame that fires immediately
+// after the agent accepts the Open and begins setting up the child. The
+// existence of this frame is what lets the client's stream-open call
+// return without waiting for fork+exec to complete.
+message ExecOpened {}
+
+// ExecExit is the terminal server→client frame. Exactly one of
+// (code, signal) is meaningful: code is the program's exit status if it
+// exited normally; signal is the signal name (e.g. "terminated",
+// "killed") if it was killed by a signal. The agent closes the stream
+// immediately after sending this.
+message ExecExit {
+  // code is the child's exit status when it exited normally.
+  int32 code = 1;
+  // signal is the signal name when the child was killed by a signal.
+  // Empty when code is meaningful.
+  string signal = 2;
+}

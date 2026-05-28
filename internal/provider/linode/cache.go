@@ -200,6 +200,14 @@ type managedCache struct {
 	// no VPC is configured — the iptables bake-in is then skipped.
 	workerVPCSubnet string
 
+	// orchestratorWGPubkey is the orchestrator's WG public key, set by
+	// setOrchestratorWGPubkey before ensureAtConfigure runs (FJB-99
+	// Phase A). The cache cloud-init bakes it in as [Peer].PublicKey so
+	// wg-quick@wg0 brings up the tunnel on first boot referencing the
+	// right orchestrator peer. Empty under ssh-mode deployments — the
+	// WG bootstrap block is then omitted from cloud-init entirely.
+	orchestratorWGPubkey string
+
 	// linodeID is the cache VM's Linode ID. Populated by ensureAt-
 	// Configure (find-or-adopt), cleared by maybeCleanupCache.
 	linodeID int
@@ -300,6 +308,14 @@ func (m *managedCache) setHardwareContext(firewallID, vpcSubnetID int, authorize
 	m.workerVPCSubnet = workerVPCSubnet
 }
 
+// setOrchestratorWGPubkey supplies the orchestrator's WG public key
+// (FJB-99 Phase A). Called by the Linode provider after the daemon has
+// loaded its own keypair from disk; the value lands in cloud-init at
+// cache-create time so the cache's wg-quick references the right peer.
+func (m *managedCache) setOrchestratorWGPubkey(pubkey string) {
+	m.orchestratorWGPubkey = pubkey
+}
+
 // ensure brings the cache VM (and its bucket + scoped key)
 // into existence on demand. No-op when the cached linodeID is still
 // valid; otherwise re-runs ensureAtConfigure to recreate from
@@ -374,7 +390,7 @@ func (m *managedCache) createFreshCacheLinode(ctx context.Context, pair cacheCer
 	if err != nil {
 		return fmt.Errorf("render fjb-iptables: %w", err)
 	}
-	userData, err := renderCacheCloudInit(cacheCloudInitParams{
+	params := cacheCloudInitParams{
 		Bucket:         creds.Bucket,
 		Region:         creds.Region,
 		Endpoint:       creds.Endpoint,
@@ -385,7 +401,14 @@ func (m *managedCache) createFreshCacheLinode(ctx context.Context, pair cacheCer
 		ServerCertPEM:  string(pair.ServerCertPEM),
 		ServerKeyPEM:   string(pair.ServerKeyPEM),
 		IPTablesScript: iptablesScript,
-	})
+	}
+	if m.transportMode == "cache-gateway" && m.orchestratorWGPubkey != "" {
+		params.OrchestratorWGPubkey = m.orchestratorWGPubkey
+		params.OrchestratorWGAddr = defaultOrchestratorWGAddr
+		params.CacheWGAddr = defaultCacheWGAddr
+		params.WGListenPort = defaultCacheWGListenPort
+	}
+	userData, err := renderCacheCloudInit(params)
 	if err != nil {
 		return fmt.Errorf("render cloud-init: %w", err)
 	}
@@ -622,6 +645,18 @@ type cacheCloudInitParams struct {
 	// write_files entry and the iptables-persistent install when this
 	// field is empty.
 	IPTablesScript string
+
+	// FJB-99 Phase A — WG bootstrap. When OrchestratorWGPubkey is set
+	// the cache cloud-init installs wireguard + awscli, generates its
+	// own keypair, writes /etc/wireguard/wg0.conf with the orchestrator
+	// as the peer, brings up wg-quick@wg0, and publishes its pubkey to
+	// s3://<Bucket>/wg-pubkey.txt for the orchestrator to read back
+	// (Phase B). Empty under ssh-mode deployments — the WG block is
+	// then skipped entirely.
+	OrchestratorWGPubkey string
+	OrchestratorWGAddr   string // e.g. "100.64.0.1"
+	CacheWGAddr          string // e.g. "100.64.0.2"
+	WGListenPort         int    // UDP, e.g. 51820
 }
 
 // renderCacheCloudInit fills the embedded template. Defaults to the
@@ -734,6 +769,16 @@ type workerExtrasData struct {
 // "Overlay addressing" — the /30 baseline is orchestrator=.1 / cache=.2
 // inside RFC 6598 CGNAT space.
 const defaultOrchestratorWGAddr = "100.64.0.1"
+
+// defaultCacheWGAddr is the cache's address on the WG overlay (.2 in
+// the orchestrator=.1/cache=.2 /30 baseline). FJB-99 Phase A bakes it
+// into the cache cloud-init's wg0.conf [Interface].Address.
+const defaultCacheWGAddr = "100.64.0.2"
+
+// defaultCacheWGListenPort is the WireGuard project's de-facto default UDP
+// port — mirrors config.DefaultWGListenPort but stays local to the
+// provider so cache.go doesn't have to import internal/config.
+const defaultCacheWGListenPort = 51820
 
 // workerExtras returns the data the linode provider's Provision needs
 // to wrap each worker's cloud-init with cache trust + hostname
