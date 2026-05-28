@@ -328,7 +328,7 @@ func startStack(ctx context.Context, s *Stack, cfg Config, plan *bootPlan) error
 	if err := startResponder(ctx, s, cfg, plan); err != nil {
 		return err
 	}
-	if err := startProxy(s, cfg); err != nil {
+	if err := startProxy(ctx, s, registry); err != nil {
 		return err
 	}
 	if err := startUDP(s, plan, registry); err != nil {
@@ -389,15 +389,17 @@ func startResponder(ctx context.Context, s *Stack, cfg Config, plan *bootPlan) e
 	return nil
 }
 
-func startProxy(s *Stack, cfg Config) error {
-	p, err := startProxyFromSpecs(s.Tunnel, cfg.Transport.WG.Proxies, s.log)
+func startProxy(ctx context.Context, s *Stack, registry *acl.Registry) error {
+	p, err := wg.NewProxy(s.Tunnel, registry, s.log)
 	if err != nil {
+		return fmt.Errorf("wgboot: construct TCP proxy: %w", err)
+	}
+	if err := p.Start(ctx); err != nil {
+		_ = p.Close()
 		return fmt.Errorf("wgboot: start TCP proxy: %w", err)
 	}
-	if p != nil {
-		s.Proxy = p
-		s.pushShutdown(func() { _ = p.Close() })
-	}
+	s.Proxy = p
+	s.pushShutdown(func() { _ = p.Close() })
 	return nil
 }
 
@@ -537,43 +539,9 @@ func (s *Stack) startCacheRenderWatcher(ctx context.Context, cfg Config, overlay
 	}()
 }
 
-// startProxyFromSpecs constructs the FJB-79 TCP proxy from the legacy
-// transport.wg.proxies config block. Returns nil (no proxy) when the
-// list is empty — callers tolerate that as "no transparent listener,
-// only DNS+UDP+ICMP". When FJB-85 lands the ACL-aware reshape, this
-// function shifts to `wg.NewProxy(tun, registry, log)` and the
-// transport.wg.proxies field deprecates.
-func startProxyFromSpecs(tun *wg.Tunnel, specs []config.WGProxy, log *slog.Logger) (*wg.Proxy, error) {
-	if len(specs) == 0 {
-		return nil, nil
-	}
-	pSpecs := make([]wg.ProxySpec, 0, len(specs))
-	for _, sp := range specs {
-		ap, err := netip.ParseAddrPort(sp.Listen)
-		if err != nil {
-			return nil, fmt.Errorf("listen %q: %w", sp.Listen, err)
-		}
-		ln, err := tun.ListenTCP(net.TCPAddrFromAddrPort(ap))
-		if err != nil {
-			return nil, fmt.Errorf("listen %q on tunnel: %w", sp.Listen, err)
-		}
-		pSpecs = append(pSpecs, wg.ProxySpec{
-			Listener: ln,
-			Upstream: sp.Upstream,
-		})
-	}
-	p, err := wg.NewProxy(pSpecs, log)
-	if err != nil {
-		// Listeners are now owned by the failed Proxy — close them
-		// so the partial state doesn't leak.
-		for _, sp := range pSpecs {
-			_ = sp.Listener.Close()
-		}
-		return nil, err
-	}
-	p.Start()
-	return p, nil
-}
+// startProxyFromSpecs removed: FJB-85 replaced the per-spec proxy with
+// an ACL-driven wildcard listener. The boot path now calls
+// wg.NewProxy(tun, registry, log) directly; see startProxy.
 
 // startUDPForwarder binds the netstack-side wildcard UDP listener and
 // wires the registry-driven LookupFn.
