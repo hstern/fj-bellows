@@ -6,6 +6,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/hstern/fj-bellows/internal/transport/wg/acl"
 )
 
 // DefaultWGKeepaliveInterval is the default persistent-keepalive delay
@@ -20,6 +22,14 @@ const DefaultWGKeepaliveInterval = 1 * time.Second
 // — what operator muscle-memory expects, what most Linode firewall
 // examples reference.
 const DefaultWGListenPort = 51820
+
+// DefaultWGOverlayPrefix is the default WireGuard overlay CIDR used
+// when transport.wg.overlay_prefix is unset. 100.64.0.0/30 is the
+// smallest useful slice of RFC 6598's CGNAT space (orchestrator .1,
+// cache .2) and almost never collides with operator LANs (which sit
+// on 10.x / 172.16-31.x / 192.168.x). Designed in transport.md
+// § Overlay addressing; IPv6 ULA migration tracked under FJB-81.
+const DefaultWGOverlayPrefix = "100.64.0.0/30"
 
 // Transport configures the dispatch transport.
 //
@@ -79,6 +89,12 @@ type WG struct {
 	// first-request latency for bandwidth.
 	KeepaliveInterval Duration `yaml:"keepalive_interval"`
 
+	// OverlayPrefix is the WireGuard inner-overlay CIDR. The
+	// orchestrator binds .1 and the cache .2 inside it. Defaults to
+	// DefaultWGOverlayPrefix when empty. See transport.md
+	// § Overlay addressing.
+	OverlayPrefix string `yaml:"overlay_prefix"`
+
 	// Peer is the cache nanode WireGuard peer. There is exactly one;
 	// workers don't run WG.
 	Peer WGPeer `yaml:"peer"`
@@ -89,7 +105,23 @@ type WG struct {
 	// dial what they think is a LAN service (Listen address) and the
 	// proxy bridges bytes to the real upstream. TLS terminates
 	// end-to-end with the real upstream — proxy doesn't touch TLS.
+	//
+	// Deprecated by FJB-54 ACL slice (FJB-82+). New deployments use
+	// ACL below; Proxies remains for the in-flight migration window.
 	Proxies []WGProxy `yaml:"proxies"`
+
+	// ACL is the operator-declared allow-list of (protocol, host,
+	// port-or-icmp-spec) entries that gates what workers may reach
+	// through the orchestrator's transparent proxy. See the FJB-54
+	// design doc § ACL for the grammar; see
+	// internal/transport/wg/acl for parsing + DNS resolution.
+	//
+	// Validated at config-load time: every string is parsed via
+	// acl.Parse, surfacing grammar errors before the daemon starts.
+	// Implicit entries (forgejo base URL + 100.64.0.1:53) are NOT
+	// in this list — the orchestrator injects them at boot via
+	// acl.ImplicitEntries.
+	ACL []string `yaml:"acl"`
 }
 
 // WGPeer describes the cache nanode's WG endpoint.
@@ -182,6 +214,9 @@ func (t *Transport) applyDefaults() {
 	if t.WG != nil && t.WG.ListenPort == 0 {
 		t.WG.ListenPort = DefaultWGListenPort
 	}
+	if t.WG != nil && t.WG.OverlayPrefix == "" {
+		t.WG.OverlayPrefix = DefaultWGOverlayPrefix
+	}
 }
 
 func (t *Transport) validate() error {
@@ -226,6 +261,11 @@ func (w *WG) validate() error {
 	if w.ListenPort < 0 || w.ListenPort > 65535 {
 		return fmt.Errorf("transport.wg: listen_port %d out of range (want 1-65535, or 0 for default)", w.ListenPort)
 	}
+	if w.OverlayPrefix != "" {
+		if _, _, err := net.ParseCIDR(w.OverlayPrefix); err != nil {
+			return fmt.Errorf("transport.wg.overlay_prefix = %q: %w", w.OverlayPrefix, err)
+		}
+	}
 	if err := w.Peer.validate(); err != nil {
 		return fmt.Errorf("transport.wg.peer: %w", err)
 	}
@@ -233,6 +273,9 @@ func (w *WG) validate() error {
 		if err := p.validate(); err != nil {
 			return fmt.Errorf("transport.wg.proxies[%d]: %w", i, err)
 		}
+	}
+	if _, err := acl.Parse(w.ACL); err != nil {
+		return fmt.Errorf("transport.wg.acl: %w", err)
 	}
 	return nil
 }
