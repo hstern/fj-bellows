@@ -29,6 +29,7 @@ func TestWG_FullyConfigured(t *testing.T) {
   wg:
     private_key_file: /etc/fj-bellows/wg-private-key
     local_addr: 10.99.0.1/32
+    overlay_prefix: 100.64.0.0/30
     keepalive_interval: 1s
     peer:
       public_key: AbcDefGhiJklMnoPqrStuVwxYzAbcDefGhiJklMnoPqs=
@@ -36,9 +37,10 @@ func TestWG_FullyConfigured(t *testing.T) {
       allowed_ips:
         - 10.99.0.2/32
         - 10.0.0.0/24
-    proxies:
-      - { listen: 10.99.0.1:443, upstream: git.stern.ca:443 }
-      - { listen: 10.99.0.1:22,  upstream: git.stern.ca:22  }
+    acl:
+      - tcp://forgejo.stern.ca:22
+      - tcp://nexus.stern.ca:80,443
+      - icmp://192.168.0.0/24:8/0,0/0
 `)
 	cfg, err := Load(path)
 	if err != nil {
@@ -51,14 +53,85 @@ func TestWG_FullyConfigured(t *testing.T) {
 	if wg.LocalAddr != "10.99.0.1/32" {
 		t.Errorf("LocalAddr = %q", wg.LocalAddr)
 	}
+	if wg.OverlayPrefix != "100.64.0.0/30" {
+		t.Errorf("OverlayPrefix = %q", wg.OverlayPrefix)
+	}
 	if wg.KeepaliveInterval.D() != 1*time.Second {
 		t.Errorf("KeepaliveInterval = %v, want 1s", wg.KeepaliveInterval.D())
 	}
 	if len(wg.Peer.AllowedIPs) != 2 {
 		t.Errorf("len(AllowedIPs) = %d, want 2", len(wg.Peer.AllowedIPs))
 	}
-	if len(wg.Proxies) != 2 {
-		t.Errorf("len(Proxies) = %d, want 2", len(wg.Proxies))
+	if len(wg.ACL) != 3 {
+		t.Errorf("len(ACL) = %d, want 3", len(wg.ACL))
+	}
+}
+
+// Default overlay_prefix is 100.64.0.0/30 (CGNAT, RFC 6598) when
+// omitted — per transport.md § Overlay addressing. Operators can
+// override but the design promises this default works without
+// configuration.
+func TestWG_DefaultOverlayPrefix(t *testing.T) {
+	path := writeTemp(t, "config.yaml", validBaseConfig+`
+  wg:
+    private_key_file: /etc/fj-bellows/wg-private-key
+    local_addr: 10.99.0.1/32
+    peer:
+      public_key: AbcDefGhiJklMnoPqrStuVwxYzAbcDefGhiJklMnoPqs=
+      endpoint: 172.234.203.50:51820
+      allowed_ips: [10.99.0.2/32]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Transport.WG.OverlayPrefix; got != DefaultWGOverlayPrefix {
+		t.Errorf("default OverlayPrefix = %q, want %q", got, DefaultWGOverlayPrefix)
+	}
+}
+
+// ACL strings are validated via acl.Parse at config-load. A grammar
+// error in the operator's config should surface before the daemon
+// starts.
+func TestWG_ACL_ParseError(t *testing.T) {
+	path := writeTemp(t, "config.yaml", validBaseConfig+`
+  wg:
+    private_key_file: /etc/fj-bellows/wg-private-key
+    local_addr: 10.99.0.1/32
+    peer:
+      public_key: AbcDefGhiJklMnoPqrStuVwxYzAbcDefGhiJklMnoPqs=
+      endpoint: 172.234.203.50:51820
+      allowed_ips: [10.99.0.2/32]
+    acl:
+      - ftp://example.com:21
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatalf("Load: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown scheme") {
+		t.Errorf("error = %v, want 'unknown scheme'", err)
+	}
+}
+
+// Bad overlay_prefix surfaces as a CIDR error.
+func TestWG_BadOverlayPrefix(t *testing.T) {
+	path := writeTemp(t, "config.yaml", validBaseConfig+`
+  wg:
+    private_key_file: /etc/fj-bellows/wg-private-key
+    local_addr: 10.99.0.1/32
+    overlay_prefix: not-a-cidr
+    peer:
+      public_key: AbcDefGhiJklMnoPqrStuVwxYzAbcDefGhiJklMnoPqs=
+      endpoint: 172.234.203.50:51820
+      allowed_ips: [10.99.0.2/32]
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatalf("Load: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), `overlay_prefix = "not-a-cidr"`) {
+		t.Errorf("error = %v, want overlay_prefix substring", err)
 	}
 }
 
@@ -189,36 +262,6 @@ func TestWG_Validation(t *testing.T) {
       allowed_ips: [bad-cidr]
 `,
 			wantSub: `allowed_ips[0] = "bad-cidr"`,
-		},
-		{
-			name: "proxy missing listen",
-			wgBlock: `
-  wg:
-    private_key_file: /tmp/k
-    local_addr: 10.99.0.1/32
-    peer:
-      public_key: AbcDefGhiJklMnoPqrStuVwxYzAbcDefGhiJklMnoPqs=
-      endpoint: 172.234.203.50:51820
-      allowed_ips: [10.99.0.2/32]
-    proxies:
-      - { upstream: git.stern.ca:443 }
-`,
-			wantSub: "listen is required",
-		},
-		{
-			name: "proxy missing upstream",
-			wgBlock: `
-  wg:
-    private_key_file: /tmp/k
-    local_addr: 10.99.0.1/32
-    peer:
-      public_key: AbcDefGhiJklMnoPqrStuVwxYzAbcDefGhiJklMnoPqs=
-      endpoint: 172.234.203.50:51820
-      allowed_ips: [10.99.0.2/32]
-    proxies:
-      - { listen: 10.99.0.1:443 }
-`,
-			wantSub: "upstream is required",
 		},
 		{
 			name: "negative keepalive",

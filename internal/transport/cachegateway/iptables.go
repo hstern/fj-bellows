@@ -2,6 +2,7 @@ package cachegateway
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 )
 
@@ -19,7 +20,13 @@ import (
 // allow-list (or the ESTABLISHED,RELATED return path) is dropped by
 // the chain's explicit final rule.
 //
-// Consumed fields: WorkerVPCSubnet, AllowedIPs.
+// One additional ACCEPT covers the reverse direction (FJB-92): the
+// orchestrator embeds wireguard-go in netstack mode and dials worker
+// VPC IPs through the tunnel, so the cache must forward the inner
+// packet from wg0 onto eth1 (`-s <orch>/32 -d <worker-vpc> -i wg0 -o
+// eth1 -j ACCEPT`).
+//
+// Consumed fields: WorkerVPCSubnet, AllowedIPs, OrchestratorWGAddr.
 func RenderCacheIPTables(in Inputs) (string, error) {
 	if err := in.validate(); err != nil {
 		return "", err
@@ -56,6 +63,25 @@ func RenderCacheIPTables(in Inputs) (string, error) {
 				"iptables -A FJB-FORWARD -s %s -d %s -o wg0 -j ACCEPT\n",
 				in.WorkerVPCSubnet, p.String())
 		}
+		b.WriteString("\n")
+	}
+
+	// Allow orchestrator → worker VPC over wg0 → eth1 (FJB-92). The
+	// orchestrator embeds wireguard-go in netstack mode: its dispatcher
+	// dials worker VPC IPs through the tunnel, so the cache must forward
+	// the inner packet onto its VPC NIC. The reverse direction (worker →
+	// orchestrator overlay /32) is already covered by the AllowedIPs
+	// loop above when the orchestrator's overlay /32 is in the ACL union.
+	if in.OrchestratorWGAddr.IsValid() {
+		hostBits := 32
+		if in.OrchestratorWGAddr.Is6() && !in.OrchestratorWGAddr.Is4In6() {
+			hostBits = 128
+		}
+		orchPrefix := netip.PrefixFrom(in.OrchestratorWGAddr, hostBits)
+		b.WriteString("# Orchestrator → worker VPC (FJB-92): dispatcher dials worker IPs via netstack.\n")
+		fmt.Fprintf(&b,
+			"iptables -A FJB-FORWARD -s %s -d %s -i wg0 -o eth1 -j ACCEPT\n",
+			orchPrefix.String(), in.WorkerVPCSubnet)
 		b.WriteString("\n")
 	}
 

@@ -455,6 +455,9 @@ type CacheStatus struct {
 
 // Status returns the current cache snapshot. Safe to call before / after
 // ensureAtConfigure (returns Present=false until linodeID is populated).
+// The VPC IP is looked up on demand the first time the cache VM is known
+// to exist — the lookup result is memoised on managedCache so subsequent
+// callers (worker cloud-init, wgboot.Boot) read it synchronously.
 func (m *managedCache) Status(ctx context.Context) CacheStatus {
 	s := CacheStatus{
 		Present:         m.linodeID != 0,
@@ -467,15 +470,43 @@ func (m *managedCache) Status(ctx context.Context) CacheStatus {
 		s.BucketLabel = m.bucket.label
 	}
 	if s.Present {
-		// Best-effort live status from Linode. Failures are non-fatal —
-		// the caller sees Present=true with VMState="" and can retry.
-		if inst, err := m.client.GetInstance(ctx, m.linodeID); err == nil && inst != nil {
-			s.VMState = string(inst.Status)
-		} else if err != nil {
-			m.log.Debug("cache status: GetInstance failed", "id", m.linodeID, "err", err)
+		s.VMState = m.lookupLiveVMState(ctx)
+		// Populate VPC IP eagerly the first time the cache is reachable.
+		// wgboot.Boot wants this synchronously when constructing the
+		// cache-gateway render inputs (FJB-90); workerExtras() reads the
+		// same memoised field, so both call sites see a consistent value.
+		if s.VPCIP == "" {
+			s.VPCIP = m.ensureCacheVPCIP(ctx)
 		}
 	}
 	return s
+}
+
+// lookupLiveVMState returns the Linode API's view of the cache VM's
+// status string (or "" on failure — caller treats empty as transient).
+func (m *managedCache) lookupLiveVMState(ctx context.Context) string {
+	inst, err := m.client.GetInstance(ctx, m.linodeID)
+	if err != nil {
+		m.log.Debug("cache status: GetInstance failed", "id", m.linodeID, "err", err)
+		return ""
+	}
+	if inst == nil {
+		return ""
+	}
+	return string(inst.Status)
+}
+
+// ensureCacheVPCIP populates m.cacheVPCIP the first time the cache VM
+// has a VPC NIC assigned. Returns the memoised value on success or "" on
+// transient failure (VPC NIC still attaching; lookup retried next call).
+func (m *managedCache) ensureCacheVPCIP(ctx context.Context) string {
+	ip, err := m.lookupCacheVPCIP(ctx)
+	if err != nil {
+		m.log.Debug("cache status: VPC IP not yet assigned", "id", m.linodeID, "err", err)
+		return ""
+	}
+	m.cacheVPCIP = ip
+	return ip
 }
 
 // maybeCleanupCache reaps the cache VM + the scoped bucket key. Called

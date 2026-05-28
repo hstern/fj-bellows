@@ -197,6 +197,94 @@ func (t *Tunnel) DialContext(ctx context.Context, network, address string) (net.
 	return t.tnet.DialContext(ctx, network, address)
 }
 
+// ListenUDPAddrPort returns a UDP PacketConn bound on the tunnel-side
+// address. The orchestrator's wildcard UDP forwarder (FJB-84) binds
+// here so worker UDP traffic terminating at any IP carried by the
+// netstack lands on a single PacketConn.
+func (t *Tunnel) ListenUDPAddrPort(addr netip.AddrPort) (net.PacketConn, error) {
+	t.mu.Lock()
+	closed := t.closed
+	t.mu.Unlock()
+	if closed {
+		return nil, errors.New("wg: tunnel is closed")
+	}
+	return t.tnet.ListenUDPAddrPort(addr)
+}
+
+// ListenPingAddr returns an ICMP echo listener bound on addr in the
+// tunnel-side address space. The orchestrator's ICMP bridge (FJB-84)
+// uses this to terminate inbound echo requests before originating
+// outbound on the host network.
+//
+// Returns a wrapped *netstack.PingConn that satisfies
+// internal/transport/wg/icmp.PingConn.
+func (t *Tunnel) ListenPingAddr(addr netip.Addr) (PingConn, error) {
+	t.mu.Lock()
+	closed := t.closed
+	t.mu.Unlock()
+	if closed {
+		return nil, errors.New("wg: tunnel is closed")
+	}
+	return t.tnet.ListenPingAddr(addr)
+}
+
+// PingConn is the narrow interface the orchestrator's ICMP bridge
+// needs (matches the netstack package's *PingConn surface and the
+// icmp package's PingConn alias). The return type is concrete in
+// netstack — *netstack.PingConn — so we don't redeclare it here; this
+// is purely a documentation alias of the methods the bridge calls.
+type PingConn interface {
+	ReadFrom(p []byte) (n int, addr net.Addr, err error)
+	WriteTo(p []byte, addr net.Addr) (n int, err error)
+	Close() error
+	LocalAddr() net.Addr
+}
+
+// DNSListener returns a dns.Listener-compatible adapter over the
+// netstack so the DNS responder can bind UDP+TCP on a tunnel address
+// without depending on the wireguard-go / gvisor netstack symbols.
+//
+// The returned interface delegates ListenPacket("udp", ...) to
+// ListenUDPAddrPort and Listen("tcp", ...) to ListenTCP. Other networks
+// return an error.
+func (t *Tunnel) DNSListener() DNSListener {
+	return &dnsListenerAdapter{tun: t}
+}
+
+// DNSListener is the surface internal/transport/wg/dns.Listener needs.
+// The Tunnel exposes one via DNSListener(); the dns package's
+// Listener interface and this one are structurally compatible.
+type DNSListener interface {
+	ListenPacket(network, address string) (net.PacketConn, error)
+	Listen(network, address string) (net.Listener, error)
+}
+
+type dnsListenerAdapter struct {
+	tun *Tunnel
+}
+
+func (a *dnsListenerAdapter) ListenPacket(network, address string) (net.PacketConn, error) {
+	if network != "udp" && network != "udp4" && network != "udp6" {
+		return nil, fmt.Errorf("wg: DNSListener.ListenPacket: unsupported network %q", network)
+	}
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("wg: DNSListener.ListenPacket: parse %q: %w", address, err)
+	}
+	return a.tun.ListenUDPAddrPort(ap)
+}
+
+func (a *dnsListenerAdapter) Listen(network, address string) (net.Listener, error) {
+	if network != "tcp" && network != "tcp4" && network != "tcp6" {
+		return nil, fmt.Errorf("wg: DNSListener.Listen: unsupported network %q", network)
+	}
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("wg: DNSListener.Listen: parse %q: %w", address, err)
+	}
+	return a.tun.ListenTCP(net.TCPAddrFromAddrPort(ap))
+}
+
 // Close stops the device and releases resources. Idempotent.
 func (t *Tunnel) Close() error {
 	t.mu.Lock()

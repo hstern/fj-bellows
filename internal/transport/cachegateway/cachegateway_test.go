@@ -69,6 +69,8 @@ func TestRenderCacheIPTables_AllowList(t *testing.T) {
 		"iptables -A FJB-FORWARD -s 10.0.0.0/24 -d 100.64.0.1/32 -o wg0 -j ACCEPT",
 		"iptables -A FJB-FORWARD -s 10.0.0.0/24 -d 192.168.0.2/32 -o wg0 -j ACCEPT",
 		"iptables -A FJB-FORWARD -s 10.0.0.0/24 -d 192.168.10.0/24 -o wg0 -j ACCEPT",
+		// FJB-92: orchestrator → worker VPC reverse direction.
+		"iptables -A FJB-FORWARD -s 100.64.0.1/32 -d 10.0.0.0/24 -i wg0 -o eth1 -j ACCEPT",
 		"iptables -A FJB-FORWARD -j DROP",
 	}
 	for _, sub := range wantSubstrings {
@@ -115,6 +117,40 @@ func TestRenderCacheIPTables_EmptyAllowedIPs(t *testing.T) {
 		if !strings.Contains(got, sub) {
 			t.Errorf("missing %q in empty-ACL iptables script:\n%s", sub, got)
 		}
+	}
+}
+
+// FJB-92: the orchestrator → worker VPC reverse rule emits whenever a
+// valid OrchestratorWGAddr is set; the dispatcher's netstack dials worker
+// IPs through wg0 and the cache must forward them onto eth1.
+func TestRenderCacheIPTables_OrchestratorToWorkerReverseRule(t *testing.T) {
+	in := stockInputs()
+	// Drop AllowedIPs so the only direction-bearing line is the new one;
+	// the skeleton (state, DROP) still renders.
+	in.AllowedIPs = nil
+	got, err := RenderCacheIPTables(in)
+	if err != nil {
+		t.Fatalf("RenderCacheIPTables: %v", err)
+	}
+	want := "iptables -A FJB-FORWARD -s 100.64.0.1/32 -d 10.0.0.0/24 -i wg0 -o eth1 -j ACCEPT"
+	if !strings.Contains(got, want) {
+		t.Errorf("missing reverse-direction ACCEPT rule %q in script:\n%s", want, got)
+	}
+}
+
+// FJB-92: when OrchestratorWGAddr is the zero value, the reverse rule is
+// omitted. Callers that don't know the orchestrator overlay address yet
+// (e.g. early bring-up paths or non-default test cases) still get a
+// valid script.
+func TestRenderCacheIPTables_OmitsReverseRuleWhenOrchAddrInvalid(t *testing.T) {
+	in := stockInputs()
+	in.OrchestratorWGAddr = netip.Addr{}
+	got, err := RenderCacheIPTables(in)
+	if err != nil {
+		t.Fatalf("RenderCacheIPTables: %v", err)
+	}
+	if strings.Contains(got, "-i wg0 -o eth1") {
+		t.Errorf("reverse rule should be omitted when OrchestratorWGAddr is invalid:\n%s", got)
 	}
 }
 

@@ -55,8 +55,19 @@ provider in CI.
 ```sh
 echo "$YOUR_LINODE_PAT" > ~/.linode.pat   # see PAT scope below
 chmod 600 ~/.linode.pat
-test/e2e-linode/run-local.sh
+test/e2e-linode/run-local.sh                          # legacy SSH dispatch (default)
+test/e2e-linode/run-local.sh --transport=cache-gateway  # FJB-54 WG path (FJB-91 PoC)
 ```
+
+The `--transport=cache-gateway` path exercises the embedded WireGuard
+stack (FJB-78..FJB-90). It expects a long-lived cache nanode at
+`172.234.203.50` with `wg0` accepting `100.64.0.1/32` as a peer; the
+orchestrator's WG private key must live at
+`~/.config/fj-bellows/wg-private-key` (mode 0600). Worker-side probes
+verify `/etc/resolv.conf` points at the orchestrator's WG overlay
+(`100.64.0.1`) instead of a `/etc/hosts` cache entry. The final log
+line under cache-gateway mode is `ALL OK FJB-91` so a downstream
+artifact-scrape can distinguish the two modes' success signals.
 
 **PAT scope** (managed firewall + VPC + cache, all exercised by every
 run): `Linodes: Read/Write`, `Firewalls: Read/Write`, `VPCs: Read/Write`,

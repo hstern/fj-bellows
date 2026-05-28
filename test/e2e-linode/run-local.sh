@@ -15,6 +15,41 @@
 # destroys any Linodes left tagged fj-bellows-e2e-local-* from prior runs.
 set -euo pipefail
 
+# --transport=ssh|cache-gateway selects which dispatch architecture to
+# exercise. Default ssh keeps the existing CI path unchanged. The
+# cache-gateway path is the FJB-91 verification slice (orchestrator
+# brings up the embedded WireGuard tunnel, worker reaches Forgejo +
+# cache through it). Both paths exercise the same provisioning,
+# Forgejo seeding, and teardown loops — only the transport-specific
+# config + worker-side probes differ.
+TRANSPORT="ssh"
+for arg in "$@"; do
+  case "$arg" in
+    --transport=ssh|--transport=cache-gateway)
+      TRANSPORT="${arg#--transport=}"
+      ;;
+    --transport=*)
+      printf '[e2e ERR] unknown transport: %s (want ssh|cache-gateway)\n' "${arg#--transport=}" >&2
+      exit 2
+      ;;
+    -h|--help)
+      cat <<HELP
+Usage: $0 [--transport=ssh|cache-gateway]
+
+  --transport=ssh           (default) Legacy SSH-on-public-IP dispatch.
+  --transport=cache-gateway WireGuard cache-gateway transport (FJB-54
+                            verification — requires the persistent cache
+                            nanode at 172.234.203.50 to be reachable).
+HELP
+      exit 0
+      ;;
+    *)
+      printf '[e2e ERR] unknown argument: %s\n' "$arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TOKEN_FILE="${LINODE_PAT_FILE:-$HOME/.linode.pat}"
 WORKDIR=$(mktemp -d -t fjb-e2e-XXXXXX)
@@ -25,6 +60,18 @@ CONFIG="$WORKDIR/config.yaml"
 LOG="$WORKDIR/fj-bellows.log"
 PIDF="$WORKDIR/fj-bellows.pid"
 FORGEJO_NAME="fjb-e2e-forgejo-$$"
+
+# Cache-gateway persistent fixtures (FJB-91). The cache nanode is a
+# long-lived peer outside any e2e tag, hosted at Linode 98209737 with
+# the iptables FJB-FORWARD chain pre-installed by FJB-86. The harness
+# only verifies it's reachable; it never provisions or destroys it.
+CACHE_PUBLIC_IP=172.234.203.50
+CACHE_VPC_IP=10.0.0.2
+CACHE_WG_PUBKEY="BDKfn0TW6W15EqpyoYvVgUxktHk/c9t6kcmDoGTIjig="
+CACHE_WG_PORT=51820
+ORCHESTRATOR_WG_PRIVATE_KEY_FILE="${HOME}/.config/fj-bellows/wg-private-key"
+ORCHESTRATOR_WG_ADDR=100.64.0.1
+ORCHESTRATOR_WG_OVERLAY=100.64.0.0/30
 # Random high port for the control plane so concurrent runs (or runs that
 # race with other local services on the default 9876) don't collide.
 CTL_PORT=$((30000 + RANDOM % 30000))
@@ -148,14 +195,14 @@ log "starting Forgejo v15 on 127.0.0.1:3000"
 docker run -d --rm --name "$FORGEJO_NAME" \
   -p 127.0.0.1:3000:3000 \
   -e FORGEJO__security__INSTALL_LOCK=true \
-  -e FORGEJO__server__ROOT_URL=http://localhost:3000/ \
+  -e FORGEJO__server__ROOT_URL=http://127.0.0.1:3000/ \
   -e FORGEJO__database__DB_TYPE=sqlite3 \
   -e FORGEJO__database__PATH=/tmp/forgejo.db \
   -e FORGEJO__actions__ENABLED=true \
   codeberg.org/forgejo/forgejo:15 >/dev/null
 
 log "seeding Forgejo (admin, token, org, repo, workflow with --network host)"
-export FORGEJO_URL=http://localhost:3000
+export FORGEJO_URL=http://127.0.0.1:3000
 export FORGEJO_CONTAINER="$FORGEJO_NAME"
 export FORGEJO_ADMIN_USER=e2eadmin
 export FORGEJO_ADMIN_PASS='e2e-Local-Pass-1!'
@@ -166,9 +213,71 @@ export FORGEJO_LABEL=linode-e2e
 export FORGEJO_WORKFLOW_CONTAINER_OPTS='--network host'
 FORGEJO_TOKEN=$(bash "$REPO_ROOT/test/e2e-docker/seed.sh")
 
+# Cache-gateway preflight: persistent cache must be SSH-reachable
+# (read-only probe) before we burn time provisioning a worker. The
+# orchestrator's WG private key file must exist with 0600 perms so the
+# embedded wireguard-go bind doesn't refuse to start mid-run.
+if [ "$TRANSPORT" = "cache-gateway" ]; then
+  log "preflight: checking persistent cache at $CACHE_PUBLIC_IP (FJB-91)"
+  if ! ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
+         -o UserKnownHostsFile="$KNOWN" \
+         root@"$CACHE_PUBLIC_IP" \
+         'wg show wg0 listen-port' >/dev/null 2>&1; then
+    err "persistent cache $CACHE_PUBLIC_IP is unreachable or wg0 is down"
+    err "(harness assumes the FJB-86 cache nanode is live; bring it up before retrying)"
+    exit 1
+  fi
+  if [ ! -r "$ORCHESTRATOR_WG_PRIVATE_KEY_FILE" ]; then
+    err "missing orchestrator WG private key at $ORCHESTRATOR_WG_PRIVATE_KEY_FILE"
+    err "(create with: wg genkey > $ORCHESTRATOR_WG_PRIVATE_KEY_FILE && chmod 600 $_)"
+    exit 1
+  fi
+  perms=$(stat -f '%Lp' "$ORCHESTRATOR_WG_PRIVATE_KEY_FILE" 2>/dev/null || stat -c '%a' "$ORCHESTRATOR_WG_PRIVATE_KEY_FILE" 2>/dev/null || echo unknown)
+  if [ "$perms" != "600" ]; then
+    err "orchestrator WG private key has mode $perms (want 0600)"
+    exit 1
+  fi
+  log "preflight OK (cache wg0 up, orchestrator key mode 0600)"
+fi
+
+# Cache-gateway-only YAML fragments. Empty under ssh mode so the
+# heredoc renders unchanged from the legacy CI shape.
+TRANSPORT_BLOCK=""
+if [ "$TRANSPORT" = "cache-gateway" ]; then
+  TRANSPORT_BLOCK=$(cat <<TYAML
+transport:
+  mode: cache-gateway
+  # tunnel.routes is required by Transport.validate() even though the
+  # worker route derivation is ACL-driven now; carry the worker VPC
+  # subnet so cache-side iptables rendering has something to feed
+  # FJB-FORWARD. The actual LAN-side reachability is driven by the
+  # ACL list below.
+  tunnel:
+    routes: [10.0.0.0/24]
+    lan_egress: []
+  wg:
+    private_key_file: $ORCHESTRATOR_WG_PRIVATE_KEY_FILE
+    listen_port: $CACHE_WG_PORT
+    local_addr: $ORCHESTRATOR_WG_ADDR/32
+    overlay_prefix: $ORCHESTRATOR_WG_OVERLAY
+    keepalive_interval: 1s
+    peer:
+      public_key: $CACHE_WG_PUBKEY
+      endpoint: $CACHE_PUBLIC_IP:$CACHE_WG_PORT
+      allowed_ips: [100.64.0.2/32, 10.0.0.0/24]
+    # ACL gates what workers may reach across the tunnel. The
+    # orchestrator auto-injects an implicit entry for Forgejo +
+    # 100.64.0.1:53 (DNS responder), so we only list the local
+    # Forgejo here (TCP) for the e2e workflow to clone over.
+    acl:
+      - tcp://127.0.0.1:3000
+TYAML
+)
+fi
+
 cat > "$CONFIG" <<YAML
 forgejo:
-  url: http://localhost:3000
+  url: http://127.0.0.1:3000
   token: $FORGEJO_TOKEN
   scope: orgs/$FORGEJO_ORG
   labels: [$FORGEJO_LABEL]
@@ -200,15 +309,26 @@ provider_config:
     subnets:
       cache:
         ipv4: 10.0.0.0/24
-  # Managed scratch registry (FJB-13). zot listens at
-  # cache.fjb.internal:5000 over the VPC NIC; workers can
-  # docker push/pull cache.fjb.internal:5000/... explicitly. No
-  # transparent redirect of any other hostname, so the e2e's plain
-  # echo job still works without touching zot. Adds Object Storage
-  # R/W to the PAT scope; requires Object Storage enabled on the
-  # account (one-click in the Cloud Manager, flat 5 USD/mo). Cache
-  # VM tag is \$TAG-cache so the worker prefix sweep above also
-  # reaps it; bucket and key sweeps live in destroy_tagged.
+YAML
+
+# Managed scratch registry (FJB-13). zot listens at
+# cache.fjb.internal:5000 over the VPC NIC; workers can
+# docker push/pull cache.fjb.internal:5000/... explicitly. No
+# transparent redirect of any other hostname, so the e2e's plain
+# echo job still works without touching zot. Adds Object Storage
+# R/W to the PAT scope; requires Object Storage enabled on the
+# account (one-click in the Cloud Manager, flat 5 USD/mo). Cache
+# VM tag is \$TAG-cache so the worker prefix sweep above also
+# reaps it; bucket and key sweeps live in destroy_tagged.
+#
+# Under cache-gateway transport (FJB-91), the same `cache:` block
+# stays — fj-bellows still provisions the per-run cache for the
+# registry+CA. The persistent WG endpoint at 172.234.203.50 is a
+# distinct nanode that terminates the orchestrator's WireGuard
+# tunnel; the e2e-provisioned cache holds zot + the CA. The two
+# nanodes coexist in the VPC for this slice; FJB-87 consolidates
+# them onto one host in a follow-up.
+cat >> "$CONFIG" <<YAML
   cache:
     tls:
       ca_dir: $WORKDIR/cache-ca
@@ -227,9 +347,16 @@ poll:
   billing_hour: 60s
   hour_margin: 10s
 YAML
+
+# Cache-gateway mode: append the transport block. SSH mode omits it
+# (default mode = ssh under Transport.applyDefaults).
+if [ -n "$TRANSPORT_BLOCK" ]; then
+  printf '%s\n' "$TRANSPORT_BLOCK" >> "$CONFIG"
+fi
 chmod 600 "$CONFIG"
 
 log "launching fj-bellows (control plane on 127.0.0.1:${CTL_PORT})"
+T_LAUNCH=$(date +%s)
 "$WORKDIR/fj-bellows" \
   -config "$CONFIG" \
   -lock "$WORKDIR/fj-bellows.lock" \
@@ -250,6 +377,54 @@ for i in $(seq 1 30); do
   sleep 1
 done
 [ "$ctl_ready" -eq 1 ] || { err "control plane never came up on :${CTL_PORT}"; exit 1; }
+
+# Cache-gateway-only: confirm the WG tunnel + ACL + DNS responder come
+# up. Each component logs a distinct line that we grep for; on failure
+# we dump the tail of the log so the operator sees what wedged. The
+# upstream order is tunnel → ACL registry → resolver → DNS responder →
+# proxy → UDP → ICMP, so the responder being up is a strict subset of
+# every component succeeding.
+if [ "$TRANSPORT" = "cache-gateway" ]; then
+  log "waiting for cache-gateway transport stack to come up"
+  for sig in 'wg tunnel up' 'dns responder up' 'wgboot: cache-gateway transport up'; do
+    found=0
+    for i in $(seq 1 30); do
+      if grep -q "$sig" "$LOG" 2>/dev/null; then
+        log "  -> '$sig' after ${i}*1s"
+        found=1
+        break
+      fi
+      sleep 1
+    done
+    if [ "$found" -ne 1 ]; then
+      err "cache-gateway: never saw '$sig' in log"
+      err "Last 30 lines:"
+      tail -30 "$LOG" >&2 || true
+      exit 1
+    fi
+  done
+  # Surface the orchestrator's public key for the operator (also in
+  # the log — this is a convenience repeat for the timing summary).
+  ORCH_WG_PUBKEY=$(grep -o 'public_key=[^ ]*' "$LOG" | head -1 | sed 's/public_key=//')
+  log "  orchestrator wg pubkey: ${ORCH_WG_PUBKEY:-<not logged yet>}"
+
+  # FJB-91 PoC scope ends here. The remaining steps (worker provisioning,
+  # SSH-poll, ListWorkers idle gate, GetCache, ProviderInfo, worker-side
+  # cache assertions, job-complete wait) all assume the orchestrator can
+  # actually reach the worker — which today requires the ephemeral cache
+  # and the worker to share a VPC, which in turn requires a "cache wg
+  # bootstrap" loop (create cache → fetch its pubkey → reconfigure wg
+  # peer) that doesn't exist yet. That loop is FJB-94 (fjbagent +
+  # agent.Health) and FJB-97 (orchestrator → target reachability probe);
+  # those tickets will replace the SSH-dispatch path entirely.
+  #
+  # For this PoC, validating that the WG stack comes up cleanly against
+  # a known-good cache peer is the assertion that's load-bearing for
+  # FJB-54 itself. Worker readiness moves with FJB-94.
+  log "FJB-91 PoC scope complete: wgboot stack validated against persistent cache."
+  log "  (worker provisioning + readiness validation deferred to FJB-94/97)"
+  exit 0
+fi
 
 log "polling Linode API for tag=$TAG"
 LIP=""
@@ -323,6 +498,16 @@ if [ "$cache_ok" -ne 1 ]; then
   exit 1
 fi
 
+# Capture timings for the cache-gateway PoC: time from cloud-init done to
+# the worker reaching state=idle. The "state=idle" wait above is the
+# load-bearing signal — by the time it returns, cloud-init's runcmd has
+# touched the readiness sentinel and the orchestrator has SSH-dispatched
+# the job. T0 = orchestrator launch (above), T1 = cache-gateway transport
+# up, T2 = state=idle, T3 = job complete (below). Recorded here for the
+# PR summary block.
+T_LAUNCH=${T_LAUNCH:-$(date +%s)}
+T_IDLE=$(date +%s)
+
 # FJB-31: assert ProviderInfo round-trips for the configured Linode
 # provider and the documented keys are present. Doesn't gate on key
 # values (region/type/etc. are deployment-specific), just that the slug
@@ -355,25 +540,54 @@ log "ProviderInfo OK ($(echo "$pinfo" | jq -r '.info|length') keys)"
 # pins via cloud-init and THAT's the actual security boundary; this
 # is just a read probe.
 log "worker-side cache assertions"
+# Select the probe shape by transport mode. SSH mode looks for the
+# /etc/hosts cache entry; cache-gateway mode looks for the
+# /etc/resolv.conf single-nameserver entry pointing at the
+# orchestrator's WG overlay address. Both modes still require the CA
+# cert to be installed in the system trust store and the FJB-13
+# no-transparent-redirect invariants to hold.
 worker_dump=$(ssh -i "$KEY" -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
   -o ConnectTimeout=5 \
-  root@"$LIP" 'bash -s' <<'PROBE' 2>/dev/null || true
+  root@"$LIP" "PROBE_TRANSPORT=$TRANSPORT bash -s" <<'PROBE' 2>/dev/null || true
 # Heartbeat first — if the harness sees this but not PROBE:OK/FAIL
 # the worker disconnected mid-probe.
 echo "PROBE:STARTED"
 errs=""
 
-# /etc/hosts maps cache.fjb.internal → an RFC1918 IP (fjb default is
-# 10.0.0.0/24 so we expect 10.*).
-host_line=$(grep cache.fjb.internal /etc/hosts || true)
-if [ -z "$host_line" ]; then
-  errs="$errs hosts-entry-missing"
-elif ! echo "$host_line" | grep -qE '10\.'; then
-  errs="$errs hosts-entry-non-rfc1918:$host_line"
-fi
+case "${PROBE_TRANSPORT:-ssh}" in
+  cache-gateway)
+    # FJB-91: /etc/resolv.conf should be exactly one nameserver line
+    # pointing at the orchestrator's WG overlay address (100.64.0.1
+    # per transport.md). No /etc/hosts cache entry under this mode.
+    rc_line=$(grep -E '^nameserver ' /etc/resolv.conf || true)
+    if [ -z "$rc_line" ]; then
+      errs="$errs resolv-conf-no-nameserver"
+    elif ! echo "$rc_line" | grep -qE '^nameserver 100\.64\.0\.1$'; then
+      errs="$errs resolv-conf-unexpected:$(printf '%s' "$rc_line" | tr ' ' '_')"
+    fi
+    # The cache-gateway template explicitly does NOT write a
+    # cache.fjb.internal /etc/hosts entry — if one shows up something
+    # is wrong (a stale template merge, or the legacy SSH extras
+    # leaking into cache-gateway worker user-data).
+    if grep -q cache.fjb.internal /etc/hosts; then
+      errs="$errs unexpected-hosts-entry-under-cache-gateway"
+    fi
+    ;;
+  *)
+    # /etc/hosts maps cache.fjb.internal → an RFC1918 IP (fjb default
+    # is 10.0.0.0/24 so we expect 10.*).
+    host_line=$(grep cache.fjb.internal /etc/hosts || true)
+    if [ -z "$host_line" ]; then
+      errs="$errs hosts-entry-missing"
+    elif ! echo "$host_line" | grep -qE '10\.'; then
+      errs="$errs hosts-entry-non-rfc1918:$host_line"
+    fi
+    ;;
+esac
 
-# fjb CA installed and registered in the system trust store.
+# fjb CA installed and registered in the system trust store. Both
+# transports use the same CA-trust path.
 if [ ! -s /usr/local/share/ca-certificates/fjb-cache.crt ]; then
   errs="$errs ca-cert-missing"
 fi
@@ -442,7 +656,11 @@ if [ "$probe_line" != "PROBE:OK" ]; then
   printf '%s\n' "$worker_dump" | head -40 >&2
   exit 1
 fi
-log "  ✓ /etc/hosts entry, CA trust, pull-only mirror"
+if [ "$TRANSPORT" = "cache-gateway" ]; then
+  log "  ✓ /etc/resolv.conf -> $ORCHESTRATOR_WG_ADDR, CA trust, pull-only mirror"
+else
+  log "  ✓ /etc/hosts entry, CA trust, pull-only mirror"
+fi
 v2_line=$(printf '%s\n' "$worker_dump" | grep '^PROBE:V2:' | head -1 || true)
 case "$v2_line" in
   PROBE:V2:OK)
@@ -504,6 +722,7 @@ if [ "$complete" -ne 1 ]; then
   ctl ListWorkers >&2 || true
   exit 1
 fi
+T_COMPLETE=$(date +%s)
 
 # Now that billing_hour is configurable, the config above uses a 60s cycle with
 # a 10s margin, so the orchestrator destroys an idle worker within ~50s of every
@@ -538,4 +757,23 @@ if [ "$teardown" -ne 1 ]; then
   exit 1
 fi
 
-log "ALL OK"
+# FJB-91 timing summary. Captured for the PoC; printed under both
+# transports so the SSH baseline is comparable to cache-gateway.
+T_END=$(date +%s)
+T_LAUNCH=${T_LAUNCH:-$T_END}
+T_IDLE=${T_IDLE:-$T_END}
+T_COMPLETE=${T_COMPLETE:-$T_END}
+dur_idle=$(( T_IDLE - T_LAUNCH ))
+dur_job=$(( T_COMPLETE - T_IDLE ))
+dur_total=$(( T_END - T_LAUNCH ))
+log "----- timing summary (transport=$TRANSPORT) -----"
+log "  fj-bellows launch -> worker idle  : ${dur_idle}s"
+log "  worker idle       -> job complete : ${dur_job}s"
+log "  fj-bellows launch -> teardown done: ${dur_total}s"
+log "------------------------------------------------"
+
+if [ "$TRANSPORT" = "cache-gateway" ]; then
+  log "ALL OK FJB-91"
+else
+  log "ALL OK"
+fi
