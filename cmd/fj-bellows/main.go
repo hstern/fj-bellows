@@ -119,31 +119,16 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 
 	// SSH key is required only for providers that dispatch over SSH. A docker
 	// deployment passes nothing into cloud-init and execs into containers.
-	var (
-		signer  ssh.Signer
-		authKey string
-	)
-	if cfg.Provider != config.ProviderDocker {
-		signer, authKey, err = loadSSHKey(cfg.SSH.PrivateKeyFile)
-		if err != nil {
-			return err
-		}
+	signer, authKey, err := loadSSHKeyForProvider(cfg)
+	if err != nil {
+		return err
 	}
 
 	prov, err := provider.New(cfg.Provider)
 	if err != nil {
 		return err
 	}
-	// Hand the Linode provider the orchestrator's SSH public key so
-	// the managed cache VM (if `cache:` is set) accepts ssh from the
-	// operator for debugging. No tunnel; this is inbound-only debug
-	// access. No-op for non-Linode providers.
-	if l, ok := prov.(*linodeprov.Linode); ok && authKey != "" {
-		// ssh.MarshalAuthorizedKey appends a trailing newline; Linode's
-		// authorized_keys API rejects multi-line values with a 400.
-		// The worker Provision path already does this trim on spec.AuthorizedKey.
-		l.SetSSHAuthorizedKey(strings.TrimSpace(authKey))
-	}
+	applyAuthorizedKeyToLinodeProvider(prov, authKey)
 	// Propagate transport mode into the Linode provider so its managed
 	// firewall synthesizes the right ACCEPT rules (tcp/22 for legacy SSH,
 	// IPsec ports for cache-gateway). Duck-typed so providers that don't
@@ -834,4 +819,35 @@ func buildOrchestratorConfig(cfg *config.Config, opts runOpts, buildVersion, aut
 		DrainTimeout:    opts.drainTimeout,
 		DestroyOnExit:   opts.destroyOnExit,
 	}, nil
+}
+
+// applyAuthorizedKeyToLinodeProvider hands the operator's SSH authorized-key
+// line to the Linode provider so the managed cache VM accepts ssh debug
+// access. No-op for non-Linode providers, no-op when authKey is empty
+// (docker-only deployments). Extracted to keep run()'s cyclomatic
+// complexity under the gocyclo budget after the FJB-94 Phase B token-load
+// branch landed.
+func applyAuthorizedKeyToLinodeProvider(prov provider.Provider, authKey string) {
+	if authKey == "" {
+		return
+	}
+	l, ok := prov.(*linodeprov.Linode)
+	if !ok {
+		return
+	}
+	// ssh.MarshalAuthorizedKey appends a trailing newline; Linode's
+	// authorized_keys API rejects multi-line values with a 400. The
+	// worker Provision path already does this trim on spec.AuthorizedKey.
+	l.SetSSHAuthorizedKey(strings.TrimSpace(authKey))
+}
+
+// loadSSHKeyForProvider loads the SSH key only for providers that dispatch
+// over SSH; docker dispatches via container exec and needs nothing. Empty
+// returns are safe for both signer and authKey on the docker path. Extracted
+// to keep run() under the gocyclo budget after FJB-94 Phase B.
+func loadSSHKeyForProvider(cfg *config.Config) (ssh.Signer, string, error) {
+	if cfg.Provider == config.ProviderDocker {
+		return nil, "", nil
+	}
+	return loadSSHKey(cfg.SSH.PrivateKeyFile)
 }
