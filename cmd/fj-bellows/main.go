@@ -550,9 +550,11 @@ func bootWGStack(ctx context.Context, cfg *config.Config, prov provider.Provider
 // transport.wg.peer.{public_key,endpoint} config knobs and errors at
 // boot if those are also empty.
 //
-// Bounded at 3 minutes — the cache cloud-init steady-state (package
-// install + wireguard + pubkey upload) typically completes well under
-// 2 minutes, so the bound is generous but not unbounded.
+// Bounded at 8 minutes — cache cloud-init's apt update + wireguard +
+// awscli install dominates the time-to-pubkey, and on a cold Linode
+// (no package cache, slow mirror) it can stretch past 5 min; the
+// bound is generous so we don't fail a healthy bootstrap on a slow
+// mirror day.
 func discoverCachePeer(ctx context.Context, prov provider.Provider, log *slog.Logger) (pubkey, endpoint string) {
 	type pubkeyWaiter interface {
 		WaitForCacheWGPubkey(ctx context.Context, timeout time.Duration) (string, error)
@@ -562,7 +564,7 @@ func discoverCachePeer(ctx context.Context, prov provider.Provider, log *slog.Lo
 	}
 	if pw, ok := prov.(pubkeyWaiter); ok {
 		start := time.Now()
-		if pk, err := pw.WaitForCacheWGPubkey(ctx, 3*time.Minute); err == nil {
+		if pk, err := pw.WaitForCacheWGPubkey(ctx, 8*time.Minute); err == nil {
 			log.Info("wgboot: cache wg-pubkey discovered", "elapsed", time.Since(start))
 			pubkey = pk
 		} else {

@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -518,12 +517,15 @@ func TestRenderCacheCloudInitIPTablesBakeIn(t *testing.T) {
 }
 
 // FJB-99 Phase A: when OrchestratorWGPubkey is set, the rendered
-// cloud-init installs wireguard + awscli, embeds the wg-bootstrap
-// script with the orchestrator pubkey baked into [Peer].PublicKey,
-// and runs the script from runcmd. When empty (ssh-mode), none of
-// those entries leak in.
+// cloud-init installs wireguard, embeds the wg-bootstrap script
+// with the orchestrator pubkey baked into [Peer].PublicKey, and
+// runs the script from runcmd. The bootstrap script curls a
+// pre-signed S3 PUT URL (FJB-99 Phase C — sidesteps awscli's
+// NoneType bug against Linode Object Storage). When empty
+// (ssh-mode), none of those entries leak in.
 func TestRenderCacheCloudInitWGBootstrap(t *testing.T) {
 	const orchPubkey = "ZmFrZS1vcmNoZXN0cmF0b3ItcHViLWtleS0xMjM0NTY3OD0="
+	const fakePresigned = "https://us-ord-10.linodeobjects.com/fjb-cache-test/wg-pubkey.txt?X-Amz-Signature=deadbeef"
 	withWG, err := renderCacheCloudInit(cacheCloudInitParams{
 		Bucket:               testFJBCacheLabel,
 		Region:               testBucketRegion,
@@ -537,13 +539,13 @@ func TestRenderCacheCloudInitWGBootstrap(t *testing.T) {
 		OrchestratorWGAddr:   "100.64.0.1",
 		CacheWGAddr:          "100.64.0.2",
 		WGListenPort:         51820,
+		WGPubkeyPutURL:       fakePresigned,
 	})
 	if err != nil {
 		t.Fatalf("render with WG: %v", err)
 	}
 	for _, want := range []string{
 		"- wireguard",
-		"- awscli",
 		"/usr/local/sbin/fjb-wg-bootstrap.sh",
 		"wg genkey",
 		"Address = 100.64.0.2/32",
@@ -552,11 +554,23 @@ func TestRenderCacheCloudInitWGBootstrap(t *testing.T) {
 		"AllowedIPs = 100.64.0.1/32",
 		"PersistentKeepalive = 25",
 		"systemctl enable --now wg-quick@wg0",
-		"s3://" + testFJBCacheLabel + "/wg-pubkey.txt",
-		"--endpoint-url 'https://us-ord-1.linodeobjects.com'",
+		"--upload-file /etc/wireguard/publickey",
+		fakePresigned,
 	} {
 		if !strings.Contains(withWG, want) {
 			t.Errorf("WG render missing %q\n---\n%s", want, withWG)
+		}
+	}
+	// Anti-regression: no `aws` invocation should remain in the script
+	// (a `# awscli` comment explaining why we avoid it is fine — we
+	// just want to be sure no actual `aws ...` shell command leaked).
+	for _, bad := range []string{
+		"\n      aws ",
+		"\n  aws ",
+		"`aws ",
+	} {
+		if strings.Contains(withWG, bad) {
+			t.Errorf("WG render still invokes awscli (substring %q) — Phase C should be presigned-curl only\n---\n%s", bad, withWG)
 		}
 	}
 
@@ -622,29 +636,66 @@ func TestRenderIPTablesForCacheGateway(t *testing.T) {
 	}
 }
 
-// FJB-99 Phase B: WaitForWGPubkey polls the bucket URL until the
-// cache's first-boot cloud-init has uploaded the public key, then
-// returns its trimmed contents.
-func TestWaitForWGPubkey_PollsBucketUntilFound(t *testing.T) {
-	var hits atomic.Int32
-	const wantPub = "ZmFrZS1jYWNoZS13Zy1wdWJrZXk="
+// fakeS3 returns an httptest server that emulates S3's GetObject
+// shape for the bucket+key the test cares about. Doesn't verify the
+// AWS sigv4 signature — minio-go signs but server-side validation
+// would just add ceremony without testing the production path.
+type fakeS3State struct {
+	mu      sync.Mutex
+	hits    int
+	objects map[string][]byte
+}
+
+func newFakeS3(t *testing.T) (*httptest.Server, *fakeS3State) {
+	t.Helper()
+	state := &fakeS3State{objects: map[string][]byte{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/"+testFJBCacheLabel+"/wg-pubkey.txt" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		n := hits.Add(1)
-		if n < 2 {
+		state.mu.Lock()
+		state.hits++
+		body, ok := state.objects[r.URL.Path]
+		state.mu.Unlock()
+		if !ok {
+			// S3 NoSuchKey response shape so minio.ToErrorResponse can
+			// classify it as "object missing".
+			w.Header().Set("Content-Type", "application/xml")
 			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchKey</Code></Error>`))
 			return
 		}
-		// Trailing whitespace must be trimmed by the caller.
-		_, _ = w.Write([]byte(wantPub + "\n"))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+		_, _ = w.Write(body)
 	}))
 	t.Cleanup(srv.Close)
+	return srv, state
+}
 
-	bucket := &managedBucket{endpoint: srv.URL, label: testFJBCacheLabel}
-	m := &managedCache{bucket: bucket, log: slog.Default()}
+func bucketWithEndpoint(srvURL, label string) *managedBucket {
+	return &managedBucket{
+		endpoint:  srvURL,
+		label:     label,
+		accessKey: "test-access-key",
+		secretKey: "test-secret-key",
+		region:    testBucketRegion,
+	}
+}
 
+// FJB-99 Phase B + Phase C: WaitForWGPubkey signs an S3 GET via
+// minio-go, polls until the object appears, and returns its
+// trimmed contents.
+func TestWaitForWGPubkey_PollsBucketUntilFound(t *testing.T) {
+	const wantPub = "ZmFrZS1jYWNoZS13Zy1wdWJrZXk="
+	srv, state := newFakeS3(t)
+	go func() {
+		// Land the object after the first miss so the poller has to
+		// retry at least once.
+		time.Sleep(150 * time.Millisecond)
+		state.mu.Lock()
+		state.objects["/"+testFJBCacheLabel+"/wg-pubkey.txt"] = []byte(wantPub + "\n")
+		state.mu.Unlock()
+	}()
+
+	m := &managedCache{bucket: bucketWithEndpoint(srv.URL, testFJBCacheLabel), log: slog.Default()}
 	got, err := m.WaitForWGPubkey(t.Context(), 30*time.Second)
 	if err != nil {
 		t.Fatalf("WaitForWGPubkey: %v", err)
@@ -652,20 +703,18 @@ func TestWaitForWGPubkey_PollsBucketUntilFound(t *testing.T) {
 	if got != wantPub {
 		t.Errorf("pubkey = %q, want %q", got, wantPub)
 	}
-	if hits.Load() < 2 {
-		t.Errorf("expected at least 2 polls, got %d", hits.Load())
+	state.mu.Lock()
+	hits := state.hits
+	state.mu.Unlock()
+	if hits < 2 {
+		t.Errorf("expected at least 2 GetObject calls, got %d", hits)
 	}
 }
 
 // FJB-99 Phase B: WaitForWGPubkey honors the timeout argument.
 func TestWaitForWGPubkey_TimeoutSurfacesAsError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(srv.Close)
-	bucket := &managedBucket{endpoint: srv.URL, label: testFJBCacheLabel}
-	m := &managedCache{bucket: bucket, log: slog.Default()}
-
+	srv, _ := newFakeS3(t)
+	m := &managedCache{bucket: bucketWithEndpoint(srv.URL, testFJBCacheLabel), log: slog.Default()}
 	_, err := m.WaitForWGPubkey(t.Context(), 50*time.Millisecond)
 	if err == nil {
 		t.Fatal("WaitForWGPubkey: want timeout error; got nil")

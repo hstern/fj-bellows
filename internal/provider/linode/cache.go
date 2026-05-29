@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,6 +20,8 @@ import (
 	"time"
 
 	"github.com/linode/linodego"
+	minio "github.com/minio/minio-go/v7"
+	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/hstern/fj-bellows/internal/transport/cachegateway"
 )
@@ -410,6 +413,20 @@ func (m *managedCache) createFreshCacheLinode(ctx context.Context, pair cacheCer
 		params.OrchestratorWGAddr = defaultOrchestratorWGAddr
 		params.CacheWGAddr = defaultCacheWGAddr
 		params.WGListenPort = defaultCacheWGListenPort
+		// FJB-99 Phase C — generate a pre-signed PUT URL that the
+		// cache cloud-init curls to publish its WG pubkey. awscli on
+		// Debian 13 has a NoneType-iteration bug when hitting Linode
+		// Object Storage that breaks both `s3 cp` and `s3api put-
+		// object`; sidestepping awscli entirely by pre-signing here
+		// and having the cache just curl it is the cleanest dodge.
+		// 24h expiry covers any plausible cloud-init delay; the URL
+		// is one-shot in practice (the cache only uploads once on
+		// first boot).
+		signedURL, perr := m.presignedWGPubkeyPutURL(24 * time.Hour)
+		if perr != nil {
+			return fmt.Errorf("presign wg-pubkey PUT: %w", perr)
+		}
+		params.WGPubkeyPutURL = signedURL
 	}
 	userData, err := renderCacheCloudInit(params)
 	if err != nil {
@@ -461,40 +478,35 @@ func (m *managedCache) renderIPTablesForCacheGateway() (string, error) {
 // published its WG public key to the Object Storage bucket, or until
 // ctx is canceled / timeout elapses (whichever comes first). Returns
 // the trimmed public-key string ready to feed into wgboot.Config.
-// FJB-99 Phase B — completes the bootstrap loop that Phase A started
-// from the cache side.
+// FJB-99 Phase B + Phase C fix.
 //
-// The cache writes the object as `wg-pubkey.txt` with `--acl
-// public-read`, so the orchestrator reaches it via plain HTTPS GET —
-// no S3 SDK required, no signed requests. WG public keys are designed
-// to be world-readable; the threat model isn't worse than what's
-// already on the wire during a key exchange.
+// Uses minio-go for a signed S3 GET because Linode Object Storage
+// rejects per-object public-read ACLs (the initial plain-HTTPS path
+// errored with `x-amz-acl NotImplemented` and the cache upload
+// never landed). The orchestrator signs with the same scoped bucket
+// creds the cache already has from cloud-init.
 //
 // Polls at 5s intervals with exponential backoff up to 30s. First
-// boot typically takes 60-120s (cloud-init + package install +
-// wireguard install).
+// boot typically takes 60-120s on a warm Debian mirror; 4-6 min on
+// a cold one (apt update + wireguard + awscli install).
 func (m *managedCache) WaitForWGPubkey(ctx context.Context, timeout time.Duration) (string, error) {
-	if m.bucket == nil {
-		return "", errors.New("cache: bucket not initialised (no managed cache)")
+	mc, err := m.buildS3Client()
+	if err != nil {
+		return "", err
 	}
-	if m.bucket.endpoint == "" {
-		return "", errors.New("cache: bucket endpoint unset (call Configure first)")
-	}
-	url := fmt.Sprintf("%s/%s/wg-pubkey.txt", strings.TrimRight(m.bucket.endpoint, "/"), m.bucket.label)
 	deadline := time.Now().Add(timeout)
 	delay := 5 * time.Second
 	const maxDelay = 30 * time.Second
-	httpClient := &http.Client{Timeout: 10 * time.Second}
 	for {
-		pub, ready, err := pollWGPubkey(ctx, httpClient, url, m.log)
-		if err != nil {
-			return "", err
+		pub, ready, perr := pollWGPubkey(ctx, mc, m.bucket.label, m.log)
+		if perr != nil {
+			return "", perr
 		}
 		if ready {
 			return pub, nil
 		}
 		if time.Now().Add(delay).After(deadline) {
-			return "", fmt.Errorf("cache wg-pubkey poll: timed out after %s waiting for %s", timeout, url)
+			return "", fmt.Errorf("cache wg-pubkey poll: timed out after %s waiting for s3://%s/wg-pubkey.txt", timeout, m.bucket.label)
 		}
 		select {
 		case <-ctx.Done():
@@ -510,33 +522,89 @@ func (m *managedCache) WaitForWGPubkey(ctx context.Context, timeout time.Duratio
 	}
 }
 
-// pollWGPubkey does one HTTPS GET against the bucket URL. Returns
-// (key, true, nil) on 200-with-non-empty-body; (_, false, nil) when the
-// object isn't there yet (404 / connection error — debug-logged for
-// the operator); (_, _, err) when the response is structurally bad
-// (200 with empty body, read failure, request build failure).
-func pollWGPubkey(ctx context.Context, httpClient *http.Client, url string, log *slog.Logger) (string, bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// presignedWGPubkeyPutURL returns a pre-signed S3 PUT URL the cache
+// cloud-init curls to publish its WG pubkey, dodging awscli's
+// "argument of type 'NoneType' is not iterable" bug against Linode
+// Object Storage (see comment in createFreshCacheLinode).
+func (m *managedCache) presignedWGPubkeyPutURL(expires time.Duration) (string, error) {
+	mc, err := m.buildS3Client()
 	if err != nil {
-		return "", false, fmt.Errorf("cache wg-pubkey poll: build request: %w", err)
+		return "", err
 	}
-	resp, err := httpClient.Do(req)
+	u, err := mc.PresignedPutObject(context.Background(), m.bucket.label, "wg-pubkey.txt", expires)
 	if err != nil {
-		log.Debug("cache wg-pubkey poll: request error", "url", url, "err", err)
+		return "", fmt.Errorf("presign PUT: %w", err)
+	}
+	return u.String(), nil
+}
+
+// buildS3Client constructs the minio client used by WaitForWGPubkey
+// after validating that managedBucket has been Configured. Extracted
+// to keep WaitForWGPubkey under the gocyclo budget — the validations
+// + Endpoint parse + minio.New chain pushed it over.
+func (m *managedCache) buildS3Client() (*minio.Client, error) {
+	if m.bucket == nil {
+		return nil, errors.New("cache: bucket not initialised (no managed cache)")
+	}
+	if m.bucket.endpoint == "" {
+		return nil, errors.New("cache: bucket endpoint unset (call Configure first)")
+	}
+	if m.bucket.accessKey == "" || m.bucket.secretKey == "" {
+		return nil, errors.New("cache: bucket credentials unset (call Configure first)")
+	}
+	endpointHost, useSSL, err := parseS3Endpoint(m.bucket.endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("cache wg-pubkey poll: parse endpoint: %w", err)
+	}
+	mc, err := minio.New(endpointHost, &minio.Options{
+		Creds:  miniocreds.NewStaticV4(m.bucket.accessKey, m.bucket.secretKey, ""),
+		Secure: useSSL,
+		Region: m.bucket.region,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cache wg-pubkey poll: minio client: %w", err)
+	}
+	return mc, nil
+}
+
+// parseS3Endpoint splits "https://us-ord-10.linodeobjects.com" into
+// (host, useSSL). minio-go wants the host bare and the scheme as a
+// separate flag.
+func parseS3Endpoint(raw string) (string, bool, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", false, err
+	}
+	if u.Host == "" {
+		return "", false, fmt.Errorf("endpoint %q has no host", raw)
+	}
+	return u.Host, u.Scheme == "https", nil
+}
+
+// pollWGPubkey does one signed S3 GET for wg-pubkey.txt. Returns
+// (key, true, nil) on hit; (_, false, nil) when the object isn't
+// there yet (NoSuchKey / 404 — debug-logged for the operator); (_,
+// _, err) when the response is structurally bad (read failure,
+// empty body).
+func pollWGPubkey(ctx context.Context, mc *minio.Client, bucket string, log *slog.Logger) (string, bool, error) {
+	obj, err := mc.GetObject(ctx, bucket, "wg-pubkey.txt", minio.GetObjectOptions{})
+	if err != nil {
+		log.Debug("cache wg-pubkey poll: GetObject error", "err", err)
 		return "", false, nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		log.Debug("cache wg-pubkey poll: not ready", "url", url, "status", resp.StatusCode)
-		return "", false, nil
-	}
-	body, rerr := io.ReadAll(resp.Body)
+	defer func() { _ = obj.Close() }()
+	body, rerr := io.ReadAll(obj)
 	if rerr != nil {
-		return "", false, fmt.Errorf("cache wg-pubkey poll: read body: %w", rerr)
+		errResp := minio.ToErrorResponse(rerr)
+		if errResp.Code == "NoSuchKey" || errResp.StatusCode == http.StatusNotFound {
+			log.Debug("cache wg-pubkey poll: not ready yet", "bucket", bucket)
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("cache wg-pubkey poll: read object: %w", rerr)
 	}
 	pub := strings.TrimSpace(string(body))
 	if pub == "" {
-		return "", false, errors.New("cache wg-pubkey poll: 200 OK but body was empty")
+		return "", false, errors.New("cache wg-pubkey poll: object present but body was empty")
 	}
 	return pub, true, nil
 }
@@ -777,6 +845,13 @@ type cacheCloudInitParams struct {
 	OrchestratorWGAddr   string // e.g. "100.64.0.1"
 	CacheWGAddr          string // e.g. "100.64.0.2"
 	WGListenPort         int    // UDP, e.g. 51820
+
+	// WGPubkeyPutURL is the pre-signed S3 PUT URL the cache's bootstrap
+	// script curls to upload its wg-pubkey.txt to the deployment
+	// bucket (FJB-99 Phase C). Pre-signing the URL on the orchestrator
+	// (instead of having the cache call awscli) avoids awscli's
+	// known NoneType-iteration bug against Linode Object Storage.
+	WGPubkeyPutURL string
 }
 
 // renderCacheCloudInit fills the embedded template. Defaults to the

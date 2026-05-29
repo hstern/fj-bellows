@@ -536,10 +536,18 @@ const defaultWGListenPort = 51820
 // synthSpecsForTransport returns the list of (proto, ports) tuples each
 // allow_inbound CIDR should ACCEPT, given the active transport mode and
 // the configured WG listen port. Empty / "ssh" (legacy default) keeps
-// tcp/22; "cache-gateway" (FJB-89) returns a single udp/<wgListenPort>
-// rule so the cache nanode's WireGuard listener can receive the tunnel
-// from the orchestrator's NAT egress. wgListenPort == 0 falls back to
-// defaultWGListenPort (51820).
+// tcp/22 only; "cache-gateway" emits BOTH udp/<wgListenPort> (the
+// WireGuard listener that's load-bearing for the cache-gateway data
+// path) and tcp/22 (the operator break-glass for first-boot debugging
+// when the WG tunnel hasn't come up yet — once wgboot is healthy
+// operators can lock down tcp/22 via allow_inbound). wgListenPort == 0
+// falls back to defaultWGListenPort (51820).
+//
+// Note: an earlier FJB-89 revision dropped tcp/22 entirely under
+// cache-gateway. That made the FJB-99 bootstrap-loop failures
+// undebuggable — the orchestrator couldn't reach the cache via WG
+// because of the very bug it was trying to surface, and tcp/22 was
+// closed too. The tcp/22 entry is restored as a debug breakglass.
 func synthSpecsForTransport(mode string, wgListenPort int) []synthInboundSpec {
 	switch mode {
 	case transportCacheGateway:
@@ -555,6 +563,7 @@ func synthSpecsForTransport(mode string, wgListenPort int) []synthInboundSpec {
 				labelTag: "wg",
 				descNote: "udp/" + portStr + " (WireGuard) from allow_inbound",
 			},
+			{proto: linodego.TCP, ports: "22", labelTag: "ssh", descNote: "tcp/22 (debug breakglass) from allow_inbound"},
 		}
 	default: // transportSSH, transportSSHExplicit, or any unrecognised mode
 		return []synthInboundSpec{

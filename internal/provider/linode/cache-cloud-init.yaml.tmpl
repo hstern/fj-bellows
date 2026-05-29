@@ -23,7 +23,6 @@ packages:
 {{- end}}
 {{- if .OrchestratorWGPubkey}}
   - wireguard
-  - awscli
 {{- end}}
 write_files:
   - path: /etc/zot/config.json
@@ -83,7 +82,12 @@ write_files:
       # boots reuse the persisted private key. wg0.conf is always
       # rewritten so a config bump (peer pubkey rotation, port change)
       # takes effect on reboot without operator intervention.
-      set -euo pipefail
+      #
+      # Logs go to /var/log/fjb-wg-bootstrap.log — read via Lish or
+      # cat to debug a failed bootstrap post-mortem.
+      exec >>/var/log/fjb-wg-bootstrap.log 2>&1
+      echo "=== fjb-wg-bootstrap.sh starting at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      set -euxo pipefail
       umask 0077
       install -d -m 0700 /etc/wireguard
       if [ ! -s /etc/wireguard/privatekey ]; then
@@ -105,17 +109,21 @@ write_files:
       EOC
       chmod 0600 /etc/wireguard/wg0.conf
       systemctl enable --now wg-quick@wg0
-      # Publish own pubkey so the orchestrator can read it via plain
-      # HTTPS GET and complete the wg peer config on its side (FJB-99
-      # Phase B). WG public keys are designed to be world-readable —
-      # exposing one over public-read costs nothing.
-      AWS_ACCESS_KEY_ID='{{.AccessKey}}' \
-      AWS_SECRET_ACCESS_KEY='{{.SecretKey}}' \
-      AWS_DEFAULT_REGION='{{.Region}}' \
-        aws --endpoint-url '{{.Endpoint}}' \
-            s3 cp /etc/wireguard/publickey \
-                  s3://{{.Bucket}}/wg-pubkey.txt \
-            --acl public-read
+      # Publish own pubkey via a pre-signed S3 PUT URL the orchestrator
+      # baked into cloud-init at create time. No awscli on the cache:
+      # awscli on Debian 13 has a NoneType-iteration bug hitting Linode
+      # Object Storage that breaks both `s3 cp` and `s3api put-object`,
+      # so we sidestep it entirely by pre-signing on the orchestrator
+      # (minio-go) and having the cache just curl the URL. The
+      # orchestrator's GET path (also minio-go) reads it back.
+      # --fail-with-body so a 4xx/5xx response prints the XML error
+      # body to the bootstrap log instead of silently failing. -sS
+      # silences the progress bar but keeps the error path printable.
+      curl --fail-with-body -sS \
+           --upload-file /etc/wireguard/publickey \
+           '{{.WGPubkeyPutURL}}' \
+        || { echo "FATAL: curl PUT failed (exit=$?)"; exit 1; }
+      echo "wg-pubkey upload OK"
 {{- end}}
   - path: /etc/systemd/system/zot.service
     permissions: '0644'

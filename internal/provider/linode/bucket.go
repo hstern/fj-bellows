@@ -53,6 +53,13 @@ type managedBucket struct {
 	// endpoint is the S3 endpoint URL for the bucket's region, looked up
 	// once at ensureAtConfigure.
 	endpoint string
+
+	// accessKey + secretKey are the scoped Object Storage credentials
+	// minted at ensureAtConfigure. Stored so the orchestrator can sign
+	// S3 GETs against the bucket for the FJB-99 wg-pubkey discovery
+	// loop. Cleared on maybeCleanup.
+	accessKey string
+	secretKey string
 }
 
 func newManagedBucket(tag, region, label string, client bucketClient, log *slog.Logger) *managedBucket {
@@ -114,6 +121,8 @@ func (m *managedBucket) ensureAtConfigure(ctx context.Context) (bucketCreds, err
 		return bucketCreds{}, fmt.Errorf("create scoped object storage key: %w", err)
 	}
 	m.keyID = created.ID
+	m.accessKey = created.AccessKey
+	m.secretKey = created.SecretKey
 
 	return bucketCreds{
 		Bucket:    m.label,

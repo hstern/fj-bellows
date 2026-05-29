@@ -56,19 +56,22 @@ func TestSynthSpecsForTransport(t *testing.T) {
 			wantPorts:  []string{"22"},
 		},
 		{
+			// FJB-99 Phase C — cache-gateway emits udp/<wg> + tcp/22.
+			// tcp/22 stays open as the operator debug break-glass; the
+			// WG tunnel remains the load-bearing access path.
 			name:       "cache-gateway default WG port",
 			mode:       transportCacheGateway,
-			wantCount:  1,
-			wantProtos: []linodego.NetworkProtocol{linodego.UDP},
-			wantPorts:  []string{"51820"},
+			wantCount:  2,
+			wantProtos: []linodego.NetworkProtocol{linodego.UDP, linodego.TCP},
+			wantPorts:  []string{"51820", "22"},
 		},
 		{
 			name:         "cache-gateway custom WG port",
 			mode:         transportCacheGateway,
 			wgListenPort: 51821,
-			wantCount:    1,
-			wantProtos:   []linodego.NetworkProtocol{linodego.UDP},
-			wantPorts:    []string{"51821"},
+			wantCount:    2,
+			wantProtos:   []linodego.NetworkProtocol{linodego.UDP, linodego.TCP},
+			wantPorts:    []string{"51821", "22"},
 		},
 		{
 			// Unrecognised mode falls back to SSH behaviour for safety.
@@ -96,8 +99,8 @@ func TestSynthSpecsForTransport(t *testing.T) {
 }
 
 // TestBuildRuleSetCacheGatewayWG verifies the cache-gateway transport
-// synthesizes a single ACCEPT rule per address family for udp/<wg listen
-// port> (FJB-89), replacing the IPsec port set that lived here before.
+// synthesizes ACCEPT rules per address family for udp/<wg listen port>
+// (FJB-89) AND tcp/22 (FJB-99 Phase C debug break-glass).
 //
 //nolint:gocyclo // exhaustive single-site assertion of proto/ports/family + leftover-IPsec absence checks.
 func TestBuildRuleSetCacheGatewayWG(t *testing.T) {
@@ -106,33 +109,29 @@ func TestBuildRuleSetCacheGatewayWG(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildRuleSet: %v", err)
 	}
-	// 1 spec × (1 v4 chunk + 1 v6 chunk) = 2 inbound rules.
-	if len(rs.Inbound) != 2 {
-		t.Fatalf("len(Inbound) = %d, want 2 (1 WG spec × 2 families)", len(rs.Inbound))
+	// 2 specs (WG + ssh-debug) × (1 v4 chunk + 1 v6 chunk) = 4 inbound rules.
+	if len(rs.Inbound) != 4 {
+		t.Fatalf("len(Inbound) = %d, want 4 (2 specs × 2 families)", len(rs.Inbound))
 	}
-	var v4Total, v6Total int
+	var wgSeen, sshSeen int
 	for _, r := range rs.Inbound {
 		if r.Action != fwActionAccept {
 			t.Errorf("rule %q: action=%q, want ACCEPT", r.Label, r.Action)
 		}
-		if r.Protocol != linodego.UDP {
-			t.Errorf("rule %q: proto=%s, want UDP", r.Label, r.Protocol)
+		switch {
+		case r.Protocol == linodego.UDP && r.Ports == "51820":
+			wgSeen++
+		case r.Protocol == linodego.TCP && r.Ports == "22":
+			sshSeen++
+		default:
+			t.Errorf("unexpected rule %q: proto=%s, ports=%q", r.Label, r.Protocol, r.Ports)
 		}
-		if r.Ports != "51820" {
-			t.Errorf("rule %q: ports=%q, want %q", r.Label, r.Ports, "51820")
-		}
-		v4Total += len(*r.Addresses.IPv4)
-		v6Total += len(*r.Addresses.IPv6)
 	}
-	if v4Total != 1 || v6Total != 1 {
-		t.Errorf("address bucketing: v4=%d v6=%d, want 1 + 1", v4Total, v6Total)
+	if wgSeen != 2 || sshSeen != 2 {
+		t.Errorf("rule counts: wg=%d ssh=%d, want 2 each (1 v4 + 1 v6)", wgSeen, sshSeen)
 	}
-	// No tcp/22 rule should exist in cache-gateway mode.
-	// Likewise no leftover IPsec (udp/500, udp/4500, ESP) rules.
+	// No leftover IPsec (udp/500, udp/4500, ESP) rules.
 	for _, r := range rs.Inbound {
-		if r.Protocol == linodego.TCP && r.Ports == "22" {
-			t.Errorf("found legacy tcp/22 rule under cache-gateway: %+v", r)
-		}
 		if r.Protocol == linodego.UDP && (r.Ports == "500" || r.Ports == "4500") {
 			t.Errorf("found stale IPsec rule under cache-gateway: %+v", r)
 		}
@@ -148,6 +147,8 @@ func TestBuildRuleSetCacheGatewayWG(t *testing.T) {
 
 // TestBuildRuleSetCacheGatewayCustomWGPort verifies the WG listen port
 // is plumbed through synthSpecsForTransport into the rendered ruleset.
+// Now also asserts the tcp/22 debug break-glass (FJB-99 Phase C) is
+// present alongside the custom WG port.
 func TestBuildRuleSetCacheGatewayCustomWGPort(t *testing.T) {
 	const customPort = 51821
 	fw := testFirewallWithTransportAndPort(firewallConfig{}, transportCacheGateway, customPort)
@@ -155,12 +156,20 @@ func TestBuildRuleSetCacheGatewayCustomWGPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildRuleSet: %v", err)
 	}
-	if len(rs.Inbound) != 1 {
-		t.Fatalf("len(Inbound) = %d, want 1", len(rs.Inbound))
+	if len(rs.Inbound) != 2 {
+		t.Fatalf("len(Inbound) = %d, want 2 (WG + ssh-debug)", len(rs.Inbound))
 	}
-	r := rs.Inbound[0]
-	if r.Protocol != linodego.UDP || r.Ports != "51821" {
-		t.Errorf("rule = (%s, %q), want (UDP, %q)", r.Protocol, r.Ports, "51821")
+	var wgSeen, sshSeen bool
+	for _, r := range rs.Inbound {
+		switch {
+		case r.Protocol == linodego.UDP && r.Ports == "51821":
+			wgSeen = true
+		case r.Protocol == linodego.TCP && r.Ports == "22":
+			sshSeen = true
+		}
+	}
+	if !wgSeen || !sshSeen {
+		t.Errorf("rules wgSeen=%v sshSeen=%v, want both true", wgSeen, sshSeen)
 	}
 }
 
@@ -209,9 +218,9 @@ func TestBuildRuleSetCacheGatewayChunking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildRuleSet: %v", err)
 	}
-	// One WG spec × ceil(300/255) = 2 v4 rules, 0 v6.
-	if len(rs.Inbound) != 2 {
-		t.Fatalf("len(Inbound) = %d, want 2 (1 WG spec × 2 v4 chunks)", len(rs.Inbound))
+	// 2 specs (WG + ssh-debug) × ceil(300/255) = 4 v4 rules, 0 v6.
+	if len(rs.Inbound) != 4 {
+		t.Fatalf("len(Inbound) = %d, want 4 (2 specs × 2 v4 chunks)", len(rs.Inbound))
 	}
 }
 
