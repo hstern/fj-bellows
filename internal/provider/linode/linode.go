@@ -101,6 +101,13 @@ type Linode struct {
 	// synthSpecsForTransport. Unused under legacy ssh mode.
 	wgListenPort int
 
+	// orchestratorWGPubkey is the orchestrator's WG public key, captured
+	// before Configure via SetOrchestratorWGPubkey (FJB-99 Phase A). The
+	// managed cache's cloud-init bakes it in as the [Peer].PublicKey so
+	// the cache's wg-quick brings up wg0 with the right peer. Empty
+	// under legacy ssh mode and unused.
+	orchestratorWGPubkey string
+
 	// workersInFlight counts Provision calls that have entered the
 	// CreateInstance path but not yet returned (success or failure).
 	// Surfaced via Info() for operator debugging — pairs with the
@@ -229,6 +236,20 @@ func (l *Linode) SetTunnelRoutes(routes []string) {
 // is harmless — the value is unused.
 func (l *Linode) SetWGListenPort(port int) {
 	l.wgListenPort = port
+}
+
+// SetOrchestratorWGPubkey propagates the orchestrator's WG public key
+// (Curve25519, base64) into the Linode provider so the managed cache's
+// cloud-init can bake it in as the WG peer pubkey (FJB-99 Phase A).
+// The cache then comes up with wg-quick referencing the right peer
+// and publishes its own pubkey to S3 for the orchestrator to read
+// back in Phase B.
+//
+// Duck-typed from cmd/fj-bellows. No-op for non-Linode providers and
+// for ssh-mode deployments (the orchestrator never calls this when
+// transport.mode != cache-gateway).
+func (l *Linode) SetOrchestratorWGPubkey(pubkey string) {
+	l.orchestratorWGPubkey = pubkey
 }
 
 // CacheStatus returns the managed-cache snapshot consumed by the control
@@ -493,7 +514,8 @@ func (l *Linode) setupManagedCache(ctx context.Context, tag string) error {
 	// operator debugging only (the dispatcher's tunnel is gone). The
 	// key is supplied via SetSSHAuthorizedKey from cmd/fj-bellows;
 	// empty when no SSH was configured (docker provider).
-	cache.setHardwareContext(fwID, subID, l.sshAuthorizedKey)
+	cache.setHardwareContext(fwID, subID, l.sshAuthorizedKey, l.WorkerVPCSubnet())
+	cache.setOrchestratorWGPubkey(l.orchestratorWGPubkey)
 	cache.setTransport(l.transportMode)
 	// FJB-88: the worker cache-extras template now reads AllowedIPs
 	// CIDRs from the ACL registry, not from operator-supplied tunnel

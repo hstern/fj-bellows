@@ -176,7 +176,7 @@ func TestCacheEnsureAtConfigureCreatesFresh(t *testing.T) {
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
 	cache := newTestManagedCache(t, fc, bucket)
-	cache.setHardwareContext(7777, 8888, "")
+	cache.setHardwareContext(7777, 8888, "", "")
 
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		t.Fatalf("ensureAtConfigure: %v", err)
@@ -454,6 +454,166 @@ func TestCacheCloudInitTemplateNotEmpty(t *testing.T) {
 	}
 }
 
+// FJB-98: when IPTablesScript is provided, the rendered cloud-init must
+// install iptables-persistent, write the script into write_files, run
+// it from runcmd, and persist via netfilter-persistent. When empty,
+// none of those entries appear (so ssh-mode renders unchanged).
+func TestRenderCacheCloudInitIPTablesBakeIn(t *testing.T) {
+	const fakeScript = "#!/usr/bin/env bash\n# fakeFJBiptables MARKER\niptables -N FJB-FORWARD\n"
+	withScript, err := renderCacheCloudInit(cacheCloudInitParams{
+		Bucket:         "b",
+		Region:         "r",
+		Endpoint:       testStubEndpoint,
+		AccessKey:      "AK",
+		SecretKey:      "SK",
+		ZotVersion:     testStubZotVersion,
+		ServerCertPEM:  testStubPEM,
+		ServerKeyPEM:   testStubPEM,
+		IPTablesScript: fakeScript,
+	})
+	if err != nil {
+		t.Fatalf("render with script: %v", err)
+	}
+	for _, want := range []string{
+		"- iptables-persistent",
+		"/usr/local/sbin/fjb-iptables.sh",
+		"fakeFJBiptables MARKER",
+		"- netfilter-persistent save",
+	} {
+		if !strings.Contains(withScript, want) {
+			t.Errorf("cache-gateway render missing %q\n---\n%s", want, withScript)
+		}
+	}
+
+	withoutScript, err := renderCacheCloudInit(cacheCloudInitParams{
+		Bucket:        "b",
+		Region:        "r",
+		Endpoint:      testStubEndpoint,
+		AccessKey:     "AK",
+		SecretKey:     "SK",
+		ZotVersion:    testStubZotVersion,
+		ServerCertPEM: testStubPEM,
+		ServerKeyPEM:  testStubPEM,
+	})
+	if err != nil {
+		t.Fatalf("render without script: %v", err)
+	}
+	for _, unwanted := range []string{
+		"iptables-persistent",
+		"fjb-iptables.sh",
+		"netfilter-persistent",
+	} {
+		if strings.Contains(withoutScript, unwanted) {
+			t.Errorf("ssh-mode render leaked iptables substring %q\n---\n%s", unwanted, withoutScript)
+		}
+	}
+}
+
+// FJB-99 Phase A: when OrchestratorWGPubkey is set, the rendered
+// cloud-init installs wireguard + awscli, embeds the wg-bootstrap
+// script with the orchestrator pubkey baked into [Peer].PublicKey,
+// and runs the script from runcmd. When empty (ssh-mode), none of
+// those entries leak in.
+func TestRenderCacheCloudInitWGBootstrap(t *testing.T) {
+	const orchPubkey = "ZmFrZS1vcmNoZXN0cmF0b3ItcHViLWtleS0xMjM0NTY3OD0="
+	withWG, err := renderCacheCloudInit(cacheCloudInitParams{
+		Bucket:               "fjb-cache-test",
+		Region:               testBucketRegion,
+		Endpoint:             "https://us-ord-1.linodeobjects.com",
+		AccessKey:            "AK",
+		SecretKey:            "SK",
+		ZotVersion:           testStubZotVersion,
+		ServerCertPEM:        testStubPEM,
+		ServerKeyPEM:         testStubPEM,
+		OrchestratorWGPubkey: orchPubkey,
+		OrchestratorWGAddr:   "100.64.0.1",
+		CacheWGAddr:          "100.64.0.2",
+		WGListenPort:         51820,
+	})
+	if err != nil {
+		t.Fatalf("render with WG: %v", err)
+	}
+	for _, want := range []string{
+		"- wireguard",
+		"- awscli",
+		"/usr/local/sbin/fjb-wg-bootstrap.sh",
+		"wg genkey",
+		"Address = 100.64.0.2/32",
+		"ListenPort = 51820",
+		"PublicKey = " + orchPubkey,
+		"AllowedIPs = 100.64.0.1/32",
+		"PersistentKeepalive = 25",
+		"systemctl enable --now wg-quick@wg0",
+		"s3://fjb-cache-test/wg-pubkey.txt",
+		"--endpoint-url 'https://us-ord-1.linodeobjects.com'",
+	} {
+		if !strings.Contains(withWG, want) {
+			t.Errorf("WG render missing %q\n---\n%s", want, withWG)
+		}
+	}
+
+	withoutWG, err := renderCacheCloudInit(cacheCloudInitParams{
+		Bucket:        "b",
+		Region:        "r",
+		Endpoint:      testStubEndpoint,
+		AccessKey:     "AK",
+		SecretKey:     "SK",
+		ZotVersion:    testStubZotVersion,
+		ServerCertPEM: testStubPEM,
+		ServerKeyPEM:  testStubPEM,
+	})
+	if err != nil {
+		t.Fatalf("render without WG: %v", err)
+	}
+	for _, unwanted := range []string{
+		"wireguard",
+		"awscli",
+		"fjb-wg-bootstrap.sh",
+		"wg-pubkey.txt",
+		"wg-quick@wg0",
+	} {
+		if strings.Contains(withoutWG, unwanted) {
+			t.Errorf("ssh-mode render leaked WG substring %q\n---\n%s", unwanted, withoutWG)
+		}
+	}
+}
+
+// FJB-98: renderIPTablesForCacheGateway returns an empty script for
+// non-cache-gateway transport or when the worker VPC subnet hasn't
+// been wired yet — both branches are reachable in real deployments
+// and must not error.
+func TestRenderIPTablesForCacheGateway(t *testing.T) {
+	m := &managedCache{log: slog.Default()}
+	got, err := m.renderIPTablesForCacheGateway()
+	if err != nil || got != "" {
+		t.Errorf("empty cache: got %q err %v; want empty + nil", got, err)
+	}
+
+	m.transportMode = "ssh"
+	m.workerVPCSubnet = "10.0.0.0/24"
+	got, err = m.renderIPTablesForCacheGateway()
+	if err != nil || got != "" {
+		t.Errorf("ssh mode: got %q err %v; want empty + nil", got, err)
+	}
+
+	m.transportMode = "cache-gateway"
+	m.workerVPCSubnet = "10.0.0.0/24"
+	got, err = m.renderIPTablesForCacheGateway()
+	if err != nil {
+		t.Fatalf("cache-gateway: unexpected err: %v", err)
+	}
+	for _, want := range []string{
+		"iptables -N FJB-FORWARD",
+		"iptables -A FJB-FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT",
+		"iptables -A FJB-FORWARD -s 100.64.0.1/32 -d 10.0.0.0/24 -i wg0 -o eth1 -j ACCEPT",
+		"iptables -A FJB-FORWARD -j DROP",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("cache-gateway render missing %q\n---\n%s", want, got)
+		}
+	}
+}
+
 // findCacheLinode must not adopt instances whose tag doesn't match —
 // otherwise a cache from a different deployment could be hijacked.
 func TestFindCacheLinodeIgnoresOtherDeployments(t *testing.T) {
@@ -524,7 +684,7 @@ func TestCacheEnsureRecreatesAfterReap(t *testing.T) {
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
 	cache := newTestManagedCache(t, fc, bucket)
-	cache.setHardwareContext(7777, 8888, "")
+	cache.setHardwareContext(7777, 8888, "", "")
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		t.Fatalf("initial ensureAtConfigure: %v", err)
 	}
@@ -556,7 +716,7 @@ func TestCacheEnsureNoOpWhenIDStillValid(t *testing.T) {
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
 	cache := newTestManagedCache(t, fc, bucket)
-	cache.setHardwareContext(7777, 8888, "")
+	cache.setHardwareContext(7777, 8888, "", "")
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		t.Fatalf("ensureAtConfigure: %v", err)
 	}
@@ -605,7 +765,7 @@ func TestWorkerExtrasLooksUpAndCachesVPCIP(t *testing.T) {
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
 	cache := newTestManagedCache(t, fc, bucket)
-	cache.setHardwareContext(7777, 8888, "")
+	cache.setHardwareContext(7777, 8888, "", "")
 
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		t.Fatalf("ensureAtConfigure: %v", err)
@@ -682,7 +842,7 @@ func TestWorkerExtrasPullsAllowedIPsFromACLSource(t *testing.T) {
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
 	cache := newTestManagedCache(t, fc, bucket)
-	cache.setHardwareContext(7777, 8888, "")
+	cache.setHardwareContext(7777, 8888, "", "")
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		t.Fatalf("ensureAtConfigure: %v", err)
 	}
@@ -732,7 +892,7 @@ func TestWorkerExtrasEmptyWhenNoACLSource(t *testing.T) {
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
 	cache := newTestManagedCache(t, fc, bucket)
-	cache.setHardwareContext(7777, 8888, "")
+	cache.setHardwareContext(7777, 8888, "", "")
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		t.Fatalf("ensureAtConfigure: %v", err)
 	}
@@ -765,7 +925,7 @@ func TestWorkerExtrasErrorsWhenVPCIPNotAssigned(t *testing.T) {
 	fb := newFakeBucketClient()
 	bucket := newManagedBucket("test-tag", testBucketRegion, "fjb-cache-test-tag", fb, slog.Default())
 	cache := newTestManagedCache(t, fc, bucket)
-	cache.setHardwareContext(7777, 8888, "")
+	cache.setHardwareContext(7777, 8888, "", "")
 
 	if err := cache.ensureAtConfigure(ctx); err != nil {
 		t.Fatalf("ensureAtConfigure: %v", err)

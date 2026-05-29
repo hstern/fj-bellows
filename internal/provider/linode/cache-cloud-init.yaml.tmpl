@@ -18,6 +18,13 @@ package_update: true
 packages:
   - curl
   - ca-certificates
+{{- if .IPTablesScript}}
+  - iptables-persistent
+{{- end}}
+{{- if .OrchestratorWGPubkey}}
+  - wireguard
+  - awscli
+{{- end}}
 write_files:
   - path: /etc/zot/config.json
     permissions: '0640'
@@ -60,6 +67,53 @@ write_files:
     permissions: '0600'
     content: |
 {{.ServerKeyPEM | indent 6}}
+{{- if .IPTablesScript}}
+  - path: /usr/local/sbin/fjb-iptables.sh
+    permissions: '0750'
+    content: |
+{{.IPTablesScript | indent 6}}
+{{- end}}
+{{- if .OrchestratorWGPubkey}}
+  - path: /usr/local/sbin/fjb-wg-bootstrap.sh
+    permissions: '0750'
+    content: |
+      #!/usr/bin/env bash
+      # FJB-99 Phase A — cache wg-quick bootstrap.
+      # Idempotent: keypair generates once on first boot; subsequent
+      # boots reuse the persisted private key. wg0.conf is always
+      # rewritten so a config bump (peer pubkey rotation, port change)
+      # takes effect on reboot without operator intervention.
+      set -euo pipefail
+      umask 0077
+      install -d -m 0700 /etc/wireguard
+      if [ ! -s /etc/wireguard/privatekey ]; then
+        wg genkey | tee /etc/wireguard/privatekey | wg pubkey > /etc/wireguard/publickey
+        chmod 0600 /etc/wireguard/privatekey
+        chmod 0644 /etc/wireguard/publickey
+      fi
+      priv=$(cat /etc/wireguard/privatekey)
+      cat > /etc/wireguard/wg0.conf <<EOC
+      [Interface]
+      Address = {{.CacheWGAddr}}/32
+      ListenPort = {{.WGListenPort}}
+      PrivateKey = ${priv}
+
+      [Peer]
+      PublicKey = {{.OrchestratorWGPubkey}}
+      AllowedIPs = {{.OrchestratorWGAddr}}/32
+      PersistentKeepalive = 25
+      EOC
+      chmod 0600 /etc/wireguard/wg0.conf
+      systemctl enable --now wg-quick@wg0
+      # Publish own pubkey so the orchestrator can read it from S3 and
+      # complete the wg peer config on its side (FJB-99 Phase B).
+      AWS_ACCESS_KEY_ID='{{.AccessKey}}' \
+      AWS_SECRET_ACCESS_KEY='{{.SecretKey}}' \
+      AWS_DEFAULT_REGION='{{.Region}}' \
+        aws --endpoint-url '{{.Endpoint}}' \
+            s3 cp /etc/wireguard/publickey \
+                  s3://{{.Bucket}}/wg-pubkey.txt
+{{- end}}
   - path: /etc/systemd/system/zot.service
     permissions: '0644'
     content: |
@@ -100,6 +154,13 @@ runcmd:
     curl -fsSL -o /usr/local/bin/zot "$url"
     chmod +x /usr/local/bin/zot
   - mkdir -p /var/lib/zot
+{{- if .IPTablesScript}}
+  - /usr/local/sbin/fjb-iptables.sh
+  - netfilter-persistent save
+{{- end}}
+{{- if .OrchestratorWGPubkey}}
+  - /usr/local/sbin/fjb-wg-bootstrap.sh
+{{- end}}
   - systemctl daemon-reload
   - systemctl enable --now zot.service
   - touch {{.ReadyFile}}
