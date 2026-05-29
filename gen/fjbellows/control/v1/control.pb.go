@@ -9,6 +9,7 @@ package controlv1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
@@ -1609,11 +1610,404 @@ func (x *StreamLogsResponse) GetAttrs() map[string]string {
 	return nil
 }
 
+type PingTargetRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// target is the orchestrator-known name: "worker-<instance_id>" or
+	// "cache". Unknown targets fail with CodeNotFound on the first
+	// event-stream Send (CodeNotFound is mapped to exit code 2 by the
+	// fjbctl CLI in Phase B).
+	Target string `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
+	// count caps the number of echoes attempted. 0 = until the client
+	// closes the stream. The orchestrator's PingTarget handler enforces
+	// an upper bound (default 1000) to keep server resources finite.
+	Count uint32 `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
+	// interval is the gap between consecutive echo attempts. Defaults
+	// to 1s when zero. Minimum 100ms — orchestrator clamps lower.
+	Interval *durationpb.Duration `protobuf:"bytes,3,opt,name=interval,proto3" json:"interval,omitempty"`
+	// timeout is the per-echo wait-for-reply budget. Defaults to 1s when
+	// zero. Independent of `interval` — a slow reply doesn't extend the
+	// next attempt's start time.
+	Timeout       *durationpb.Duration `protobuf:"bytes,4,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PingTargetRequest) Reset() {
+	*x = PingTargetRequest{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PingTargetRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PingTargetRequest) ProtoMessage() {}
+
+func (x *PingTargetRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PingTargetRequest.ProtoReflect.Descriptor instead.
+func (*PingTargetRequest) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *PingTargetRequest) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *PingTargetRequest) GetCount() uint32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *PingTargetRequest) GetInterval() *durationpb.Duration {
+	if x != nil {
+		return x.Interval
+	}
+	return nil
+}
+
+func (x *PingTargetRequest) GetTimeout() *durationpb.Duration {
+	if x != nil {
+		return x.Timeout
+	}
+	return nil
+}
+
+type PingTargetEvent struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Kind:
+	//
+	//	*PingTargetEvent_Resolved
+	//	*PingTargetEvent_Echo
+	//	*PingTargetEvent_Summary
+	Kind          isPingTargetEvent_Kind `protobuf_oneof:"kind"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PingTargetEvent) Reset() {
+	*x = PingTargetEvent{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PingTargetEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PingTargetEvent) ProtoMessage() {}
+
+func (x *PingTargetEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PingTargetEvent.ProtoReflect.Descriptor instead.
+func (*PingTargetEvent) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *PingTargetEvent) GetKind() isPingTargetEvent_Kind {
+	if x != nil {
+		return x.Kind
+	}
+	return nil
+}
+
+func (x *PingTargetEvent) GetResolved() *PingTargetResolved {
+	if x != nil {
+		if x, ok := x.Kind.(*PingTargetEvent_Resolved); ok {
+			return x.Resolved
+		}
+	}
+	return nil
+}
+
+func (x *PingTargetEvent) GetEcho() *PingTargetEcho {
+	if x != nil {
+		if x, ok := x.Kind.(*PingTargetEvent_Echo); ok {
+			return x.Echo
+		}
+	}
+	return nil
+}
+
+func (x *PingTargetEvent) GetSummary() *PingTargetSummary {
+	if x != nil {
+		if x, ok := x.Kind.(*PingTargetEvent_Summary); ok {
+			return x.Summary
+		}
+	}
+	return nil
+}
+
+type isPingTargetEvent_Kind interface {
+	isPingTargetEvent_Kind()
+}
+
+type PingTargetEvent_Resolved struct {
+	Resolved *PingTargetResolved `protobuf:"bytes,1,opt,name=resolved,proto3,oneof"`
+}
+
+type PingTargetEvent_Echo struct {
+	Echo *PingTargetEcho `protobuf:"bytes,2,opt,name=echo,proto3,oneof"`
+}
+
+type PingTargetEvent_Summary struct {
+	Summary *PingTargetSummary `protobuf:"bytes,3,opt,name=summary,proto3,oneof"`
+}
+
+func (*PingTargetEvent_Resolved) isPingTargetEvent_Kind() {}
+
+func (*PingTargetEvent_Echo) isPingTargetEvent_Kind() {}
+
+func (*PingTargetEvent_Summary) isPingTargetEvent_Kind() {}
+
+// PingTargetResolved is the first event the server emits: the target's
+// resolved name → IP mapping and the orchestrator's WG inner address
+// the echoes are sent from. Operators use this to confirm the
+// (role, dial-addr) lookup did the right thing.
+type PingTargetResolved struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Target        string                 `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
+	RemoteIp      string                 `protobuf:"bytes,2,opt,name=remote_ip,json=remoteIp,proto3" json:"remote_ip,omitempty"`
+	SourceIp      string                 `protobuf:"bytes,3,opt,name=source_ip,json=sourceIp,proto3" json:"source_ip,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PingTargetResolved) Reset() {
+	*x = PingTargetResolved{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PingTargetResolved) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PingTargetResolved) ProtoMessage() {}
+
+func (x *PingTargetResolved) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PingTargetResolved.ProtoReflect.Descriptor instead.
+func (*PingTargetResolved) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *PingTargetResolved) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *PingTargetResolved) GetRemoteIp() string {
+	if x != nil {
+		return x.RemoteIp
+	}
+	return ""
+}
+
+func (x *PingTargetResolved) GetSourceIp() string {
+	if x != nil {
+		return x.SourceIp
+	}
+	return ""
+}
+
+// PingTargetEcho is one attempted echo's outcome. Either rtt_ms is
+// populated (the reply came back within timeout) or timeout is true
+// (no reply, deadline elapsed).
+type PingTargetEcho struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Seq           uint32                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	RttMs         uint32                 `protobuf:"varint,2,opt,name=rtt_ms,json=rttMs,proto3" json:"rtt_ms,omitempty"`
+	Timeout       bool                   `protobuf:"varint,3,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PingTargetEcho) Reset() {
+	*x = PingTargetEcho{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PingTargetEcho) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PingTargetEcho) ProtoMessage() {}
+
+func (x *PingTargetEcho) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PingTargetEcho.ProtoReflect.Descriptor instead.
+func (*PingTargetEcho) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *PingTargetEcho) GetSeq() uint32 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *PingTargetEcho) GetRttMs() uint32 {
+	if x != nil {
+		return x.RttMs
+	}
+	return 0
+}
+
+func (x *PingTargetEcho) GetTimeout() bool {
+	if x != nil {
+		return x.Timeout
+	}
+	return false
+}
+
+// PingTargetSummary is the terminal event when the stream completes
+// (count exhausted or client-cancelled). The server includes it after
+// every PingTarget RPC even when count==0 / Ctrl-C — the orchestrator
+// gracefully cancels the loop and emits one final summary.
+type PingTargetSummary struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Transmitted   uint32                 `protobuf:"varint,1,opt,name=transmitted,proto3" json:"transmitted,omitempty"`
+	Received      uint32                 `protobuf:"varint,2,opt,name=received,proto3" json:"received,omitempty"`
+	PacketLossPct uint32                 `protobuf:"varint,3,opt,name=packet_loss_pct,json=packetLossPct,proto3" json:"packet_loss_pct,omitempty"`
+	RttMinMs      uint32                 `protobuf:"varint,4,opt,name=rtt_min_ms,json=rttMinMs,proto3" json:"rtt_min_ms,omitempty"`
+	RttAvgMs      uint32                 `protobuf:"varint,5,opt,name=rtt_avg_ms,json=rttAvgMs,proto3" json:"rtt_avg_ms,omitempty"`
+	RttMaxMs      uint32                 `protobuf:"varint,6,opt,name=rtt_max_ms,json=rttMaxMs,proto3" json:"rtt_max_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PingTargetSummary) Reset() {
+	*x = PingTargetSummary{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PingTargetSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PingTargetSummary) ProtoMessage() {}
+
+func (x *PingTargetSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PingTargetSummary.ProtoReflect.Descriptor instead.
+func (*PingTargetSummary) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *PingTargetSummary) GetTransmitted() uint32 {
+	if x != nil {
+		return x.Transmitted
+	}
+	return 0
+}
+
+func (x *PingTargetSummary) GetReceived() uint32 {
+	if x != nil {
+		return x.Received
+	}
+	return 0
+}
+
+func (x *PingTargetSummary) GetPacketLossPct() uint32 {
+	if x != nil {
+		return x.PacketLossPct
+	}
+	return 0
+}
+
+func (x *PingTargetSummary) GetRttMinMs() uint32 {
+	if x != nil {
+		return x.RttMinMs
+	}
+	return 0
+}
+
+func (x *PingTargetSummary) GetRttAvgMs() uint32 {
+	if x != nil {
+		return x.RttAvgMs
+	}
+	return 0
+}
+
+func (x *PingTargetSummary) GetRttMaxMs() uint32 {
+	if x != nil {
+		return x.RttMaxMs
+	}
+	return 0
+}
+
 var File_fjbellows_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\n" +
-	"\"fjbellows/control/v1/control.proto\x12\x14fjbellows.control.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x0f\n" +
+	"\"fjbellows/control/v1/control.proto\x12\x14fjbellows.control.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x0f\n" +
 	"\rHealthRequest\"\x9c\x02\n" +
 	"\x0eHealthResponse\x12\x18\n" +
 	"\ahealthy\x18\x01 \x01(\bR\ahealthy\x12<\n" +
@@ -1718,8 +2112,35 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"AttrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\xd3\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xad\x01\n" +
+	"\x11PingTargetRequest\x12\x16\n" +
+	"\x06target\x18\x01 \x01(\tR\x06target\x12\x14\n" +
+	"\x05count\x18\x02 \x01(\rR\x05count\x125\n" +
+	"\binterval\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\binterval\x123\n" +
+	"\atimeout\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\atimeout\"\xe2\x01\n" +
+	"\x0fPingTargetEvent\x12F\n" +
+	"\bresolved\x18\x01 \x01(\v2(.fjbellows.control.v1.PingTargetResolvedH\x00R\bresolved\x12:\n" +
+	"\x04echo\x18\x02 \x01(\v2$.fjbellows.control.v1.PingTargetEchoH\x00R\x04echo\x12C\n" +
+	"\asummary\x18\x03 \x01(\v2'.fjbellows.control.v1.PingTargetSummaryH\x00R\asummaryB\x06\n" +
+	"\x04kind\"f\n" +
+	"\x12PingTargetResolved\x12\x16\n" +
+	"\x06target\x18\x01 \x01(\tR\x06target\x12\x1b\n" +
+	"\tremote_ip\x18\x02 \x01(\tR\bremoteIp\x12\x1b\n" +
+	"\tsource_ip\x18\x03 \x01(\tR\bsourceIp\"S\n" +
+	"\x0ePingTargetEcho\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\rR\x03seq\x12\x15\n" +
+	"\x06rtt_ms\x18\x02 \x01(\rR\x05rttMs\x12\x18\n" +
+	"\atimeout\x18\x03 \x01(\bR\atimeout\"\xd3\x01\n" +
+	"\x11PingTargetSummary\x12 \n" +
+	"\vtransmitted\x18\x01 \x01(\rR\vtransmitted\x12\x1a\n" +
+	"\breceived\x18\x02 \x01(\rR\breceived\x12&\n" +
+	"\x0fpacket_loss_pct\x18\x03 \x01(\rR\rpacketLossPct\x12\x1c\n" +
 	"\n" +
+	"rtt_min_ms\x18\x04 \x01(\rR\brttMinMs\x12\x1c\n" +
+	"\n" +
+	"rtt_avg_ms\x18\x05 \x01(\rR\brttAvgMs\x12\x1c\n" +
+	"\n" +
+	"rtt_max_ms\x18\x06 \x01(\rR\brttMaxMs2\xb3\v\n" +
 	"\x0eControlService\x12S\n" +
 	"\x06Health\x12#.fjbellows.control.v1.HealthRequest\x1a$.fjbellows.control.v1.HealthResponse\x12b\n" +
 	"\vListWorkers\x12(.fjbellows.control.v1.ListWorkersRequest\x1a).fjbellows.control.v1.ListWorkersResponse\x12Y\n" +
@@ -1735,7 +2156,9 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\fExecOnWorker\x12).fjbellows.control.v1.ExecOnWorkerRequest\x1a*.fjbellows.control.v1.ExecOnWorkerResponse\x12a\n" +
 	"\n" +
 	"StreamLogs\x12'.fjbellows.control.v1.StreamLogsRequest\x1a(.fjbellows.control.v1.StreamLogsResponse0\x01\x12e\n" +
-	"\fProviderInfo\x12).fjbellows.control.v1.ProviderInfoRequest\x1a*.fjbellows.control.v1.ProviderInfoResponseB\xdb\x01\n" +
+	"\fProviderInfo\x12).fjbellows.control.v1.ProviderInfoRequest\x1a*.fjbellows.control.v1.ProviderInfoResponse\x12^\n" +
+	"\n" +
+	"PingTarget\x12'.fjbellows.control.v1.PingTargetRequest\x1a%.fjbellows.control.v1.PingTargetEvent0\x01B\xdb\x01\n" +
 	"\x18com.fjbellows.control.v1B\fControlProtoP\x01Z?github.com/hstern/fj-bellows/gen/fjbellows/control/v1;controlv1\xa2\x02\x03FCX\xaa\x02\x14Fjbellows.Control.V1\xca\x02\x14Fjbellows\\Control\\V1\xe2\x02 Fjbellows\\Control\\V1\\GPBMetadata\xea\x02\x16Fjbellows::Control::V1b\x06proto3"
 
 var (
@@ -1750,7 +2173,7 @@ func file_fjbellows_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_fjbellows_control_v1_control_proto_rawDescData
 }
 
-var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
+var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_fjbellows_control_v1_control_proto_goTypes = []any{
 	(*HealthRequest)(nil),          // 0: fjbellows.control.v1.HealthRequest
 	(*HealthResponse)(nil),         // 1: fjbellows.control.v1.HealthResponse
@@ -1781,58 +2204,71 @@ var file_fjbellows_control_v1_control_proto_goTypes = []any{
 	(*ProviderInfoRequest)(nil),    // 26: fjbellows.control.v1.ProviderInfoRequest
 	(*ProviderInfoResponse)(nil),   // 27: fjbellows.control.v1.ProviderInfoResponse
 	(*StreamLogsResponse)(nil),     // 28: fjbellows.control.v1.StreamLogsResponse
-	nil,                            // 29: fjbellows.control.v1.StreamEventsResponse.AttrsEntry
-	nil,                            // 30: fjbellows.control.v1.ProviderInfoResponse.InfoEntry
-	nil,                            // 31: fjbellows.control.v1.StreamLogsResponse.AttrsEntry
-	(*timestamppb.Timestamp)(nil),  // 32: google.protobuf.Timestamp
+	(*PingTargetRequest)(nil),      // 29: fjbellows.control.v1.PingTargetRequest
+	(*PingTargetEvent)(nil),        // 30: fjbellows.control.v1.PingTargetEvent
+	(*PingTargetResolved)(nil),     // 31: fjbellows.control.v1.PingTargetResolved
+	(*PingTargetEcho)(nil),         // 32: fjbellows.control.v1.PingTargetEcho
+	(*PingTargetSummary)(nil),      // 33: fjbellows.control.v1.PingTargetSummary
+	nil,                            // 34: fjbellows.control.v1.StreamEventsResponse.AttrsEntry
+	nil,                            // 35: fjbellows.control.v1.ProviderInfoResponse.InfoEntry
+	nil,                            // 36: fjbellows.control.v1.StreamLogsResponse.AttrsEntry
+	(*timestamppb.Timestamp)(nil),  // 37: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),    // 38: google.protobuf.Duration
 }
 var file_fjbellows_control_v1_control_proto_depIdxs = []int32{
-	32, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
-	32, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
-	32, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
+	37, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
+	37, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
+	37, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
 	4,  // 3: fjbellows.control.v1.ListWorkersResponse.workers:type_name -> fjbellows.control.v1.Worker
-	32, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
-	32, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
-	32, // 6: fjbellows.control.v1.Worker.paid_hour_end_at:type_name -> google.protobuf.Timestamp
-	32, // 7: fjbellows.control.v1.Worker.reap_eligible_at:type_name -> google.protobuf.Timestamp
-	32, // 8: fjbellows.control.v1.StreamEventsResponse.at:type_name -> google.protobuf.Timestamp
-	29, // 9: fjbellows.control.v1.StreamEventsResponse.attrs:type_name -> fjbellows.control.v1.StreamEventsResponse.AttrsEntry
-	30, // 10: fjbellows.control.v1.ProviderInfoResponse.info:type_name -> fjbellows.control.v1.ProviderInfoResponse.InfoEntry
-	32, // 11: fjbellows.control.v1.StreamLogsResponse.at:type_name -> google.protobuf.Timestamp
-	31, // 12: fjbellows.control.v1.StreamLogsResponse.attrs:type_name -> fjbellows.control.v1.StreamLogsResponse.AttrsEntry
-	0,  // 13: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
-	2,  // 14: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
-	5,  // 15: fjbellows.control.v1.ControlService.GetCache:input_type -> fjbellows.control.v1.GetCacheRequest
-	7,  // 16: fjbellows.control.v1.ControlService.Reconcile:input_type -> fjbellows.control.v1.ReconcileRequest
-	9,  // 17: fjbellows.control.v1.ControlService.ForceReap:input_type -> fjbellows.control.v1.ForceReapRequest
-	11, // 18: fjbellows.control.v1.ControlService.ForceProvision:input_type -> fjbellows.control.v1.ForceProvisionRequest
-	19, // 19: fjbellows.control.v1.ControlService.StreamEvents:input_type -> fjbellows.control.v1.StreamEventsRequest
-	13, // 20: fjbellows.control.v1.ControlService.Pause:input_type -> fjbellows.control.v1.PauseRequest
-	15, // 21: fjbellows.control.v1.ControlService.Resume:input_type -> fjbellows.control.v1.ResumeRequest
-	21, // 22: fjbellows.control.v1.ControlService.GetConfig:input_type -> fjbellows.control.v1.GetConfigRequest
-	23, // 23: fjbellows.control.v1.ControlService.ReloadConfig:input_type -> fjbellows.control.v1.ReloadConfigRequest
-	17, // 24: fjbellows.control.v1.ControlService.ExecOnWorker:input_type -> fjbellows.control.v1.ExecOnWorkerRequest
-	25, // 25: fjbellows.control.v1.ControlService.StreamLogs:input_type -> fjbellows.control.v1.StreamLogsRequest
-	26, // 26: fjbellows.control.v1.ControlService.ProviderInfo:input_type -> fjbellows.control.v1.ProviderInfoRequest
-	1,  // 27: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
-	3,  // 28: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
-	6,  // 29: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
-	8,  // 30: fjbellows.control.v1.ControlService.Reconcile:output_type -> fjbellows.control.v1.ReconcileResponse
-	10, // 31: fjbellows.control.v1.ControlService.ForceReap:output_type -> fjbellows.control.v1.ForceReapResponse
-	12, // 32: fjbellows.control.v1.ControlService.ForceProvision:output_type -> fjbellows.control.v1.ForceProvisionResponse
-	20, // 33: fjbellows.control.v1.ControlService.StreamEvents:output_type -> fjbellows.control.v1.StreamEventsResponse
-	14, // 34: fjbellows.control.v1.ControlService.Pause:output_type -> fjbellows.control.v1.PauseResponse
-	16, // 35: fjbellows.control.v1.ControlService.Resume:output_type -> fjbellows.control.v1.ResumeResponse
-	22, // 36: fjbellows.control.v1.ControlService.GetConfig:output_type -> fjbellows.control.v1.GetConfigResponse
-	24, // 37: fjbellows.control.v1.ControlService.ReloadConfig:output_type -> fjbellows.control.v1.ReloadConfigResponse
-	18, // 38: fjbellows.control.v1.ControlService.ExecOnWorker:output_type -> fjbellows.control.v1.ExecOnWorkerResponse
-	28, // 39: fjbellows.control.v1.ControlService.StreamLogs:output_type -> fjbellows.control.v1.StreamLogsResponse
-	27, // 40: fjbellows.control.v1.ControlService.ProviderInfo:output_type -> fjbellows.control.v1.ProviderInfoResponse
-	27, // [27:41] is the sub-list for method output_type
-	13, // [13:27] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	37, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
+	37, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
+	37, // 6: fjbellows.control.v1.Worker.paid_hour_end_at:type_name -> google.protobuf.Timestamp
+	37, // 7: fjbellows.control.v1.Worker.reap_eligible_at:type_name -> google.protobuf.Timestamp
+	37, // 8: fjbellows.control.v1.StreamEventsResponse.at:type_name -> google.protobuf.Timestamp
+	34, // 9: fjbellows.control.v1.StreamEventsResponse.attrs:type_name -> fjbellows.control.v1.StreamEventsResponse.AttrsEntry
+	35, // 10: fjbellows.control.v1.ProviderInfoResponse.info:type_name -> fjbellows.control.v1.ProviderInfoResponse.InfoEntry
+	37, // 11: fjbellows.control.v1.StreamLogsResponse.at:type_name -> google.protobuf.Timestamp
+	36, // 12: fjbellows.control.v1.StreamLogsResponse.attrs:type_name -> fjbellows.control.v1.StreamLogsResponse.AttrsEntry
+	38, // 13: fjbellows.control.v1.PingTargetRequest.interval:type_name -> google.protobuf.Duration
+	38, // 14: fjbellows.control.v1.PingTargetRequest.timeout:type_name -> google.protobuf.Duration
+	31, // 15: fjbellows.control.v1.PingTargetEvent.resolved:type_name -> fjbellows.control.v1.PingTargetResolved
+	32, // 16: fjbellows.control.v1.PingTargetEvent.echo:type_name -> fjbellows.control.v1.PingTargetEcho
+	33, // 17: fjbellows.control.v1.PingTargetEvent.summary:type_name -> fjbellows.control.v1.PingTargetSummary
+	0,  // 18: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
+	2,  // 19: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
+	5,  // 20: fjbellows.control.v1.ControlService.GetCache:input_type -> fjbellows.control.v1.GetCacheRequest
+	7,  // 21: fjbellows.control.v1.ControlService.Reconcile:input_type -> fjbellows.control.v1.ReconcileRequest
+	9,  // 22: fjbellows.control.v1.ControlService.ForceReap:input_type -> fjbellows.control.v1.ForceReapRequest
+	11, // 23: fjbellows.control.v1.ControlService.ForceProvision:input_type -> fjbellows.control.v1.ForceProvisionRequest
+	19, // 24: fjbellows.control.v1.ControlService.StreamEvents:input_type -> fjbellows.control.v1.StreamEventsRequest
+	13, // 25: fjbellows.control.v1.ControlService.Pause:input_type -> fjbellows.control.v1.PauseRequest
+	15, // 26: fjbellows.control.v1.ControlService.Resume:input_type -> fjbellows.control.v1.ResumeRequest
+	21, // 27: fjbellows.control.v1.ControlService.GetConfig:input_type -> fjbellows.control.v1.GetConfigRequest
+	23, // 28: fjbellows.control.v1.ControlService.ReloadConfig:input_type -> fjbellows.control.v1.ReloadConfigRequest
+	17, // 29: fjbellows.control.v1.ControlService.ExecOnWorker:input_type -> fjbellows.control.v1.ExecOnWorkerRequest
+	25, // 30: fjbellows.control.v1.ControlService.StreamLogs:input_type -> fjbellows.control.v1.StreamLogsRequest
+	26, // 31: fjbellows.control.v1.ControlService.ProviderInfo:input_type -> fjbellows.control.v1.ProviderInfoRequest
+	29, // 32: fjbellows.control.v1.ControlService.PingTarget:input_type -> fjbellows.control.v1.PingTargetRequest
+	1,  // 33: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
+	3,  // 34: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
+	6,  // 35: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
+	8,  // 36: fjbellows.control.v1.ControlService.Reconcile:output_type -> fjbellows.control.v1.ReconcileResponse
+	10, // 37: fjbellows.control.v1.ControlService.ForceReap:output_type -> fjbellows.control.v1.ForceReapResponse
+	12, // 38: fjbellows.control.v1.ControlService.ForceProvision:output_type -> fjbellows.control.v1.ForceProvisionResponse
+	20, // 39: fjbellows.control.v1.ControlService.StreamEvents:output_type -> fjbellows.control.v1.StreamEventsResponse
+	14, // 40: fjbellows.control.v1.ControlService.Pause:output_type -> fjbellows.control.v1.PauseResponse
+	16, // 41: fjbellows.control.v1.ControlService.Resume:output_type -> fjbellows.control.v1.ResumeResponse
+	22, // 42: fjbellows.control.v1.ControlService.GetConfig:output_type -> fjbellows.control.v1.GetConfigResponse
+	24, // 43: fjbellows.control.v1.ControlService.ReloadConfig:output_type -> fjbellows.control.v1.ReloadConfigResponse
+	18, // 44: fjbellows.control.v1.ControlService.ExecOnWorker:output_type -> fjbellows.control.v1.ExecOnWorkerResponse
+	28, // 45: fjbellows.control.v1.ControlService.StreamLogs:output_type -> fjbellows.control.v1.StreamLogsResponse
+	27, // 46: fjbellows.control.v1.ControlService.ProviderInfo:output_type -> fjbellows.control.v1.ProviderInfoResponse
+	30, // 47: fjbellows.control.v1.ControlService.PingTarget:output_type -> fjbellows.control.v1.PingTargetEvent
+	33, // [33:48] is the sub-list for method output_type
+	18, // [18:33] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_fjbellows_control_v1_control_proto_init() }
@@ -1840,13 +2276,18 @@ func file_fjbellows_control_v1_control_proto_init() {
 	if File_fjbellows_control_v1_control_proto != nil {
 		return
 	}
+	file_fjbellows_control_v1_control_proto_msgTypes[30].OneofWrappers = []any{
+		(*PingTargetEvent_Resolved)(nil),
+		(*PingTargetEvent_Echo)(nil),
+		(*PingTargetEvent_Summary)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fjbellows_control_v1_control_proto_rawDesc), len(file_fjbellows_control_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   32,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -4,6 +4,7 @@ package fjbellows.control.v1;
 
 option go_package = "github.com/hstern/fj-bellows/gen/fjbellows/control/v1;controlv1";
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
 // ControlService is the operator-facing control plane for a running fj-bellows
@@ -116,6 +117,18 @@ service ControlService {
   // `internal/provider/<name>/README.md`. Useful for capacity-full incidents
   // (FJB-11), account-state checks, and confirming managed-resource IDs.
   rpc ProviderInfo(ProviderInfoRequest) returns (ProviderInfoResponse);
+
+  // PingTarget probes a named target (worker / cache) over the WG netstack
+  // with ICMP echo (FJB-97 Phase A). Server-streaming: one PingTargetEvent
+  // per attempted echo (success or timeout), followed by a final summary
+  // event. Phase B adds a separate WaitForTarget RPC that gates on either
+  // ICMP success alone or ICMP + agent.Health, with a single terminal
+  // outcome.
+  //
+  // Target resolution lives in the orchestrator: "worker-<instance_id>"
+  // looks up the worker's VPC IP from the pool; "cache" resolves to the
+  // cache's WG inner address. fjbctl never sees a raw IP.
+  rpc PingTarget(PingTargetRequest) returns (stream PingTargetEvent);
 }
 
 message HealthRequest {}
@@ -389,4 +402,66 @@ message StreamLogsResponse {
   // are flattened with dot-separated keys (`group.key`); non-string scalar
   // values use slog.Value.String().
   map<string, string> attrs = 4;
+}
+
+message PingTargetRequest {
+  // target is the orchestrator-known name: "worker-<instance_id>" or
+  // "cache". Unknown targets fail with CodeNotFound on the first
+  // event-stream Send (CodeNotFound is mapped to exit code 2 by the
+  // fjbctl CLI in Phase B).
+  string target = 1;
+
+  // count caps the number of echoes attempted. 0 = until the client
+  // closes the stream. The orchestrator's PingTarget handler enforces
+  // an upper bound (default 1000) to keep server resources finite.
+  uint32 count = 2;
+
+  // interval is the gap between consecutive echo attempts. Defaults
+  // to 1s when zero. Minimum 100ms — orchestrator clamps lower.
+  google.protobuf.Duration interval = 3;
+
+  // timeout is the per-echo wait-for-reply budget. Defaults to 1s when
+  // zero. Independent of `interval` — a slow reply doesn't extend the
+  // next attempt's start time.
+  google.protobuf.Duration timeout = 4;
+}
+
+message PingTargetEvent {
+  oneof kind {
+    PingTargetResolved resolved = 1;
+    PingTargetEcho    echo     = 2;
+    PingTargetSummary summary  = 3;
+  }
+}
+
+// PingTargetResolved is the first event the server emits: the target's
+// resolved name → IP mapping and the orchestrator's WG inner address
+// the echoes are sent from. Operators use this to confirm the
+// (role, dial-addr) lookup did the right thing.
+message PingTargetResolved {
+  string target      = 1;
+  string remote_ip   = 2;
+  string source_ip   = 3;
+}
+
+// PingTargetEcho is one attempted echo's outcome. Either rtt_ms is
+// populated (the reply came back within timeout) or timeout is true
+// (no reply, deadline elapsed).
+message PingTargetEcho {
+  uint32 seq    = 1;
+  uint32 rtt_ms = 2;
+  bool   timeout = 3;
+}
+
+// PingTargetSummary is the terminal event when the stream completes
+// (count exhausted or client-cancelled). The server includes it after
+// every PingTarget RPC even when count==0 / Ctrl-C — the orchestrator
+// gracefully cancels the loop and emits one final summary.
+message PingTargetSummary {
+  uint32 transmitted     = 1;
+  uint32 received        = 2;
+  uint32 packet_loss_pct = 3;
+  uint32 rtt_min_ms      = 4;
+  uint32 rtt_avg_ms      = 5;
+  uint32 rtt_max_ms      = 6;
 }
