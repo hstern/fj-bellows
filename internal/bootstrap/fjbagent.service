@@ -1,0 +1,35 @@
+[Unit]
+Description=fj-bellows agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=fjb
+Group=fjb
+ExecStart=/usr/local/bin/fjbagent -listen ${FJBAGENT_LISTEN} -token-file /etc/fjbagent/auth.token
+Restart=on-failure
+RestartSec=2s
+KillMode=mixed
+TimeoutStopSec=5s
+
+# Hardening — the agent doesn't need any of these.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+# The token file must remain readable; /etc/fjbagent is otherwise read-only.
+ReadOnlyPaths=/etc/fjbagent
+
+# FJBAGENT_LISTEN is templated into /etc/default/fjbagent by cloud-init.
+EnvironmentFile=/etc/default/fjbagent
+
+[Install]
+WantedBy=multi-user.target

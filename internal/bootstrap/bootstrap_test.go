@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+const testRunnerVersion = "1.0.0"
+
 func TestRender(t *testing.T) {
 	out, err := Render(Params{RunnerVersion: "12.10.1"})
 	if err != nil {
@@ -26,7 +28,7 @@ func TestRender(t *testing.T) {
 }
 
 func TestRenderCustomReadyFile(t *testing.T) {
-	out, err := Render(Params{RunnerVersion: "1.0.0", ReadyFile: "/tmp/custom-ready"})
+	out, err := Render(Params{RunnerVersion: testRunnerVersion, ReadyFile: "/tmp/custom-ready"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +48,7 @@ dGVzdC1ub3QtYS1yZWFsLWtleQ==
 -----END OPENSSH PRIVATE KEY-----`
 
 func TestRenderWithHostKey(t *testing.T) {
-	out, err := Render(Params{RunnerVersion: "1.0.0", HostPrivateKey: testHostKeyPEM})
+	out, err := Render(Params{RunnerVersion: testRunnerVersion, HostPrivateKey: testHostKeyPEM})
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
@@ -79,7 +81,7 @@ func TestRenderWithHostKey(t *testing.T) {
 }
 
 func TestRenderWithoutHostKeyUnchanged(t *testing.T) {
-	out, err := Render(Params{RunnerVersion: "1.0.0"})
+	out, err := Render(Params{RunnerVersion: testRunnerVersion})
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
@@ -88,5 +90,110 @@ func TestRenderWithoutHostKeyUnchanged(t *testing.T) {
 	}
 	if !strings.Contains(out, "x86_64") || !strings.Contains(out, "aarch64") {
 		t.Error("arch detection missing")
+	}
+}
+
+func TestRenderWithoutFJBAgent_NoAgentArtifacts(t *testing.T) {
+	out, err := Render(Params{RunnerVersion: testRunnerVersion})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	// When FJBAgentDownloadURL is empty, none of the agent-install
+	// artifacts should be present — keeps the base cloud-init backward
+	// compatible for deployments that haven't enabled the agent yet.
+	for _, needle := range []string{"fjbagent.service", "/etc/fjbagent/auth.token", "useradd", "fjb:fjb"} {
+		if strings.Contains(out, needle) {
+			t.Errorf("agent artifact %q leaked into agent-disabled render:\n%s", needle, out)
+		}
+	}
+}
+
+func TestRenderWithFJBAgent_ProducesAllArtifacts(t *testing.T) {
+	url := "https://example.com/fjbagent-linux-$rarch"
+	out, err := Render(Params{
+		RunnerVersion:       testRunnerVersion,
+		FJBAgentDownloadURL: url,
+		FJBAgentToken:       "deadbeefcafe",
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	wants := []string{
+		// User + group creation via cloud-init's users module.
+		"name: fjb",
+		"primary_group: fjb",
+		"system: true",
+		// Token file with correct mode/owner.
+		"/etc/fjbagent/auth.token",
+		"'0600'",
+		"fjb:fjb",
+		"deadbeefcafe",
+		// Default env file for the systemd unit.
+		"/etc/default/fjbagent",
+		"FJBAGENT_LISTEN=0.0.0.0:9001",
+		// systemd unit text embedded from fjbagent.service.
+		"/etc/systemd/system/fjbagent.service",
+		"Type=notify",
+		"User=fjb",
+		"NoNewPrivileges=true",
+		// runcmd fetches + enables the service.
+		"curl -fsSL -o /usr/local/bin/fjbagent",
+		url,
+		"systemctl enable --now fjbagent",
+	}
+	for _, needle := range wants {
+		if !strings.Contains(out, needle) {
+			t.Errorf("expected %q in cloud-init output:\n%s", needle, out)
+		}
+	}
+}
+
+func TestRenderFJBAgent_RequiresToken(t *testing.T) {
+	_, err := Render(Params{
+		RunnerVersion:       testRunnerVersion,
+		FJBAgentDownloadURL: "https://example.com/fjbagent-linux-$rarch",
+		// FJBAgentToken intentionally unset
+	})
+	if err == nil {
+		t.Fatal("expected error when FJBAgentDownloadURL set without token")
+	}
+	if !strings.Contains(err.Error(), "FJBAgentToken") {
+		t.Errorf("error did not mention token: %v", err)
+	}
+}
+
+func TestResolveAgentDownloadURL(t *testing.T) {
+	tests := []struct {
+		name, urlTmpl, version, want string
+	}{
+		{
+			name:    "default-template",
+			urlTmpl: "",
+			version: "0.6.0",
+			want:    "https://github.com/hstern/fj-bellows/releases/download/v0.6.0/fjbagent-linux-$rarch",
+		},
+		{
+			name:    "custom-template",
+			urlTmpl: "https://internal.example/fjbagent-{{.Version}}-{{.Arch}}",
+			version: "0.6.0",
+			want:    "https://internal.example/fjbagent-0.6.0-$rarch",
+		},
+		{
+			name:    "no-placeholders",
+			urlTmpl: "https://fixed-url.example/fjbagent",
+			version: "0.6.0",
+			want:    "https://fixed-url.example/fjbagent",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveAgentDownloadURL(tt.urlTmpl, tt.version)
+			if err != nil {
+				t.Fatalf("ResolveAgentDownloadURL: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

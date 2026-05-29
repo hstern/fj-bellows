@@ -46,6 +46,12 @@ func main() {
 	controlListen := flag.String("control-listen", "127.0.0.1:9876", "control plane listen address (TCP); empty disables")
 	controlTokenFile := flag.String("control-token-file", "", "bearer-token file for the control plane (required for non-loopback binds; mode 0600)")
 	enableControlWrites := flag.Bool("enable-control-writes", false, "expose mutating control RPCs (ForceReap, ForceProvision); off by default")
+	// fjbagent (FJB-94). The agent's version implicitly tracks this
+	// orchestrator's build (main.version), so there is no per-deployment
+	// version choice — only a token file (required) and an optional URL
+	// template override (default points at the matching github release).
+	fjbAgentTokenFile := flag.String("fjbagent-token-file", "", "bearer-token file for fjbagent on workers (mode 0600); empty disables agent install")
+	fjbAgentURLTmpl := flag.String("fjbagent-url", "", "URL template for the fjbagent binary; supports {{.Version}} (resolved from this build) and $rarch (resolved by cloud-init). Empty uses the default github releases URL.")
 	flag.Parse()
 
 	// Wrap the stderr text handler with a logbus tee so the control plane's
@@ -66,6 +72,8 @@ func main() {
 		controlListen:       *controlListen,
 		controlTokenFile:    *controlTokenFile,
 		enableControlWrites: *enableControlWrites,
+		fjbAgentTokenFile:   *fjbAgentTokenFile,
+		fjbAgentURLTmpl:     *fjbAgentURLTmpl,
 	}
 	if err := run(opts, log, logBus); err != nil {
 		log.Error("fatal", "err", err)
@@ -83,7 +91,16 @@ type runOpts struct {
 	controlListen       string
 	controlTokenFile    string
 	enableControlWrites bool
+	fjbAgentTokenFile   string
+	fjbAgentURLTmpl     string
 }
+
+// version is the fj-bellows daemon's build version, stamped at link
+// time via -ldflags "-X main.version=<git describe output>". It also
+// drives the version of fjbagent installed on workers via cloud-init,
+// since agent and orchestrator share a proto and must be built from
+// the same commit.
+var version = "dev"
 
 func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 	cfg, err := config.Load(opts.configPath)
@@ -102,31 +119,16 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 
 	// SSH key is required only for providers that dispatch over SSH. A docker
 	// deployment passes nothing into cloud-init and execs into containers.
-	var (
-		signer  ssh.Signer
-		authKey string
-	)
-	if cfg.Provider != config.ProviderDocker {
-		signer, authKey, err = loadSSHKey(cfg.SSH.PrivateKeyFile)
-		if err != nil {
-			return err
-		}
+	signer, authKey, err := loadSSHKeyForProvider(cfg)
+	if err != nil {
+		return err
 	}
 
 	prov, err := provider.New(cfg.Provider)
 	if err != nil {
 		return err
 	}
-	// Hand the Linode provider the orchestrator's SSH public key so
-	// the managed cache VM (if `cache:` is set) accepts ssh from the
-	// operator for debugging. No tunnel; this is inbound-only debug
-	// access. No-op for non-Linode providers.
-	if l, ok := prov.(*linodeprov.Linode); ok && authKey != "" {
-		// ssh.MarshalAuthorizedKey appends a trailing newline; Linode's
-		// authorized_keys API rejects multi-line values with a 400.
-		// The worker Provision path already does this trim on spec.AuthorizedKey.
-		l.SetSSHAuthorizedKey(strings.TrimSpace(authKey))
-	}
+	applyAuthorizedKeyToLinodeProvider(prov, authKey)
 	// Propagate transport mode into the Linode provider so its managed
 	// firewall synthesizes the right ACCEPT rules (tcp/22 for legacy SSH,
 	// IPsec ports for cache-gateway). Duck-typed so providers that don't
@@ -179,25 +181,11 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 		return err
 	}
 
-	orch := orchestrator.New(orchestrator.Config{
-		Tag:           cfg.Tag,
-		MaxScale:      cfg.Scale.Max,
-		Labels:        cfg.Forgejo.Labels,
-		PollInterval:  cfg.Poll.Interval.D(),
-		RunnerVersion: opts.runnerVersion,
-		ReadyFile:     bootstrap.DefaultReadyFile,
-		AuthorizedKey: authKey,
-		TransportMode: cfg.Transport.Mode,
-		Teardown: orchestrator.TeardownPolicy{
-			Model:       prov.BillingModel(),
-			IdleTimeout: cfg.Poll.IdleTimeout.D(),
-			HourMargin:  cfg.Poll.HourMargin.D(),
-			BillingHour: cfg.Poll.BillingHour.D(),
-		},
-		DrainOnShutdown: opts.drain,
-		DrainTimeout:    opts.drainTimeout,
-		DestroyOnExit:   opts.destroyOnExit,
-	}, prov, fj, dispatcher, log)
+	orchCfg, err := buildOrchestratorConfig(cfg, opts, version, authKey, prov)
+	if err != nil {
+		return err
+	}
+	orch := orchestrator.New(orchCfg, prov, fj, dispatcher, log)
 
 	if err := startControlPlane(ctx, controlOpts{
 		listen:       opts.controlListen,
@@ -824,4 +812,91 @@ func acquireLock(path string) (func(), error) {
 		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		_ = f.Close()
 	}, nil
+}
+
+// loadFJBAgentSettings reads the fjbagent token from disk (if configured)
+// and resolves the binary download URL against the daemon's own build
+// version. Returns the empty-string pair when -fjbagent-token-file is
+// unset (agent install disabled).
+func loadFJBAgentSettings(opts runOpts, buildVersion string) (token, url string, err error) {
+	if opts.fjbAgentTokenFile == "" {
+		// Empty token file = agent install disabled; nothing to load.
+		return "", "", nil
+	}
+	tok, err := os.ReadFile(opts.fjbAgentTokenFile)
+	if err != nil {
+		return "", "", fmt.Errorf("read fjbagent token: %w", err)
+	}
+	t := strings.TrimSpace(string(tok))
+	if t == "" {
+		return "", "", fmt.Errorf("fjbagent token file %s is empty", opts.fjbAgentTokenFile)
+	}
+	resolvedURL, err := bootstrap.ResolveAgentDownloadURL(opts.fjbAgentURLTmpl, buildVersion)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve fjbagent URL: %w", err)
+	}
+	return t, resolvedURL, nil
+}
+
+// buildOrchestratorConfig assembles the orchestrator.Config from the
+// loaded config + flags. Extracted from run() so the latter stays under
+// the gocyclo budget after Phase B added the FJB-94 token-load branch.
+func buildOrchestratorConfig(cfg *config.Config, opts runOpts, buildVersion, authKey string, prov provider.Provider) (orchestrator.Config, error) {
+	fjbAgentToken, fjbAgentURL, err := loadFJBAgentSettings(opts, buildVersion)
+	if err != nil {
+		return orchestrator.Config{}, err
+	}
+	_ = prov // reserved for Phase C: provider-aware SetFJBAgent wiring lives in its own helper there.
+	return orchestrator.Config{
+		Tag:                 cfg.Tag,
+		MaxScale:            cfg.Scale.Max,
+		Labels:              cfg.Forgejo.Labels,
+		PollInterval:        cfg.Poll.Interval.D(),
+		RunnerVersion:       opts.runnerVersion,
+		ReadyFile:           bootstrap.DefaultReadyFile,
+		AuthorizedKey:       authKey,
+		TransportMode:       cfg.Transport.Mode,
+		FJBAgentDownloadURL: fjbAgentURL,
+		FJBAgentToken:       fjbAgentToken,
+		Teardown: orchestrator.TeardownPolicy{
+			Model:       prov.BillingModel(),
+			IdleTimeout: cfg.Poll.IdleTimeout.D(),
+			HourMargin:  cfg.Poll.HourMargin.D(),
+			BillingHour: cfg.Poll.BillingHour.D(),
+		},
+		DrainOnShutdown: opts.drain,
+		DrainTimeout:    opts.drainTimeout,
+		DestroyOnExit:   opts.destroyOnExit,
+	}, nil
+}
+
+// applyAuthorizedKeyToLinodeProvider hands the operator's SSH authorized-key
+// line to the Linode provider so the managed cache VM accepts ssh debug
+// access. No-op for non-Linode providers, no-op when authKey is empty
+// (docker-only deployments). Extracted to keep run()'s cyclomatic
+// complexity under the gocyclo budget after the FJB-94 Phase B token-load
+// branch landed.
+func applyAuthorizedKeyToLinodeProvider(prov provider.Provider, authKey string) {
+	if authKey == "" {
+		return
+	}
+	l, ok := prov.(*linodeprov.Linode)
+	if !ok {
+		return
+	}
+	// ssh.MarshalAuthorizedKey appends a trailing newline; Linode's
+	// authorized_keys API rejects multi-line values with a 400. The
+	// worker Provision path already does this trim on spec.AuthorizedKey.
+	l.SetSSHAuthorizedKey(strings.TrimSpace(authKey))
+}
+
+// loadSSHKeyForProvider loads the SSH key only for providers that dispatch
+// over SSH; docker dispatches via container exec and needs nothing. Empty
+// returns are safe for both signer and authKey on the docker path. Extracted
+// to keep run() under the gocyclo budget after FJB-94 Phase B.
+func loadSSHKeyForProvider(cfg *config.Config) (ssh.Signer, string, error) {
+	if cfg.Provider == config.ProviderDocker {
+		return nil, "", nil
+	}
+	return loadSSHKey(cfg.SSH.PrivateKeyFile)
 }

@@ -96,6 +96,12 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	s.log.Info("agent listening", "addr", ln.Addr().String())
 
+	// Tell systemd we're ready as soon as the listener is bound. Under
+	// Type=notify this is what unblocks `systemctl start fjbagent` and
+	// what the orchestrator's readiness gate watches via the unit
+	// active state. No-op outside systemd.
+	sdNotifyReady()
+
 	serveErr := make(chan error, 1)
 	go func() {
 		err := s.srv.Serve(ln)

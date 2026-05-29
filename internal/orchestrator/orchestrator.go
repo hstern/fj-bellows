@@ -49,6 +49,17 @@ type Config struct {
 	Teardown      TeardownPolicy
 	AuthorizedKey string
 
+	// FJBAgentDownloadURL is the fully-resolved URL workers fetch fjbagent
+	// from in cloud-init (FJB-94). The agent version implicitly tracks
+	// the orchestrator's build (this is the only design that makes sense
+	// — agent and orchestrator share a proto). Empty disables agent
+	// install entirely.
+	FJBAgentDownloadURL string
+	// FJBAgentToken is the per-deployment shared-secret bearer token.
+	// Required when FJBAgentDownloadURL is set. The orchestrator presents
+	// the same token in the Authorization header when dialing the agent.
+	FJBAgentToken string
+
 	// TransportMode mirrors config.Transport.Mode (FJB-72). Drives the
 	// orchestrator's choice of dial address: empty / "ssh" uses
 	// Node.IP (the legacy public IPv4 path); "cache-gateway" (FJB-54)
@@ -475,9 +486,11 @@ func (o *Orchestrator) doForceProvision(ctx context.Context) forceResult {
 		}
 	}
 	userData, err := bootstrap.Render(bootstrap.Params{
-		RunnerVersion:  o.cfg.RunnerVersion,
-		ReadyFile:      o.cfg.ReadyFile,
-		HostPrivateKey: hostPriv,
+		RunnerVersion:       o.cfg.RunnerVersion,
+		ReadyFile:           o.cfg.ReadyFile,
+		HostPrivateKey:      hostPriv,
+		FJBAgentDownloadURL: o.cfg.FJBAgentDownloadURL,
+		FJBAgentToken:       o.cfg.FJBAgentToken,
 	})
 	if err != nil {
 		o.log.Error("force-provision render cloud-init", "err", err)
@@ -705,9 +718,11 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 			}
 		}
 		userData, err := bootstrap.Render(bootstrap.Params{
-			RunnerVersion:  o.cfg.RunnerVersion,
-			ReadyFile:      o.cfg.ReadyFile,
-			HostPrivateKey: hostPriv,
+			RunnerVersion:       o.cfg.RunnerVersion,
+			ReadyFile:           o.cfg.ReadyFile,
+			HostPrivateKey:      hostPriv,
+			FJBAgentDownloadURL: o.cfg.FJBAgentDownloadURL,
+			FJBAgentToken:       o.cfg.FJBAgentToken,
 		})
 		if err != nil {
 			o.log.Error("render cloud-init", "err", err)
