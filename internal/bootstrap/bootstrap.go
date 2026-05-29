@@ -18,6 +18,12 @@ var cloudInitTemplate string
 //go:embed fjbagent.service
 var fjbagentServiceUnit string
 
+// FJBAgentServiceUnit returns the embedded fjbagent systemd unit so
+// other cloud-init renderers (the linode cache, etc.) can write the
+// same unit without duplicating the file. Returning a copy keeps the
+// embedded variable read-only to callers.
+func FJBAgentServiceUnit() string { return fjbagentServiceUnit }
+
 // DefaultReadyFile is touched by cloud-init once the worker is provisioned.
 // The orchestrator polls for it over SSH to decide a node is ready.
 const DefaultReadyFile = "/run/fj-bellows-ready"

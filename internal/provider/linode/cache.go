@@ -20,6 +20,7 @@ import (
 
 	"github.com/linode/linodego"
 
+	"github.com/hstern/fj-bellows/internal/bootstrap"
 	"github.com/hstern/fj-bellows/internal/transport/cachegateway"
 )
 
@@ -197,6 +198,13 @@ type managedCache struct {
 	vpcSubnetID   int
 	authorizedKey string
 
+	// fjbAgentDownloadURL + fjbAgentToken drive the cache's fjbagent
+	// install (FJB-94 Phase C). Empty disables agent install on the
+	// cache, matching the worker-side opt-in. Wired by SetFJBAgent at
+	// provider configure time.
+	fjbAgentDownloadURL string
+	fjbAgentToken       string
+
 	// workerVPCSubnet is the CIDR (e.g. "10.0.0.0/24") of the VPC subnet
 	// workers attach to. Used at cache-create time to bake the
 	// fjb-iptables FORWARD chain into cloud-init (FJB-98). Empty when
@@ -311,6 +319,14 @@ func (m *managedCache) setHardwareContext(firewallID, vpcSubnetID int, authorize
 	m.workerVPCSubnet = workerVPCSubnet
 }
 
+// setFJBAgent wires the fjbagent install knobs that the cache cloud-init
+// renderer expects (FJB-94 Phase C). Both empty disables the install;
+// both non-empty enables it. Called by Linode.SetFJBAgent.
+func (m *managedCache) setFJBAgent(downloadURL, token string) {
+	m.fjbAgentDownloadURL = downloadURL
+	m.fjbAgentToken = token
+}
+
 // setOrchestratorWGPubkey supplies the orchestrator's WG public key
 // (FJB-99 Phase A). Called by the Linode provider after the daemon has
 // loaded its own keypair from disk; the value lands in cloud-init at
@@ -394,16 +410,19 @@ func (m *managedCache) createFreshCacheLinode(ctx context.Context, pair cacheCer
 		return fmt.Errorf("render fjb-iptables: %w", err)
 	}
 	params := cacheCloudInitParams{
-		Bucket:         creds.Bucket,
-		Region:         creds.Region,
-		Endpoint:       creds.Endpoint,
-		AccessKey:      creds.AccessKey,
-		SecretKey:      creds.SecretKey,
-		ZotVersion:     m.cfg.resolvedZotVersion(),
-		ReadyFile:      defaultCacheReadyFile,
-		ServerCertPEM:  string(pair.ServerCertPEM),
-		ServerKeyPEM:   string(pair.ServerKeyPEM),
-		IPTablesScript: iptablesScript,
+		Bucket:              creds.Bucket,
+		Region:              creds.Region,
+		Endpoint:            creds.Endpoint,
+		AccessKey:           creds.AccessKey,
+		SecretKey:           creds.SecretKey,
+		ZotVersion:          m.cfg.resolvedZotVersion(),
+		ReadyFile:           defaultCacheReadyFile,
+		ServerCertPEM:       string(pair.ServerCertPEM),
+		ServerKeyPEM:        string(pair.ServerKeyPEM),
+		IPTablesScript:      iptablesScript,
+		FJBAgentDownloadURL: m.fjbAgentDownloadURL,
+		FJBAgentToken:       m.fjbAgentToken,
+		FJBAgentServiceUnit: bootstrap.FJBAgentServiceUnit(),
 	}
 	if m.transportMode == "cache-gateway" && m.orchestratorWGPubkey != "" {
 		params.OrchestratorWGPubkey = m.orchestratorWGPubkey
@@ -777,6 +796,17 @@ type cacheCloudInitParams struct {
 	OrchestratorWGAddr   string // e.g. "100.64.0.1"
 	CacheWGAddr          string // e.g. "100.64.0.2"
 	WGListenPort         int    // UDP, e.g. 51820
+
+	// FJBAgentDownloadURL + FJBAgentToken + FJBAgentServiceUnit drive
+	// the same fjbagent install on the cache as on workers (FJB-94
+	// Phase C). All-or-nothing: when FJBAgentDownloadURL is non-empty,
+	// FJBAgentToken and FJBAgentServiceUnit must also be populated.
+	// FJBAgentListenPort defaults to bootstrap.DefaultAgentListenPort
+	// in the renderer when zero.
+	FJBAgentDownloadURL string
+	FJBAgentToken       string
+	FJBAgentServiceUnit string
+	FJBAgentListenPort  int
 }
 
 // renderCacheCloudInit fills the embedded template. Defaults to the
@@ -788,6 +818,17 @@ func renderCacheCloudInit(p cacheCloudInitParams) (string, error) {
 	}
 	if p.ReadyFile == "" {
 		p.ReadyFile = defaultCacheReadyFile
+	}
+	if p.FJBAgentDownloadURL != "" {
+		if p.FJBAgentToken == "" {
+			return "", errors.New("cache cloud-init: FJBAgentToken required when FJBAgentDownloadURL is set")
+		}
+		if p.FJBAgentServiceUnit == "" {
+			return "", errors.New("cache cloud-init: FJBAgentServiceUnit required when FJBAgentDownloadURL is set")
+		}
+		if p.FJBAgentListenPort == 0 {
+			p.FJBAgentListenPort = bootstrap.DefaultAgentListenPort
+		}
 	}
 	tmpl, err := template.New("cache").Funcs(template.FuncMap{
 		"b64enc": func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) },
