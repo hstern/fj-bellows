@@ -846,7 +846,12 @@ func buildOrchestratorConfig(cfg *config.Config, opts runOpts, buildVersion, aut
 	if err != nil {
 		return orchestrator.Config{}, err
 	}
-	_ = prov // reserved for Phase C: provider-aware SetFJBAgent wiring lives in its own helper there.
+	// Phase C: push the resolved knobs into the provider via duck-typing
+	// so the managed cache renders the same install block as workers.
+	// Providers that don't implement SetFJBAgent (docker) are unaffected.
+	if a, ok := prov.(interface{ SetFJBAgent(string, string) }); ok {
+		a.SetFJBAgent(fjbAgentURL, fjbAgentToken)
+	}
 	return orchestrator.Config{
 		Tag:                 cfg.Tag,
 		MaxScale:            cfg.Scale.Max,

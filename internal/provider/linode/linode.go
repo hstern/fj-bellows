@@ -196,6 +196,17 @@ func (l *Linode) SetTransportMode(mode string) {
 	l.transportMode = mode
 }
 
+// SetFJBAgent wires the per-deployment fjbagent install knobs into the
+// managed cache (FJB-94 Phase C). Empty pair disables the install on
+// the cache. Duck-typed from cmd/fj-bellows so non-linode providers
+// (docker) are unaffected. No-op when the cache isn't configured.
+func (l *Linode) SetFJBAgent(downloadURL, token string) {
+	if l.cache == nil {
+		return
+	}
+	l.cache.setFJBAgent(downloadURL, token)
+}
+
 // SetACLSource wires the orchestrator's ACL snapshot adapter into the
 // Linode provider's managed cache (FJB-88 / FJB-90). The provider
 // reads it on every Provision so the worker cloud-init's `ip route

@@ -17,6 +17,10 @@ import (
 	"github.com/hstern/fj-bellows/gen/fjbellows/agent/v1/agentv1connect"
 )
 
+// execTestArgvBin is the binary used across exec tests. Extracted so
+// goconst doesn't complain about repeated string literals.
+const execTestArgvBin = "echo"
+
 // execTestSetup spins up an in-process agent server reachable via H2C
 // (Connect bidi streaming needs HTTP/2). Returns a connected client and
 // a teardown.
@@ -86,7 +90,7 @@ func TestExec_Echo(t *testing.T) {
 	defer teardown()
 
 	out, errOut, code, sig, err := runExec(t, client,
-		&agentv1.ExecOpen{Argv: []string{"echo", "hello"}}, nil)
+		&agentv1.ExecOpen{Argv: []string{execTestArgvBin, "hello"}}, nil)
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -190,7 +194,7 @@ func TestExec_RejectsTTY(t *testing.T) {
 	defer teardown()
 
 	_, _, _, _, err := runExec(t, client,
-		&agentv1.ExecOpen{Argv: []string{"echo"}, Tty: true}, nil)
+		&agentv1.ExecOpen{Argv: []string{execTestArgvBin}, Tty: true}, nil)
 	if err == nil {
 		t.Fatal("Exec with tty=true succeeded, want CodeUnimplemented")
 	}
@@ -300,7 +304,7 @@ func TestExec_BearerAuth(t *testing.T) {
 	stream := client.Exec(context.Background())
 	defer func() { _ = stream.CloseRequest() }()
 	_ = stream.Send(&agentv1.ShellMsg{Kind: &agentv1.ShellMsg_Open{
-		Open: &agentv1.ExecOpen{Argv: []string{"echo"}},
+		Open: &agentv1.ExecOpen{Argv: []string{execTestArgvBin}},
 	}})
 	_, err := stream.Receive()
 	if err == nil {

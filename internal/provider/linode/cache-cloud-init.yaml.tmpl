@@ -25,7 +25,38 @@ packages:
   - wireguard
   - awscli
 {{- end}}
+{{- if .FJBAgentDownloadURL}}
+# fjbagent (FJB-94 Phase C, cache role). Same shape as the worker
+# install — unprivileged `fjb` system user, /etc/fjbagent/auth.token,
+# systemd Type=notify unit. The orchestrator dials this listener over
+# WG (the cache is a direct WG peer); 0.0.0.0:9001 is fine because the
+# cache firewall drops public tcp/9001 and WG-tunneled traffic doesn't
+# traverse the public stack.
+groups:
+  - fjb
+users:
+  - name: fjb
+    system: true
+    no_create_home: true
+    shell: /usr/sbin/nologin
+    primary_group: fjb
+{{- end}}
 write_files:
+{{- if .FJBAgentDownloadURL}}
+  - path: /etc/fjbagent/auth.token
+    permissions: '0600'
+    owner: 'fjb:fjb'
+    content: |
+      {{.FJBAgentToken}}
+  - path: /etc/default/fjbagent
+    permissions: '0644'
+    content: |
+      FJBAGENT_LISTEN=0.0.0.0:{{.FJBAgentListenPort}}
+  - path: /etc/systemd/system/fjbagent.service
+    permissions: '0644'
+    content: |
+{{.FJBAgentServiceUnit | indent 6}}
+{{- end}}
   - path: /etc/zot/config.json
     permissions: '0640'
     content: |
@@ -166,4 +197,18 @@ runcmd:
 {{- end}}
   - systemctl daemon-reload
   - systemctl enable --now zot.service
+{{- if .FJBAgentDownloadURL}}
+  - |
+    set -eu
+    arch="$(uname -m)"
+    case "$arch" in
+      x86_64) rarch=amd64 ;;
+      aarch64|arm64) rarch=arm64 ;;
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+    esac
+    url="{{.FJBAgentDownloadURL}}"
+    curl -fsSL -o /usr/local/bin/fjbagent "$url"
+    chmod +x /usr/local/bin/fjbagent
+  - systemctl enable --now fjbagent
+{{- end}}
   - touch {{.ReadyFile}}

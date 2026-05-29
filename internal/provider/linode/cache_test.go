@@ -1020,3 +1020,81 @@ func TestWorkerExtrasErrorsWhenVPCIPNotAssigned(t *testing.T) {
 		t.Errorf("error should mention VPC IP, got: %v", err)
 	}
 }
+
+func TestRenderCacheCloudInit_WithoutFJBAgent_NoAgentArtifacts(t *testing.T) {
+	out, err := renderCacheCloudInit(cacheCloudInitParams{ //nolint:gosec // G101 false-positive on PEM-shaped test stubs
+		Bucket:        "b",
+		Region:        testBucketRegion,
+		Endpoint:      testStubEndpoint,
+		AccessKey:     "AK",
+		SecretKey:     "SK",
+		ZotVersion:    defaultZotVersion,
+		ServerCertPEM: "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n",
+		ServerKeyPEM:  "-----BEGIN EC PRIVATE KEY-----\nX\n-----END EC PRIVATE KEY-----\n",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	for _, needle := range []string{"fjbagent.service", "/etc/fjbagent/auth.token", "name: fjb"} {
+		if strings.Contains(out, needle) {
+			t.Errorf("agent artifact %q leaked into agent-disabled cache render", needle)
+		}
+	}
+}
+
+func TestRenderCacheCloudInit_WithFJBAgent_ProducesAllArtifacts(t *testing.T) {
+	out, err := renderCacheCloudInit(cacheCloudInitParams{ //nolint:gosec // G101 false-positive on PEM-shaped test stubs
+		Bucket:              "b",
+		Region:              testBucketRegion,
+		Endpoint:            testStubEndpoint,
+		AccessKey:           "AK",
+		SecretKey:           "SK",
+		ZotVersion:          defaultZotVersion,
+		ServerCertPEM:       "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n",
+		ServerKeyPEM:        "-----BEGIN EC PRIVATE KEY-----\nX\n-----END EC PRIVATE KEY-----\n",
+		FJBAgentDownloadURL: "https://example.com/fjbagent-linux-$rarch",
+		FJBAgentToken:       "cafebabedead",
+		FJBAgentServiceUnit: "[Unit]\nDescription=fj-bellows agent\n",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	wants := []string{
+		"name: fjb",
+		"primary_group: fjb",
+		"/etc/fjbagent/auth.token",
+		"cafebabedead",
+		"FJBAGENT_LISTEN=0.0.0.0:9001",
+		"/etc/systemd/system/fjbagent.service",
+		"[Unit]",
+		"https://example.com/fjbagent-linux-$rarch",
+		"systemctl enable --now fjbagent",
+	}
+	for _, needle := range wants {
+		if !strings.Contains(out, needle) {
+			t.Errorf("expected %q in cache cloud-init:\n%s", needle, out)
+		}
+	}
+}
+
+func TestRenderCacheCloudInit_FJBAgent_RequiresToken(t *testing.T) {
+	_, err := renderCacheCloudInit(cacheCloudInitParams{ //nolint:gosec // G101 false-positive on PEM-shaped test stubs
+		Bucket:              "b",
+		Region:              testBucketRegion,
+		Endpoint:            testStubEndpoint,
+		AccessKey:           "AK",
+		SecretKey:           "SK",
+		ZotVersion:          defaultZotVersion,
+		ServerCertPEM:       "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n",
+		ServerKeyPEM:        "-----BEGIN EC PRIVATE KEY-----\nX\n-----END EC PRIVATE KEY-----\n",
+		FJBAgentDownloadURL: "https://example.com/fjbagent-linux-$rarch",
+		FJBAgentServiceUnit: "[Unit]\n",
+		// Token intentionally unset
+	})
+	if err == nil {
+		t.Fatal("expected error when FJBAgentDownloadURL set without token")
+	}
+	if !strings.Contains(err.Error(), "FJBAgentToken") {
+		t.Errorf("error did not mention token: %v", err)
+	}
+}
