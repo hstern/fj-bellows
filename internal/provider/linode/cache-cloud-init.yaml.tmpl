@@ -105,14 +105,17 @@ write_files:
       EOC
       chmod 0600 /etc/wireguard/wg0.conf
       systemctl enable --now wg-quick@wg0
-      # Publish own pubkey so the orchestrator can read it from S3 and
-      # complete the wg peer config on its side (FJB-99 Phase B).
+      # Publish own pubkey so the orchestrator can read it via plain
+      # HTTPS GET and complete the wg peer config on its side (FJB-99
+      # Phase B). WG public keys are designed to be world-readable —
+      # exposing one over public-read costs nothing.
       AWS_ACCESS_KEY_ID='{{.AccessKey}}' \
       AWS_SECRET_ACCESS_KEY='{{.SecretKey}}' \
       AWS_DEFAULT_REGION='{{.Region}}' \
         aws --endpoint-url '{{.Endpoint}}' \
             s3 cp /etc/wireguard/publickey \
-                  s3://{{.Bucket}}/wg-pubkey.txt
+                  s3://{{.Bucket}}/wg-pubkey.txt \
+            --acl public-read
 {{- end}}
   - path: /etc/systemd/system/zot.service
     permissions: '0644'

@@ -254,14 +254,16 @@ func (w *WG) validate() error {
 }
 
 func (p *WGPeer) validate() error {
-	if p.PublicKey == "" {
-		return errors.New("public_key is required")
-	}
-	if p.Endpoint == "" {
-		return errors.New("endpoint is required")
-	}
-	if _, _, err := net.SplitHostPort(p.Endpoint); err != nil {
-		return fmt.Errorf("endpoint %q is not host:port: %w", p.Endpoint, err)
+	// public_key + endpoint are runtime-discoverable from FJB-99's
+	// cache wg-bootstrap loop (the cache writes its pubkey to S3; the
+	// orchestrator reads the cache's public IPv4 from the Linode API).
+	// Either may be empty at config-validate time; wgboot's planBoot
+	// is the load-bearing check that both end up populated by the
+	// time the tunnel is brought up.
+	if p.Endpoint != "" {
+		if _, _, err := net.SplitHostPort(p.Endpoint); err != nil {
+			return fmt.Errorf("endpoint %q is not host:port: %w", p.Endpoint, err)
+		}
 	}
 	if len(p.AllowedIPs) == 0 {
 		return errors.New("allowed_ips must list at least one CIDR")

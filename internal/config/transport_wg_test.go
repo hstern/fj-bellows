@@ -156,7 +156,6 @@ func TestWG_DefaultKeepaliveOneSecond(t *testing.T) {
 	}
 }
 
-//nolint:funlen // table-driven: 11 small validation cases inline for readability.
 func TestWG_Validation(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -199,30 +198,6 @@ func TestWG_Validation(t *testing.T) {
       allowed_ips: [10.99.0.2/32]
 `,
 			wantSub: `local_addr = "not-a-cidr"`,
-		},
-		{
-			name: "missing peer public key",
-			wgBlock: `
-  wg:
-    private_key_file: /tmp/k
-    local_addr: 10.99.0.1/32
-    peer:
-      endpoint: 172.234.203.50:51820
-      allowed_ips: [10.99.0.2/32]
-`,
-			wantSub: "public_key is required",
-		},
-		{
-			name: "missing peer endpoint",
-			wgBlock: `
-  wg:
-    private_key_file: /tmp/k
-    local_addr: 10.99.0.1/32
-    peer:
-      public_key: AbcDefGhiJklMnoPqrStuVwxYzAbcDefGhiJklMnoPqs=
-      allowed_ips: [10.99.0.2/32]
-`,
-			wantSub: "endpoint is required",
 		},
 		{
 			name: "bad peer endpoint shape",

@@ -111,6 +111,19 @@ type Config struct {
 	// Logger receives boot + runtime events. Falls back to
 	// slog.Default when nil.
 	Logger *slog.Logger
+
+	// CachePubkey + CacheEndpoint are the runtime-discovered peer
+	// values from the FJB-99 bootstrap loop. When non-empty they
+	// override Transport.WG.Peer.PublicKey + Transport.WG.Peer.Endpoint
+	// — the cache nanode generates its keypair at first boot and
+	// publishes its pubkey to S3; cmd/fj-bellows polls for it
+	// (managedCache.WaitForWGPubkey) and the public IP comes from
+	// the Linode API (managedCache.PublicEndpoint). Leaving the static
+	// transport.wg.peer.{public_key,endpoint} config knobs populated
+	// remains supported as a back-compat path; the override takes
+	// precedence when both are present.
+	CachePubkey   string
+	CacheEndpoint string
 }
 
 // Stack is the running cache-gateway transport. Returned by Boot,
@@ -245,11 +258,25 @@ func planBoot(cfg Config, log *slog.Logger) (*bootPlan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wgboot: parse local_addr %q: %w", cfg.Transport.WG.LocalAddr, err)
 	}
-	endpoint, err := net.ResolveUDPAddr("udp", cfg.Transport.WG.Peer.Endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("wgboot: resolve peer endpoint %q: %w", cfg.Transport.WG.Peer.Endpoint, err)
+	endpointStr := cfg.Transport.WG.Peer.Endpoint
+	if cfg.CacheEndpoint != "" {
+		endpointStr = cfg.CacheEndpoint
 	}
-	peerKey, err := wg.DecodeKey(cfg.Transport.WG.Peer.PublicKey)
+	if endpointStr == "" {
+		return nil, errors.New("wgboot: cache endpoint unset — set transport.wg.peer.endpoint, or provide CacheEndpoint via the FJB-99 bootstrap loop")
+	}
+	endpoint, err := net.ResolveUDPAddr("udp", endpointStr)
+	if err != nil {
+		return nil, fmt.Errorf("wgboot: resolve peer endpoint %q: %w", endpointStr, err)
+	}
+	peerKeyStr := cfg.Transport.WG.Peer.PublicKey
+	if cfg.CachePubkey != "" {
+		peerKeyStr = cfg.CachePubkey
+	}
+	if peerKeyStr == "" {
+		return nil, errors.New("wgboot: cache pubkey unset — set transport.wg.peer.public_key, or provide CachePubkey via the FJB-99 bootstrap loop")
+	}
+	peerKey, err := wg.DecodeKey(peerKeyStr)
 	if err != nil {
 		return nil, fmt.Errorf("wgboot: parse peer public_key: %w", err)
 	}

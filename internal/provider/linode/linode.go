@@ -252,6 +252,31 @@ func (l *Linode) SetOrchestratorWGPubkey(pubkey string) {
 	l.orchestratorWGPubkey = pubkey
 }
 
+// WaitForCacheWGPubkey blocks until the cache's first-boot cloud-init
+// publishes its WG pubkey to the Object Storage bucket, or until ctx
+// is canceled / timeout elapses. Returns the trimmed pubkey for use
+// as the wgboot WG peer config. FJB-99 Phase B — orchestrator side
+// of the bootstrap loop. Returns ("", error) when no managed cache
+// exists or it hasn't been ensured yet.
+func (l *Linode) WaitForCacheWGPubkey(ctx context.Context, timeout time.Duration) (string, error) {
+	if l.cache == nil {
+		return "", errors.New("linode: no managed cache configured")
+	}
+	return l.cache.WaitForWGPubkey(ctx, timeout)
+}
+
+// CachePublicEndpoint returns the cache's WG peer endpoint as
+// host:port (e.g. "172.234.203.50:51820") for the wgboot peer config.
+// The port comes from l.wgListenPort (operator-configured listen port,
+// captured by SetWGListenPort before Configure) or defaults to 51820.
+// FJB-99 Phase B. Returns ("", error) when no managed cache exists.
+func (l *Linode) CachePublicEndpoint(ctx context.Context) (string, error) {
+	if l.cache == nil {
+		return "", errors.New("linode: no managed cache configured")
+	}
+	return l.cache.PublicEndpoint(ctx, l.wgListenPort)
+}
+
 // CacheStatus returns the managed-cache snapshot consumed by the control
 // plane's GetCache RPC. Returns nil when no `cache:` block is configured;
 // the control handler then reports Present=false to the wire. The Linode
