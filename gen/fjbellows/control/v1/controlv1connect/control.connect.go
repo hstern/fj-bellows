@@ -71,6 +71,9 @@ const (
 	// ControlServiceProviderInfoProcedure is the fully-qualified name of the ControlService's
 	// ProviderInfo RPC.
 	ControlServiceProviderInfoProcedure = "/fjbellows.control.v1.ControlService/ProviderInfo"
+	// ControlServicePingTargetProcedure is the fully-qualified name of the ControlService's PingTarget
+	// RPC.
+	ControlServicePingTargetProcedure = "/fjbellows.control.v1.ControlService/PingTarget"
 )
 
 // ControlServiceClient is a client for the fjbellows.control.v1.ControlService service.
@@ -168,6 +171,17 @@ type ControlServiceClient interface {
 	// `internal/provider/<name>/README.md`. Useful for capacity-full incidents
 	// (FJB-11), account-state checks, and confirming managed-resource IDs.
 	ProviderInfo(context.Context, *connect.Request[v1.ProviderInfoRequest]) (*connect.Response[v1.ProviderInfoResponse], error)
+	// PingTarget probes a named target (worker / cache) over the WG netstack
+	// with ICMP echo (FJB-97 Phase A). Server-streaming: one PingTargetEvent
+	// per attempted echo (success or timeout), followed by a final summary
+	// event. Phase B adds a separate WaitForTarget RPC that gates on either
+	// ICMP success alone or ICMP + agent.Health, with a single terminal
+	// outcome.
+	//
+	// Target resolution lives in the orchestrator: "worker-<instance_id>"
+	// looks up the worker's VPC IP from the pool; "cache" resolves to the
+	// cache's WG inner address. fjbctl never sees a raw IP.
+	PingTarget(context.Context, *connect.Request[v1.PingTargetRequest]) (*connect.ServerStreamForClient[v1.PingTargetEvent], error)
 }
 
 // NewControlServiceClient constructs a client for the fjbellows.control.v1.ControlService service.
@@ -265,6 +279,12 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("ProviderInfo")),
 			connect.WithClientOptions(opts...),
 		),
+		pingTarget: connect.NewClient[v1.PingTargetRequest, v1.PingTargetEvent](
+			httpClient,
+			baseURL+ControlServicePingTargetProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("PingTarget")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -284,6 +304,7 @@ type controlServiceClient struct {
 	execOnWorker   *connect.Client[v1.ExecOnWorkerRequest, v1.ExecOnWorkerResponse]
 	streamLogs     *connect.Client[v1.StreamLogsRequest, v1.StreamLogsResponse]
 	providerInfo   *connect.Client[v1.ProviderInfoRequest, v1.ProviderInfoResponse]
+	pingTarget     *connect.Client[v1.PingTargetRequest, v1.PingTargetEvent]
 }
 
 // Health calls fjbellows.control.v1.ControlService.Health.
@@ -354,6 +375,11 @@ func (c *controlServiceClient) StreamLogs(ctx context.Context, req *connect.Requ
 // ProviderInfo calls fjbellows.control.v1.ControlService.ProviderInfo.
 func (c *controlServiceClient) ProviderInfo(ctx context.Context, req *connect.Request[v1.ProviderInfoRequest]) (*connect.Response[v1.ProviderInfoResponse], error) {
 	return c.providerInfo.CallUnary(ctx, req)
+}
+
+// PingTarget calls fjbellows.control.v1.ControlService.PingTarget.
+func (c *controlServiceClient) PingTarget(ctx context.Context, req *connect.Request[v1.PingTargetRequest]) (*connect.ServerStreamForClient[v1.PingTargetEvent], error) {
+	return c.pingTarget.CallServerStream(ctx, req)
 }
 
 // ControlServiceHandler is an implementation of the fjbellows.control.v1.ControlService service.
@@ -451,6 +477,17 @@ type ControlServiceHandler interface {
 	// `internal/provider/<name>/README.md`. Useful for capacity-full incidents
 	// (FJB-11), account-state checks, and confirming managed-resource IDs.
 	ProviderInfo(context.Context, *connect.Request[v1.ProviderInfoRequest]) (*connect.Response[v1.ProviderInfoResponse], error)
+	// PingTarget probes a named target (worker / cache) over the WG netstack
+	// with ICMP echo (FJB-97 Phase A). Server-streaming: one PingTargetEvent
+	// per attempted echo (success or timeout), followed by a final summary
+	// event. Phase B adds a separate WaitForTarget RPC that gates on either
+	// ICMP success alone or ICMP + agent.Health, with a single terminal
+	// outcome.
+	//
+	// Target resolution lives in the orchestrator: "worker-<instance_id>"
+	// looks up the worker's VPC IP from the pool; "cache" resolves to the
+	// cache's WG inner address. fjbctl never sees a raw IP.
+	PingTarget(context.Context, *connect.Request[v1.PingTargetRequest], *connect.ServerStream[v1.PingTargetEvent]) error
 }
 
 // NewControlServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -544,6 +581,12 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("ProviderInfo")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServicePingTargetHandler := connect.NewServerStreamHandler(
+		ControlServicePingTargetProcedure,
+		svc.PingTarget,
+		connect.WithSchema(controlServiceMethods.ByName("PingTarget")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/fjbellows.control.v1.ControlService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlServiceHealthProcedure:
@@ -574,6 +617,8 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 			controlServiceStreamLogsHandler.ServeHTTP(w, r)
 		case ControlServiceProviderInfoProcedure:
 			controlServiceProviderInfoHandler.ServeHTTP(w, r)
+		case ControlServicePingTargetProcedure:
+			controlServicePingTargetHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -637,4 +682,8 @@ func (UnimplementedControlServiceHandler) StreamLogs(context.Context, *connect.R
 
 func (UnimplementedControlServiceHandler) ProviderInfo(context.Context, *connect.Request[v1.ProviderInfoRequest]) (*connect.Response[v1.ProviderInfoResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ProviderInfo is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) PingTarget(context.Context, *connect.Request[v1.PingTargetRequest], *connect.ServerStream[v1.PingTargetEvent]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.PingTarget is not implemented"))
 }
