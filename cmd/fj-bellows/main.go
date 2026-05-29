@@ -196,32 +196,11 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 		return err
 	}
 
-	fjbAgentToken, fjbAgentURL, err := loadFJBAgentSettings(opts, version)
+	orchCfg, err := buildOrchestratorConfig(cfg, opts, version, authKey, prov)
 	if err != nil {
 		return err
 	}
-
-	orch := orchestrator.New(orchestrator.Config{
-		Tag:                 cfg.Tag,
-		MaxScale:            cfg.Scale.Max,
-		Labels:              cfg.Forgejo.Labels,
-		PollInterval:        cfg.Poll.Interval.D(),
-		RunnerVersion:       opts.runnerVersion,
-		ReadyFile:           bootstrap.DefaultReadyFile,
-		AuthorizedKey:       authKey,
-		TransportMode:       cfg.Transport.Mode,
-		FJBAgentDownloadURL: fjbAgentURL,
-		FJBAgentToken:       fjbAgentToken,
-		Teardown: orchestrator.TeardownPolicy{
-			Model:       prov.BillingModel(),
-			IdleTimeout: cfg.Poll.IdleTimeout.D(),
-			HourMargin:  cfg.Poll.HourMargin.D(),
-			BillingHour: cfg.Poll.BillingHour.D(),
-		},
-		DrainOnShutdown: opts.drain,
-		DrainTimeout:    opts.drainTimeout,
-		DestroyOnExit:   opts.destroyOnExit,
-	}, prov, fj, dispatcher, log)
+	orch := orchestrator.New(orchCfg, prov, fj, dispatcher, log)
 
 	if err := startControlPlane(ctx, controlOpts{
 		listen:       opts.controlListen,
@@ -823,4 +802,36 @@ func loadFJBAgentSettings(opts runOpts, buildVersion string) (token, url string,
 		return "", "", fmt.Errorf("resolve fjbagent URL: %w", err)
 	}
 	return t, resolvedURL, nil
+}
+
+// buildOrchestratorConfig assembles the orchestrator.Config from the
+// loaded config + flags. Extracted from run() so the latter stays under
+// the gocyclo budget after Phase B added the FJB-94 token-load branch.
+func buildOrchestratorConfig(cfg *config.Config, opts runOpts, buildVersion, authKey string, prov provider.Provider) (orchestrator.Config, error) {
+	fjbAgentToken, fjbAgentURL, err := loadFJBAgentSettings(opts, buildVersion)
+	if err != nil {
+		return orchestrator.Config{}, err
+	}
+	_ = prov // reserved for Phase C: provider-aware SetFJBAgent wiring lives in its own helper there.
+	return orchestrator.Config{
+		Tag:                 cfg.Tag,
+		MaxScale:            cfg.Scale.Max,
+		Labels:              cfg.Forgejo.Labels,
+		PollInterval:        cfg.Poll.Interval.D(),
+		RunnerVersion:       opts.runnerVersion,
+		ReadyFile:           bootstrap.DefaultReadyFile,
+		AuthorizedKey:       authKey,
+		TransportMode:       cfg.Transport.Mode,
+		FJBAgentDownloadURL: fjbAgentURL,
+		FJBAgentToken:       fjbAgentToken,
+		Teardown: orchestrator.TeardownPolicy{
+			Model:       prov.BillingModel(),
+			IdleTimeout: cfg.Poll.IdleTimeout.D(),
+			HourMargin:  cfg.Poll.HourMargin.D(),
+			BillingHour: cfg.Poll.BillingHour.D(),
+		},
+		DrainOnShutdown: opts.drain,
+		DrainTimeout:    opts.drainTimeout,
+		DestroyOnExit:   opts.destroyOnExit,
+	}, nil
 }
