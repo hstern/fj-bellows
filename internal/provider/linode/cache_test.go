@@ -5,10 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/linode/linodego"
 )
@@ -22,7 +27,10 @@ const (
 	// Shared cloud-init renderer fixtures used across cache_test.go
 	// and cache_tunnel_test.go — extracted so goconst doesn't flag
 	// repeated literals.
-	testStubEndpoint   = "https://x"
+	testStubEndpoint = "https://x"
+	// testFJBCacheLabel is the placeholder bucket label used across the
+	// renderer + Phase-B WG-bootstrap polling tests.
+	testFJBCacheLabel  = "fjb-cache-test"
 	testStubZotVersion = "1.0.0"
 )
 
@@ -393,7 +401,7 @@ func TestRenderCacheCloudInitProducesValidCloudInit(t *testing.T) {
 	const stubCertPEM = "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n"
 	const stubKeyPEM = "-----BEGIN EC PRIVATE KEY-----\nMOCK\n-----END EC PRIVATE KEY-----\n" //nolint:gosec // G101: test fixture, not a real key
 	out, err := renderCacheCloudInit(cacheCloudInitParams{
-		Bucket:        "fjb-cache-test",
+		Bucket:        testFJBCacheLabel,
 		Region:        testBucketRegion,
 		Endpoint:      testBucketEndpoint,
 		AccessKey:     "AK",
@@ -407,7 +415,7 @@ func TestRenderCacheCloudInitProducesValidCloudInit(t *testing.T) {
 	}
 	for _, want := range []string{
 		"#cloud-config",
-		"fjb-cache-test",
+		testFJBCacheLabel,
 		testBucketEndpoint,
 		"\"accesskey\": \"AK\"",
 		"\"secretkey\": \"SK\"",
@@ -517,7 +525,7 @@ func TestRenderCacheCloudInitIPTablesBakeIn(t *testing.T) {
 func TestRenderCacheCloudInitWGBootstrap(t *testing.T) {
 	const orchPubkey = "ZmFrZS1vcmNoZXN0cmF0b3ItcHViLWtleS0xMjM0NTY3OD0="
 	withWG, err := renderCacheCloudInit(cacheCloudInitParams{
-		Bucket:               "fjb-cache-test",
+		Bucket:               testFJBCacheLabel,
 		Region:               testBucketRegion,
 		Endpoint:             "https://us-ord-1.linodeobjects.com",
 		AccessKey:            "AK",
@@ -544,7 +552,7 @@ func TestRenderCacheCloudInitWGBootstrap(t *testing.T) {
 		"AllowedIPs = 100.64.0.1/32",
 		"PersistentKeepalive = 25",
 		"systemctl enable --now wg-quick@wg0",
-		"s3://fjb-cache-test/wg-pubkey.txt",
+		"s3://" + testFJBCacheLabel + "/wg-pubkey.txt",
 		"--endpoint-url 'https://us-ord-1.linodeobjects.com'",
 	} {
 		if !strings.Contains(withWG, want) {
@@ -611,6 +619,79 @@ func TestRenderIPTablesForCacheGateway(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("cache-gateway render missing %q\n---\n%s", want, got)
 		}
+	}
+}
+
+// FJB-99 Phase B: WaitForWGPubkey polls the bucket URL until the
+// cache's first-boot cloud-init has uploaded the public key, then
+// returns its trimmed contents.
+func TestWaitForWGPubkey_PollsBucketUntilFound(t *testing.T) {
+	var hits atomic.Int32
+	const wantPub = "ZmFrZS1jYWNoZS13Zy1wdWJrZXk="
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/"+testFJBCacheLabel+"/wg-pubkey.txt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		n := hits.Add(1)
+		if n < 2 {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// Trailing whitespace must be trimmed by the caller.
+		_, _ = w.Write([]byte(wantPub + "\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	bucket := &managedBucket{endpoint: srv.URL, label: testFJBCacheLabel}
+	m := &managedCache{bucket: bucket, log: slog.Default()}
+
+	got, err := m.WaitForWGPubkey(t.Context(), 30*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForWGPubkey: %v", err)
+	}
+	if got != wantPub {
+		t.Errorf("pubkey = %q, want %q", got, wantPub)
+	}
+	if hits.Load() < 2 {
+		t.Errorf("expected at least 2 polls, got %d", hits.Load())
+	}
+}
+
+// FJB-99 Phase B: WaitForWGPubkey honors the timeout argument.
+func TestWaitForWGPubkey_TimeoutSurfacesAsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	bucket := &managedBucket{endpoint: srv.URL, label: testFJBCacheLabel}
+	m := &managedCache{bucket: bucket, log: slog.Default()}
+
+	_, err := m.WaitForWGPubkey(t.Context(), 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("WaitForWGPubkey: want timeout error; got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("err = %v, want substring 'timed out'", err)
+	}
+}
+
+// FJB-99 Phase B: PublicEndpoint picks the public IPv4 (not the VPC
+// /private one) and appends the supplied port.
+func TestPublicEndpoint_PicksPublicIPv4(t *testing.T) {
+	fc := newFakeCacheClient()
+	publicIP := net.ParseIP("172.234.203.50").To4()
+	privateIP := net.ParseIP("10.0.0.2").To4()
+	fc.insts[55] = &linodego.Instance{
+		ID:   55,
+		IPv4: []*net.IP{&publicIP, &privateIP},
+	}
+	m := &managedCache{client: fc, log: slog.Default(), linodeID: 55}
+	got, err := m.PublicEndpoint(t.Context(), 51820)
+	if err != nil {
+		t.Fatalf("PublicEndpoint: %v", err)
+	}
+	if got != "172.234.203.50:51820" {
+		t.Errorf("endpoint = %q, want %q", got, "172.234.203.50:51820")
 	}
 }
 

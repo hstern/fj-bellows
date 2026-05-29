@@ -54,6 +54,41 @@ func TestBoot_RejectsMissingForgejoURL(t *testing.T) {
 	}
 }
 
+// FJB-99 Phase B: when transport.wg.peer.{public_key,endpoint} are
+// empty in config (the new bootstrap-loop default) and the caller
+// hasn't supplied CachePubkey/CacheEndpoint overrides either,
+// Boot must surface a clear error pointing at the bootstrap loop.
+func TestBoot_RejectsMissingPeerWithoutOverrides(t *testing.T) {
+	cfg := Config{
+		Transport: config.Transport{
+			Mode: config.TransportCacheGateway,
+			WG: &config.WG{
+				PrivateKeyFile: "/tmp/k-fjb99-missing-peer",
+				LocalAddr:      "100.64.0.1/32",
+				OverlayPrefix:  "100.64.0.0/30",
+				Peer: config.WGPeer{
+					// PublicKey + Endpoint deliberately empty.
+					AllowedIPs: []string{"100.64.0.2/32"},
+				},
+			},
+		},
+		ForgejoURL: "https://git.example.com",
+		Cache: CacheRenderInputs{
+			CacheVPCIP:      "10.0.0.2",
+			WorkerVPCSubnet: "10.0.0.0/24",
+		},
+	}
+	_, err := Boot(t.Context(), cfg)
+	if err == nil {
+		t.Fatal("Boot(no peer + no override) should error; got nil")
+	}
+	for _, want := range []string{"FJB-99 bootstrap"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want substring %q", err, want)
+		}
+	}
+}
+
 func TestBoot_RejectsMissingCacheVPCIP(t *testing.T) {
 	cfg := Config{
 		Transport: config.Transport{

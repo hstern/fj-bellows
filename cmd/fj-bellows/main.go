@@ -513,12 +513,23 @@ func bootWGStack(ctx context.Context, cfg *config.Config, prov provider.Provider
 		return nil, func() {}, nil
 	}
 	cache := cacheRenderInputs(ctx, cfg, prov)
+	// Only run the FJB-99 bootstrap poll when the operator hasn't
+	// statically configured a peer. Skipping the 3-minute poll under
+	// static config keeps daemon startup fast and matches the
+	// back-compat path the FJB-91 e2e harness exercises against the
+	// persistent test cache.
+	var cachePubkey, cacheEndpoint string
+	if cfg.Transport.WG != nil && (cfg.Transport.WG.Peer.PublicKey == "" || cfg.Transport.WG.Peer.Endpoint == "") {
+		cachePubkey, cacheEndpoint = discoverCachePeer(ctx, prov, log)
+	}
 	stack, err := wgboot.Boot(ctx, wgboot.Config{
-		Transport:  cfg.Transport,
-		ForgejoURL: cfg.Forgejo.URL,
-		ACLSink:    aclSinkFor(prov),
-		Cache:      cache,
-		Logger:     log,
+		Transport:     cfg.Transport,
+		ForgejoURL:    cfg.Forgejo.URL,
+		ACLSink:       aclSinkFor(prov),
+		Cache:         cache,
+		Logger:        log,
+		CachePubkey:   cachePubkey,
+		CacheEndpoint: cacheEndpoint,
 	})
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("transport bootstrap: %w", err)
@@ -528,6 +539,44 @@ func bootWGStack(ctx context.Context, cfg *config.Config, prov provider.Provider
 			log.Warn("wgboot: shutdown", "err", cerr)
 		}
 	}, nil
+}
+
+// discoverCachePeer runs the orchestrator side of the FJB-99 bootstrap
+// loop: poll the managed cache's Object Storage bucket for the cache's
+// WG pubkey (published by cache cloud-init's fjb-wg-bootstrap.sh) and
+// read the cache's public IPv4 from the Linode API to build the WG
+// peer endpoint. Returns empty strings (no error) when the provider
+// can't supply these — wgboot then falls back to the static
+// transport.wg.peer.{public_key,endpoint} config knobs and errors at
+// boot if those are also empty.
+//
+// Bounded at 3 minutes — the cache cloud-init steady-state (package
+// install + wireguard + pubkey upload) typically completes well under
+// 2 minutes, so the bound is generous but not unbounded.
+func discoverCachePeer(ctx context.Context, prov provider.Provider, log *slog.Logger) (pubkey, endpoint string) {
+	type pubkeyWaiter interface {
+		WaitForCacheWGPubkey(ctx context.Context, timeout time.Duration) (string, error)
+	}
+	type endpointReader interface {
+		CachePublicEndpoint(ctx context.Context) (string, error)
+	}
+	if pw, ok := prov.(pubkeyWaiter); ok {
+		start := time.Now()
+		if pk, err := pw.WaitForCacheWGPubkey(ctx, 3*time.Minute); err == nil {
+			log.Info("wgboot: cache wg-pubkey discovered", "elapsed", time.Since(start))
+			pubkey = pk
+		} else {
+			log.Warn("wgboot: cache wg-pubkey discovery failed; falling back to static config", "err", err)
+		}
+	}
+	if er, ok := prov.(endpointReader); ok {
+		if ep, err := er.CachePublicEndpoint(ctx); err == nil {
+			endpoint = ep
+		} else {
+			log.Warn("wgboot: cache public endpoint discovery failed; falling back to static config", "err", err)
+		}
+	}
+	return pubkey, endpoint
 }
 
 // cacheRenderInputs pulls the cache-side facts the renderer needs out

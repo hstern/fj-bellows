@@ -7,13 +7,16 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/linode/linodego"
 
@@ -452,6 +455,123 @@ func (m *managedCache) renderIPTablesForCacheGateway() (string, error) {
 		WorkerVPCSubnet:    m.workerVPCSubnet,
 		OrchestratorWGAddr: orchAddr,
 	})
+}
+
+// WaitForWGPubkey blocks until the cache's first-boot cloud-init has
+// published its WG public key to the Object Storage bucket, or until
+// ctx is canceled / timeout elapses (whichever comes first). Returns
+// the trimmed public-key string ready to feed into wgboot.Config.
+// FJB-99 Phase B — completes the bootstrap loop that Phase A started
+// from the cache side.
+//
+// The cache writes the object as `wg-pubkey.txt` with `--acl
+// public-read`, so the orchestrator reaches it via plain HTTPS GET —
+// no S3 SDK required, no signed requests. WG public keys are designed
+// to be world-readable; the threat model isn't worse than what's
+// already on the wire during a key exchange.
+//
+// Polls at 5s intervals with exponential backoff up to 30s. First
+// boot typically takes 60-120s (cloud-init + package install +
+// wireguard install).
+func (m *managedCache) WaitForWGPubkey(ctx context.Context, timeout time.Duration) (string, error) {
+	if m.bucket == nil {
+		return "", errors.New("cache: bucket not initialised (no managed cache)")
+	}
+	if m.bucket.endpoint == "" {
+		return "", errors.New("cache: bucket endpoint unset (call Configure first)")
+	}
+	url := fmt.Sprintf("%s/%s/wg-pubkey.txt", strings.TrimRight(m.bucket.endpoint, "/"), m.bucket.label)
+	deadline := time.Now().Add(timeout)
+	delay := 5 * time.Second
+	const maxDelay = 30 * time.Second
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	for {
+		pub, ready, err := pollWGPubkey(ctx, httpClient, url, m.log)
+		if err != nil {
+			return "", err
+		}
+		if ready {
+			return pub, nil
+		}
+		if time.Now().Add(delay).After(deadline) {
+			return "", fmt.Errorf("cache wg-pubkey poll: timed out after %s waiting for %s", timeout, url)
+		}
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("cache wg-pubkey poll: %w", ctx.Err())
+		case <-time.After(delay):
+		}
+		if delay < maxDelay {
+			delay *= 2
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+		}
+	}
+}
+
+// pollWGPubkey does one HTTPS GET against the bucket URL. Returns
+// (key, true, nil) on 200-with-non-empty-body; (_, false, nil) when the
+// object isn't there yet (404 / connection error — debug-logged for
+// the operator); (_, _, err) when the response is structurally bad
+// (200 with empty body, read failure, request build failure).
+func pollWGPubkey(ctx context.Context, httpClient *http.Client, url string, log *slog.Logger) (string, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", false, fmt.Errorf("cache wg-pubkey poll: build request: %w", err)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.Debug("cache wg-pubkey poll: request error", "url", url, "err", err)
+		return "", false, nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		log.Debug("cache wg-pubkey poll: not ready", "url", url, "status", resp.StatusCode)
+		return "", false, nil
+	}
+	body, rerr := io.ReadAll(resp.Body)
+	if rerr != nil {
+		return "", false, fmt.Errorf("cache wg-pubkey poll: read body: %w", rerr)
+	}
+	pub := strings.TrimSpace(string(body))
+	if pub == "" {
+		return "", false, errors.New("cache wg-pubkey poll: 200 OK but body was empty")
+	}
+	return pub, true, nil
+}
+
+// PublicEndpoint returns the cache's WG peer endpoint as host:port
+// (e.g. "172.234.203.50:51820"). The IP comes from the Linode API
+// (the public NIC's assigned IPv4); the port is supplied by the
+// caller — typically transport.wg.listen_port from config or the
+// default 51820 baked into the cache cloud-init. FJB-99 Phase B.
+func (m *managedCache) PublicEndpoint(ctx context.Context, port int) (string, error) {
+	if m.linodeID == 0 {
+		return "", errors.New("cache: linode not provisioned yet")
+	}
+	if port <= 0 {
+		port = defaultCacheWGListenPort
+	}
+	inst, err := m.client.GetInstance(ctx, m.linodeID)
+	if err != nil {
+		return "", fmt.Errorf("cache public endpoint: get instance %d: %w", m.linodeID, err)
+	}
+	for _, ip := range inst.IPv4 {
+		if ip == nil {
+			continue
+		}
+		v4 := ip.To4()
+		if v4 == nil {
+			continue
+		}
+		// Skip the VPC interface IP (RFC1918) — pick the public IPv4.
+		if v4.IsPrivate() {
+			continue
+		}
+		return fmt.Sprintf("%s:%d", v4.String(), port), nil
+	}
+	return "", fmt.Errorf("cache public endpoint: linode %d has no public IPv4 yet", m.linodeID)
 }
 
 // buildCreateOpts assembles the InstanceCreateOptions payload for the
